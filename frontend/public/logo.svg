@@ -1,0 +1,19 @@
+<svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background rounded square -->
+  <rect width="40" height="40" rx="10" fill="url(#gradient)"/>
+
+  <!-- T letter stylized as chart/analytics -->
+  <path d="M10 12H30V16H22V30H18V16H10V12Z" fill="white"/>
+
+  <!-- Small chart bars accent -->
+  <rect x="26" y="22" width="4" height="8" rx="1" fill="white" opacity="0.7"/>
+  <rect x="26" y="26" width="4" height="4" rx="1" fill="white"/>
+
+  <!-- Gradient definition -->
+  <defs>
+    <linearGradient id="gradient" x1="0" y1="0" x2="40" y2="40" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3B82F6"/>
+      <stop offset="1" stop-color="#1D4ED8"/>
+    </linearGradient>
+  </defs>
+</svg>
