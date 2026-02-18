@@ -154,8 +154,8 @@ indus-techginia/
 ### 1. Clone the Repository
 
 ```bash
-git clone <your-repo-url>
-cd indus-techginia
+git clone https://github.com/Bhumika-Indas/ASG-Mantra.git
+cd ASG-Mantra
 ```
 
 ### 2. Setup Frontend

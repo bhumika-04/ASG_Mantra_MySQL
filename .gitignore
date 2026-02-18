@@ -54,6 +54,7 @@ frontend/.yarn/*
 # ===========================
 .DS_Store
 Thumbs.db
+*.bak
 *.pem
 .vercel
 *.tsbuildinfo
