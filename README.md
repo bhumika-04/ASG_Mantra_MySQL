@@ -417,28 +417,31 @@ Frontend uses `ProtectedRoute` component to guard dashboard pages. Backend uses 
 
 ## 🚢 Deployment
 
+### Live URLs
+
+| Service | URL |
+|---------|-----|
+| **Frontend** | https://asg-mantra.vercel.app |
+| **Backend API** | https://asgmantra.indusanalytics.co.in |
+| **API Docs** | https://asgmantra.indusanalytics.co.in/api/docs |
+
 ### Frontend (Vercel)
 
-```bash
-cd frontend
-vercel deploy
+Deployed via Vercel — connected to GitHub repo (`Bhumika-Indas/ASG-Mantra`), root directory `frontend`.
+
+Environment variable set in Vercel dashboard:
+- `NEXT_PUBLIC_API_URL=https://asgmantra.indusanalytics.co.in`
+
+Auto-deploys on every push to `main`.
+
+### Backend
+
+Hosted at `https://asgmantra.indusanalytics.co.in` (IndusAnalytics server).
+
+Backend `.env` must include the Vercel frontend in CORS:
+```env
+ALLOWED_ORIGINS=http://localhost:3000,https://asg-mantra.vercel.app
 ```
-
-Environment variables to set:
-- `NEXT_PUBLIC_API_URL=https://your-backend.azurewebsites.net`
-
-### Backend (Azure App Service)
-
-```bash
-cd backend
-az webapp up --name techgenia-api --resource-group your-rg --runtime "PYTHON:3.9"
-```
-
-Set environment variables in Azure Portal (App Configuration).
-
-### Database (Azure SQL)
-
-Use `database/schema-updated.sql` to create schema in Azure SQL Database.
 
 ---
 
