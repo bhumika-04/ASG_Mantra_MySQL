@@ -196,7 +196,7 @@ export default function BlinkitPOPage() {
         <span
           className="font-medium text-sm leading-snug"
           style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
-          title={row.product_name}
+          title={row.product_name ?? undefined}
         >
           {row.product_name || '—'}
         </span>

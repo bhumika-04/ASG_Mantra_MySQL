@@ -109,7 +109,7 @@ export default function BlinkitInventoryPage() {
         <span
           className="font-medium text-sm leading-snug"
           style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
-          title={row.itemName}
+          title={row.itemName ?? undefined}
         >
           {row.itemName || '—'}
         </span>

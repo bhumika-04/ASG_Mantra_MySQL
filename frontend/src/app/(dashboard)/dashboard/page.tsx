@@ -230,7 +230,7 @@ export default function DashboardPage() {
         <span
           className="font-medium text-sm leading-snug"
           style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
-          title={row.productName}
+          title={row.productName ?? undefined}
         >
           {row.productName || '—'}
         </span>

@@ -182,7 +182,7 @@ export default function SalesOverviewPage() {
       <span
         className="font-medium text-sm leading-snug"
         style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
-        title={row.name}
+        title={row.name ?? undefined}
       >
         {row.name || '—'}
       </span>
