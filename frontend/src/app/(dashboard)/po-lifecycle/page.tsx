@@ -56,29 +56,44 @@ export default function POLifecyclePage() {
       try {
         setIsLoading(true);
 
-        // Fetch all purchase orders
-        const response = await api.purchaseOrders.getAll() as any;
+        // Fetch from both Amazon and Blinkit PO tables (the real data sources)
+        const [amazonRes, blinkitRes] = await Promise.all([
+          api.purchaseOrders.getAmazon({ page_size: 200 }) as any,
+          api.purchaseOrders.getBlinkit({ page_size: 200 }) as any,
+        ]);
 
-        // Transform purchase orders to match our interface
-        const transformedOrders = (response.items || []).map((po: any) => {
+        const toRow = (po: any, channel: string) => {
           const rawStatus = po.status || 'Created';
           return {
             id: po.id,
             po_number: po.po_number,
-            channel: po.channel,
-            quantity: po.quantity,
+            channel,
+            quantity: po.quantity || 0,
             dispatchDate: po.order_date ? new Date(po.order_date).toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }) : '-',
             expectedDate: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }) : '-',
             expectedDateRaw: po.expected_delivery_date || null,
             orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
-            hub: po.hub || (po.warehouse_id ? `Warehouse ${po.warehouse_id}` : '-'),
+            hub: '-',
             courier: po.courier || '-',
-            tat: po.tat != null ? `${po.tat}d` : '-',
+            tat: '-',
             status: isDelayed(po.expected_delivery_date, rawStatus) ? 'Delayed' : rawStatus,
           };
+        };
+
+        // Deduplicate by po_number — one row per PO, summing quantities
+        const poMap = new Map<string, PurchaseOrder>();
+        (amazonRes.items || []).forEach((po: any) => {
+          const key = po.po_number;
+          if (!poMap.has(key)) poMap.set(key, toRow(po, 'Amazon'));
+          else poMap.get(key)!.quantity += po.quantity || 0;
+        });
+        (blinkitRes.items || []).forEach((po: any) => {
+          const key = po.po_number;
+          if (!poMap.has(key)) poMap.set(key, toRow(po, 'Blinkit'));
+          else poMap.get(key)!.quantity += po.quantity || 0;
         });
 
-        setAllOrders(transformedOrders);
+        setAllOrders(Array.from(poMap.values()));
       } catch (error) {
         console.error('Error fetching purchase orders:', error);
       } finally {

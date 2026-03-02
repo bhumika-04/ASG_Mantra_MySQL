@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import {
   Upload, Package, Database, Plus, FileText,
-  CheckCircle, XCircle, AlertCircle, Download, Eye, RefreshCw,
+  CheckCircle, XCircle, AlertCircle, Download, Eye, RefreshCw, Link2,
 } from 'lucide-react';
 import api from '@/lib/api';
 import { toast } from 'sonner';
@@ -64,6 +64,35 @@ export default function ProductMasterPage() {
     unitWeight: '',
     packSize: '',
   });
+
+  // Link Blinkit state
+  const [linkingId, setLinkingId] = useState<number | null>(null); // unlinked product id being linked
+  const [linkSearch, setLinkSearch] = useState('');
+  const [isLinking, setIsLinking] = useState(false);
+
+  const handleLinkBlinkit = async (unlinkedProduct: any) => {
+    const target = products.find(
+      (p) => !p.asgSku?.startsWith('UNLINKED-') &&
+        (p.asgSku?.toLowerCase() === linkSearch.trim().toLowerCase() ||
+          p.productName?.toLowerCase() === linkSearch.trim().toLowerCase())
+    );
+    if (!target) {
+      toast.error('Product not found. Enter exact ASG SKU or Product Name.');
+      return;
+    }
+    try {
+      setIsLinking(true);
+      await api.products.linkBlinkit(unlinkedProduct.blinkitId, target.id);
+      toast.success(`Blinkit ID ${unlinkedProduct.blinkitId} linked to ${target.productName}`);
+      setLinkingId(null);
+      setLinkSearch('');
+      fetchProducts();
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to link product');
+    } finally {
+      setIsLinking(false);
+    }
+  };
 
   // Upload flow state
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -747,20 +776,57 @@ export default function ProductMasterPage() {
                           </div>
                         ) : (
                           <div className="divide-y">
-                            {products.map((product) => (
-                              <div
-                                key={product.id}
-                                className="px-4 py-3 hover:bg-muted/50 transition-colors"
-                              >
-                                <p className="font-medium text-sm truncate">{product.productName}</p>
-                                <div className="flex items-center gap-3 mt-1">
-                                  <span className="text-xs text-muted-foreground font-mono truncate">SKU: {product.asgSku}</span>
-                                  {product.amazonId && (
-                                    <span className="text-xs text-muted-foreground font-mono shrink-0">ASIN: {product.amazonId}</span>
+                            {products.map((product) => {
+                              const isUnlinked = product.asgSku?.startsWith('UNLINKED-BLNK-');
+                              return (
+                                <div
+                                  key={product.id}
+                                  className={`px-4 py-3 transition-colors ${isUnlinked ? 'bg-orange-50 border-l-4 border-orange-400' : 'hover:bg-muted/50'}`}
+                                >
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <p className="font-medium text-sm truncate">{product.productName}</p>
+                                      <div className="flex items-center gap-3 mt-1 flex-wrap">
+                                        <span className="text-xs text-muted-foreground font-mono">SKU: {product.asgSku}</span>
+                                        {product.amazonId && (
+                                          <span className="text-xs text-muted-foreground font-mono">ASIN: {product.amazonId}</span>
+                                        )}
+                                        {product.blinkitId && (
+                                          <span className="text-xs text-muted-foreground font-mono">Blinkit: {product.blinkitId}</span>
+                                        )}
+                                      </div>
+                                    </div>
+                                    {isUnlinked && (
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="shrink-0 text-orange-600 border-orange-300 hover:bg-orange-50"
+                                        onClick={() => { setLinkingId(product.id); setLinkSearch(''); }}
+                                      >
+                                        <Link2 className="h-3 w-3 mr-1" />Link
+                                      </Button>
+                                    )}
+                                  </div>
+                                  {isUnlinked && linkingId === product.id && (
+                                    <div className="mt-2 flex gap-2 items-center">
+                                      <Input
+                                        className="h-7 text-xs"
+                                        placeholder="Enter ASG SKU or Product Name to link to..."
+                                        value={linkSearch}
+                                        onChange={(e) => setLinkSearch(e.target.value)}
+                                        onKeyDown={(e) => e.key === 'Enter' && handleLinkBlinkit(product)}
+                                      />
+                                      <Button size="sm" className="h-7 text-xs" disabled={isLinking || !linkSearch}
+                                        onClick={() => handleLinkBlinkit(product)}>
+                                        {isLinking ? 'Linking...' : 'Confirm'}
+                                      </Button>
+                                      <Button size="sm" variant="ghost" className="h-7 text-xs"
+                                        onClick={() => setLinkingId(null)}>Cancel</Button>
+                                    </div>
                                   )}
                                 </div>
-                              </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         )}
                       </div>

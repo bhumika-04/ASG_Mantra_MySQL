@@ -24,7 +24,7 @@ from app.models.distributor import Distributor
 from app.models.inventory import Inventory
 from app.utils.dependencies import get_current_user
 from app.schemas.blinkit_po import POConfirmRequest
-from app.routers.uploads import find_or_create_product, find_or_create_warehouse
+from app.routers.uploads import find_or_create_product, find_or_create_warehouse, _normalize
 from app.utils.audit import log_audit, log_upload
 
 
@@ -210,18 +210,35 @@ def _parse_date(val) -> date:
 
 def _ensure_product_blinkit(db: Session, item_id: int, item_name: str, category: str, seen: set) -> bool:
     """Auto-create a Product record for an unknown Blinkit item_id.
-    Uses placeholder AsgSku = 'UNLINKED-BLNK-{item_id}' so user can fill in the real SKU later.
-    Returns True if a new product was created, False if it already existed.
+    First tries to match by BlinkitId, then by normalized product name.
+    Only creates a new UNLINKED-BLNK placeholder if no match is found at all.
+    Returns True if a new product was created, False if it already existed or was linked.
     """
     key = str(item_id)
     if key in seen:
         return False
     seen.add(key)
+
+    # Already linked by BlinkitId
     if db.query(Product).filter(Product.BlinkitId == key).first():
         return False
+
+    # Placeholder already exists
     placeholder = f"UNLINKED-BLNK-{item_id}"[:50]
     if db.query(Product).filter(Product.AsgSku == placeholder).first():
         return False
+
+    # Try normalized name match against existing products (that have no BlinkitId yet)
+    if item_name:
+        norm = _normalize(item_name)
+        if norm:
+            for p in db.query(Product).filter(Product.BlinkitId.is_(None)).all():
+                if _normalize(p.ProductName) == norm:
+                    p.BlinkitId = key
+                    if category and not p.Category:
+                        p.Category = category[:100]
+                    return False  # linked to existing product, not a new creation
+
     db.add(Product(
         ProductName=(item_name or str(item_id))[:255],
         AsgSku=placeholder,

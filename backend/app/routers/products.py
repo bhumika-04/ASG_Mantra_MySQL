@@ -309,6 +309,64 @@ async def delete_product(
         raise HTTPException(status_code=500, detail=f"Failed to delete product: {str(e)}")
 
 
+@router.post("/link-blinkit")
+async def link_blinkit_product(
+    data: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Link a Blinkit item_id to an existing ASG product.
+    - Finds the UNLINKED-BLNK-{blinkit_id} placeholder product
+    - Sets BlinkitId on the target (real) ASG product
+    - Migrates all BlinkitSales / BlinkitInventory rows to the target product
+    - Deactivates the placeholder
+    Admin/Manager only.
+    """
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    blinkit_id = str(data.get("blinkit_id", "")).strip()
+    target_product_id = data.get("target_product_id")
+
+    if not blinkit_id or not target_product_id:
+        raise HTTPException(status_code=400, detail="blinkit_id and target_product_id are required")
+
+    target = db.query(Product).filter(Product.Id == target_product_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target product not found")
+
+    placeholder_sku = f"UNLINKED-BLNK-{blinkit_id}"[:50]
+    placeholder = db.query(Product).filter(Product.AsgSku == placeholder_sku).first()
+
+    try:
+        # Set BlinkitId on the real product
+        target.BlinkitId = blinkit_id
+
+        if placeholder and placeholder.Id != target.Id:
+            # Migrate BlinkitSales rows
+            from app.models.blinkit_sales import BlinkitSalesData
+            from app.models.blinkit_inventory import BlinkitInventoryData
+            db.query(BlinkitSalesData).filter(
+                BlinkitSalesData.ProductId == placeholder.Id
+            ).update({"ProductId": target.Id})
+            db.query(BlinkitInventoryData).filter(
+                BlinkitInventoryData.ProductId == placeholder.Id
+            ).update({"ProductId": target.Id})
+            # Deactivate placeholder
+            placeholder.IsActive = False
+
+        db.commit()
+        return {
+            "success": True,
+            "message": f"Blinkit ID {blinkit_id} linked to {target.ProductName}",
+            "target_sku": target.AsgSku,
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/upload")
 async def upload_products(
     file: UploadFile = File(...),

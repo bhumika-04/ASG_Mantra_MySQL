@@ -236,6 +236,11 @@ export const api = {
       }),
     delete: (id: number) =>
       apiFetch(`/api/products/${id}`, { method: 'DELETE' }),
+    linkBlinkit: (blinkitId: string, targetProductId: number) =>
+      apiFetch('/api/products/link-blinkit', {
+        method: 'POST',
+        body: JSON.stringify({ blinkit_id: blinkitId, target_product_id: targetProductId }),
+      }),
   },
 
   // Warehouse endpoints
