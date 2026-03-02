@@ -66,18 +66,27 @@ export default function ProductMasterPage() {
   });
 
   // Link Blinkit state
-  const [linkingId, setLinkingId] = useState<number | null>(null); // unlinked product id being linked
+  const [linkingId, setLinkingId] = useState<number | null>(null);
   const [linkSearch, setLinkSearch] = useState('');
+  const [linkTargetId, setLinkTargetId] = useState<number | null>(null);
   const [isLinking, setIsLinking] = useState(false);
 
+  // ASG products (non-UNLINKED) for the dropdown
+  const asgProducts = products.filter((p) => !p.asgSku?.startsWith('UNLINKED-'));
+  const filteredAsgProducts = asgProducts.filter((p) =>
+    !linkSearch ||
+    p.asgSku?.toLowerCase().includes(linkSearch.toLowerCase()) ||
+    p.productName?.toLowerCase().includes(linkSearch.toLowerCase())
+  );
+
   const handleLinkBlinkit = async (unlinkedProduct: any) => {
-    const target = products.find(
-      (p) => !p.asgSku?.startsWith('UNLINKED-') &&
-        (p.asgSku?.toLowerCase() === linkSearch.trim().toLowerCase() ||
-          p.productName?.toLowerCase() === linkSearch.trim().toLowerCase())
-    );
+    if (!linkTargetId) {
+      toast.error('Please select an ASG product to link to.');
+      return;
+    }
+    const target = products.find((p) => p.id === linkTargetId);
     if (!target) {
-      toast.error('Product not found. Enter exact ASG SKU or Product Name.');
+      toast.error('Selected product not found.');
       return;
     }
     try {
@@ -86,6 +95,7 @@ export default function ProductMasterPage() {
       toast.success(`Blinkit ID ${unlinkedProduct.blinkitId} linked to ${target.productName}`);
       setLinkingId(null);
       setLinkSearch('');
+      setLinkTargetId(null);
       fetchProducts();
     } catch (error: any) {
       toast.error(error.message || 'Failed to link product');
@@ -808,20 +818,44 @@ export default function ProductMasterPage() {
                                     )}
                                   </div>
                                   {isUnlinked && linkingId === product.id && (
-                                    <div className="mt-2 flex gap-2 items-center">
+                                    <div className="mt-2 space-y-2">
+                                      <p className="text-xs text-orange-700 font-medium">
+                                        Blinkit: <span className="font-mono">{product.blinkitId}</span> — "{product.productName}"
+                                      </p>
                                       <Input
                                         className="h-7 text-xs"
-                                        placeholder="Enter ASG SKU or Product Name to link to..."
+                                        placeholder="Search ASG SKU or product name..."
                                         value={linkSearch}
-                                        onChange={(e) => setLinkSearch(e.target.value)}
-                                        onKeyDown={(e) => e.key === 'Enter' && handleLinkBlinkit(product)}
+                                        onChange={(e) => { setLinkSearch(e.target.value); setLinkTargetId(null); }}
+                                        autoFocus
                                       />
-                                      <Button size="sm" className="h-7 text-xs" disabled={isLinking || !linkSearch}
-                                        onClick={() => handleLinkBlinkit(product)}>
-                                        {isLinking ? 'Linking...' : 'Confirm'}
-                                      </Button>
-                                      <Button size="sm" variant="ghost" className="h-7 text-xs"
-                                        onClick={() => setLinkingId(null)}>Cancel</Button>
+                                      {linkSearch && filteredAsgProducts.length > 0 && (
+                                        <div className="border rounded max-h-36 overflow-y-auto bg-white shadow text-xs">
+                                          {filteredAsgProducts.map((p) => (
+                                            <div
+                                              key={p.id}
+                                              className={`px-3 py-2 cursor-pointer hover:bg-blue-50 ${linkTargetId === p.id ? 'bg-blue-100 font-semibold' : ''}`}
+                                              onClick={() => { setLinkTargetId(p.id); setLinkSearch(p.asgSku); }}
+                                            >
+                                              <span className="font-mono text-blue-700">{p.asgSku}</span>
+                                              <span className="text-muted-foreground ml-2">{p.productName}</span>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {linkSearch && filteredAsgProducts.length === 0 && (
+                                        <p className="text-xs text-muted-foreground">No matching ASG products found.</p>
+                                      )}
+                                      <div className="flex gap-2">
+                                        <Button size="sm" className="h-7 text-xs" disabled={isLinking || !linkTargetId}
+                                          onClick={() => handleLinkBlinkit(product)}>
+                                          {isLinking ? 'Linking...' : 'Confirm Link'}
+                                        </Button>
+                                        <Button size="sm" variant="ghost" className="h-7 text-xs"
+                                          onClick={() => { setLinkingId(null); setLinkSearch(''); setLinkTargetId(null); }}>
+                                          Cancel
+                                        </Button>
+                                      </div>
                                     </div>
                                   )}
                                 </div>
