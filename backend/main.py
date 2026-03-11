@@ -13,7 +13,7 @@ import logging
 
 from app.config import settings
 from app.database import test_connection, init_db
-from app.routers import auth, dashboard, inventory, sales, purchase_orders, products, warehouses, users, uploads, notifications, alerts, roles
+from app.routers import auth, dashboard, inventory, purchase_orders, products, warehouses, users, uploads, notifications, alerts, roles
 from app.routers import amazon_data, blinkit_data, distributors, audit_logs, upload_logs
 
 # Configure logging
@@ -171,9 +171,6 @@ app.include_router(dashboard.router, prefix="/api/dashboard", tags=["Dashboard"]
 
 # Inventory
 app.include_router(inventory.router, prefix="/api/inventory", tags=["Inventory"])
-
-# Sales
-app.include_router(sales.router, prefix="/api/sales", tags=["Sales"])
 
 # Purchase Orders
 app.include_router(

@@ -165,7 +165,7 @@ export default function HomePage() {
                     <Input
                       id="email"
                       type="email"
-                      placeholder="admin@techgenia.com"
+                      placeholder="admin@techginia.com"
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
                       className="pl-10"
@@ -239,7 +239,7 @@ export default function HomePage() {
                     variant="outline"
                     className="w-full"
                     onClick={() => {
-                      setEmail('admin@techgenia.com');
+                      setEmail('admin@techginia.com');
                       setPassword('Admin@123');
                     }}
                     disabled={isLoggingIn}

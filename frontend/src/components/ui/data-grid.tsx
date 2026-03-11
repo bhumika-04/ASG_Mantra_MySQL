@@ -12,6 +12,8 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronsUpDown,
+  BookmarkCheck,
+  RotateCcw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -34,6 +36,7 @@ export interface GridColumn<T> {
   width?: number;
   minWidth?: number;
   align?: 'left' | 'center' | 'right';
+  sticky?: boolean;
 }
 
 interface DataGridProps<T> {
@@ -55,6 +58,8 @@ interface ViewOptionsButtonProps {
   onToggleColumn: (columnId: string) => void;
   rowDensity: RowDensity;
   onDensityChange: (density: RowDensity) => void;
+  onSave?: () => void;
+  onReset?: () => void;
 }
 
 export function ViewOptionsButton({
@@ -63,9 +68,20 @@ export function ViewOptionsButton({
   onToggleColumn,
   rowDensity,
   onDensityChange,
+  onSave,
+  onReset,
 }: ViewOptionsButtonProps) {
+  const [open, setOpen] = React.useState(false);
+  const [saved, setSaved] = React.useState(false);
+
+  const handleSave = () => {
+    onSave?.();
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
   return (
-    <DropdownMenu>
+    <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
         <Button variant="outline" size="sm" className="h-9 gap-2">
           <Settings2 className="h-4 w-4" />
@@ -81,6 +97,7 @@ export function ViewOptionsButton({
               key={column.id}
               checked={visibleColumns.has(column.id)}
               onCheckedChange={() => onToggleColumn(column.id)}
+              onSelect={(e) => e.preventDefault()}
             >
               <div className="flex items-center gap-2">
                 {visibleColumns.has(column.id) ? (
@@ -95,50 +112,130 @@ export function ViewOptionsButton({
         </div>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Row Density</DropdownMenuLabel>
-        <DropdownMenuItem onClick={() => onDensityChange('compact')}>
+        <DropdownMenuItem onSelect={(e) => e.preventDefault()} onClick={() => onDensityChange('compact')}>
           <Checkbox checked={rowDensity === 'compact'} className="mr-2" />
           Compact
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onDensityChange('normal')}>
+        <DropdownMenuItem onSelect={(e) => e.preventDefault()} onClick={() => onDensityChange('normal')}>
           <Checkbox checked={rowDensity === 'normal'} className="mr-2" />
           Normal
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onDensityChange('comfortable')}>
+        <DropdownMenuItem onSelect={(e) => e.preventDefault()} onClick={() => onDensityChange('comfortable')}>
           <Checkbox checked={rowDensity === 'comfortable'} className="mr-2" />
           Comfortable
         </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <div className="flex flex-col gap-1.5 px-2 py-2">
+          {onSave && (
+            <Button
+              size="sm"
+              variant="default"
+              className="w-full h-8 text-xs gap-1.5"
+              onClick={handleSave}
+            >
+              <BookmarkCheck className="h-3.5 w-3.5" />
+              {saved ? 'Saved!' : 'Save as Default'}
+            </Button>
+          )}
+          <div className="flex gap-1.5">
+            {onReset && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="flex-1 h-8 text-xs gap-1.5 text-gray-500"
+                onClick={onReset}
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Reset
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              className="flex-1 h-8 text-xs"
+              onClick={() => setOpen(false)}
+            >
+              Done
+            </Button>
+          </div>
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   );
 }
 
-// Custom Hook to manage grid state
-export function useDataGrid<T>(initialColumns: GridColumn<T>[]) {
+// Custom Hook to manage grid state with optional localStorage view persistence
+export function useDataGrid<T>(initialColumns: GridColumn<T>[], viewId?: string) {
+  const storageKey = viewId ? `techgenia-grid-${viewId}` : null;
+
+  const loadSavedView = () => {
+    if (!storageKey || typeof window === 'undefined') return null;
+    try { return JSON.parse(localStorage.getItem(storageKey) || 'null'); } catch { return null; }
+  };
+
+  const saveView = React.useCallback((cols: Set<string>, density: RowDensity) => {
+    if (!storageKey || typeof window === 'undefined') return;
+    try {
+      localStorage.setItem(storageKey, JSON.stringify({ visibleColumns: Array.from(cols), rowDensity: density }));
+    } catch {}
+  }, [storageKey]);
+
   const [columns, setColumns] = React.useState(initialColumns);
   const [columnWidths, setColumnWidths] = React.useState<Record<string, number>>(() => {
     const widths: Record<string, number> = {};
-    initialColumns.forEach((col) => {
-      widths[col.id] = col.width || 150;
-    });
+    initialColumns.forEach((col) => { widths[col.id] = col.width || col.minWidth || 100; });
     return widths;
   });
-  const [visibleColumns, setVisibleColumns] = React.useState<Set<string>>(
-    new Set(initialColumns.map((col) => col.id))
-  );
+
+  const allColumnIds = React.useMemo(() => new Set(initialColumns.map((col) => col.id)), []);
+
+  const [visibleColumns, setVisibleColumns] = React.useState<Set<string>>(() => {
+    const saved = loadSavedView();
+    if (saved?.visibleColumns) {
+      // Only keep IDs that exist in current columns (handles schema changes)
+      return new Set((saved.visibleColumns as string[]).filter((id) => allColumnIds.has(id)));
+    }
+    return new Set(initialColumns.map((col) => col.id));
+  });
+
   const [sortColumn, setSortColumn] = React.useState<string | null>(null);
   const [sortDirection, setSortDirection] = React.useState<SortDirection>(null);
-  const [rowDensity, setRowDensity] = React.useState<RowDensity>('compact');
+
+  const [rowDensity, setRowDensityState] = React.useState<RowDensity>(() => {
+    const saved = loadSavedView();
+    return saved?.rowDensity || 'compact';
+  });
+
   const [draggedColumn, setDraggedColumn] = React.useState<string | null>(null);
 
   const toggleColumnVisibility = (columnId: string) => {
     const newVisible = new Set(visibleColumns);
-    if (newVisible.has(columnId)) {
-      newVisible.delete(columnId);
-    } else {
-      newVisible.add(columnId);
-    }
+    if (newVisible.has(columnId)) { newVisible.delete(columnId); } else { newVisible.add(columnId); }
     setVisibleColumns(newVisible);
   };
+
+  const setColumnVisible = (columnId: string, visible: boolean) => {
+    setVisibleColumns(prev => {
+      const next = new Set(prev);
+      if (visible) next.add(columnId); else next.delete(columnId);
+      return next;
+    });
+  };
+
+  const setRowDensity = (density: RowDensity) => {
+    setRowDensityState(density);
+  };
+
+  const saveCurrentView = React.useCallback(() => {
+    saveView(visibleColumns, rowDensity);
+  }, [saveView, visibleColumns, rowDensity]);
+
+  const resetView = React.useCallback(() => {
+    if (!storageKey || typeof window === 'undefined') return;
+    try { localStorage.removeItem(storageKey); } catch {}
+    setVisibleColumns(new Set(initialColumns.map((col) => col.id)));
+    setRowDensityState('compact');
+  }, [storageKey, initialColumns]);
 
   return {
     columns,
@@ -155,6 +252,9 @@ export function useDataGrid<T>(initialColumns: GridColumn<T>[]) {
     setRowDensity,
     draggedColumn,
     setDraggedColumn,
+    saveCurrentView,
+    resetView,
+    setColumnVisible,
   };
 }
 
@@ -181,8 +281,6 @@ export function DataGrid<T extends Record<string, any>>({
     draggedColumn,
     setDraggedColumn,
   } = gridState;
-
-  const [resizingColumn, setResizingColumn] = React.useState<string | null>(null);
 
   // Sort data
   const sortedData = React.useMemo(() => {
@@ -270,7 +368,6 @@ export function DataGrid<T extends Record<string, any>>({
   const handleResizeStart = (e: React.MouseEvent, columnId: string) => {
     e.preventDefault();
     e.stopPropagation();
-    setResizingColumn(columnId);
     const startX = e.clientX;
     const startWidth = columnWidths[columnId];
 
@@ -281,7 +378,6 @@ export function DataGrid<T extends Record<string, any>>({
     };
 
     const handleMouseUp = () => {
-      setResizingColumn(null);
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
@@ -292,20 +388,59 @@ export function DataGrid<T extends Record<string, any>>({
 
   const visibleColumnsArray = columns.filter((col: GridColumn<T>) => visibleColumns.has(col.id));
 
+  // Sticky column offsets — S.No is always col 0 at left:0, width 48px
+  const SNO_WIDTH = 48;
+  const stickyOffsets: Record<string, number> = {};
+  let stickyAcc = SNO_WIDTH;
+  visibleColumnsArray.forEach((col) => {
+    if (col.sticky) {
+      stickyOffsets[col.id] = stickyAcc;
+      stickyAcc += columnWidths[col.id] || col.width || 150;
+    }
+  });
+  const hasStickyUserCols = visibleColumnsArray.some((c) => c.sticky);
+  // The last sticky user column (or S.No if none) gets the right-shadow separator
+  const lastStickyUserCol = [...visibleColumnsArray].reverse().find((c) => c.sticky);
+
+  // Total table width so the table never squeezes columns below their specified widths
+  const totalTableWidth = SNO_WIDTH + visibleColumnsArray.reduce(
+    (sum, col) => sum + (columnWidths[col.id] || col.width || 150), 0
+  );
+
   const densityClasses: Record<RowDensity, string> = {
     compact: 'py-2',
     normal: 'py-3',
     comfortable: 'py-4',
   };
 
+  // Shadow style for the right edge of the frozen pane
+  const frozenShadow = '2px 0 6px -2px rgba(0,0,0,0.14)';
+
   return (
     <div className={cn('relative', className)}>
       {/* Grid Table */}
       <div className="rounded-lg border bg-card overflow-auto scrollbar-hide">
-        <table className="w-full border-collapse">
+        <table className="w-full border-collapse" style={{ minWidth: `${totalTableWidth}px` }}>
           {/* Header */}
-          <thead className="bg-muted/50 sticky top-0 z-10">
+          <thead className="bg-muted/50">
             <tr>
+              {/* S.No — always first, always sticky (left + top) */}
+              <th
+                className="px-3 py-3 text-left text-sm font-semibold uppercase tracking-wide whitespace-nowrap"
+                style={{
+                  width: `${SNO_WIDTH}px`,
+                  minWidth: `${SNO_WIDTH}px`,
+                  overflow: 'hidden',
+                  position: 'sticky',
+                  left: 0,
+                  top: 0,
+                  zIndex: 21,
+                  background: '#f1f5f9',
+                  boxShadow: !hasStickyUserCols ? frozenShadow : undefined,
+                }}
+              >
+                #
+              </th>
               {visibleColumnsArray.map((column) => (
                 <th
                   key={column.id}
@@ -321,14 +456,26 @@ export function DataGrid<T extends Record<string, any>>({
                     column.align === 'right' && 'text-right'
                   )}
                   style={{
-                    width: `${columnWidths[column.id]}px`,
-                    minWidth: `${column.minWidth || 100}px`,
+                    minWidth: `${column.minWidth || columnWidths[column.id] || 100}px`,
+                    overflow: 'hidden',
+                    position: 'sticky',
+                    top: 0,
+                    zIndex: column.sticky ? 20 : 10,
+                    background: '#f1f5f9',
+                    ...(column.sticky ? {
+                      width: `${columnWidths[column.id] || column.width || 150}px`,
+                      maxWidth: `${columnWidths[column.id] || column.width || 150}px`,
+                      left: `${stickyOffsets[column.id]}px`,
+                      boxShadow: column === lastStickyUserCol ? frozenShadow : undefined,
+                    } : {}),
                   }}
                   onClick={() => column.sortable && handleSort(column.id)}
                 >
                   <div className="flex items-center gap-2">
-                    <GripVertical className="h-4 w-4 text-muted-foreground/50 cursor-grab flex-shrink-0" />
-                    <span className="flex-1 whitespace-nowrap overflow-hidden text-ellipsis">{column.header}</span>
+                    {!column.sticky && (
+                      <GripVertical className="h-4 w-4 text-muted-foreground/50 cursor-grab flex-shrink-0" />
+                    )}
+                    <span className="flex-1 whitespace-nowrap">{column.header}</span>
                     {column.sortable && sortColumn === column.id && (
                       <div className="flex-shrink-0">
                         {sortDirection === 'asc' ? (
@@ -340,10 +487,12 @@ export function DataGrid<T extends Record<string, any>>({
                     )}
                   </div>
                   {/* Resize Handle */}
-                  <div
-                    className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/50 active:bg-primary"
-                    onMouseDown={(e) => handleResizeStart(e, column.id)}
-                  />
+                  {!column.sticky && (
+                    <div
+                      className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/50 active:bg-primary"
+                      onMouseDown={(e) => handleResizeStart(e, column.id)}
+                    />
+                  )}
                 </th>
               ))}
             </tr>
@@ -355,11 +504,27 @@ export function DataGrid<T extends Record<string, any>>({
               <tr
                 key={rowIndex}
                 className={cn(
-                  'hover:bg-muted/50 transition-colors',
+                  'hover:bg-muted/30 transition-colors',
                   onRowClick && 'cursor-pointer'
                 )}
                 onClick={() => onRowClick?.(row)}
               >
+                {/* S.No cell */}
+                <td
+                  className={cn('px-3 text-sm text-muted-foreground font-medium tabular-nums', densityClasses[rowDensity])}
+                  style={{
+                    width: `${SNO_WIDTH}px`,
+                    minWidth: `${SNO_WIDTH}px`,
+                    maxWidth: `${SNO_WIDTH}px`,
+                    position: 'sticky',
+                    left: 0,
+                    zIndex: 3,
+                    backgroundColor: '#ffffff',
+                    boxShadow: !hasStickyUserCols ? frozenShadow : undefined,
+                  }}
+                >
+                  {(currentPage - 1) * pageSize + rowIndex + 1}
+                </td>
                 {visibleColumnsArray.map((column) => (
                   <td
                     key={column.id}
@@ -370,8 +535,17 @@ export function DataGrid<T extends Record<string, any>>({
                       column.align === 'right' && 'text-right'
                     )}
                     style={{
-                      width: `${columnWidths[column.id]}px`,
-                      minWidth: `${column.minWidth || 100}px`,
+                      minWidth: `${column.minWidth || columnWidths[column.id] || 100}px`,
+                      overflow: 'hidden',
+                      backgroundColor: '#ffffff',
+                      ...(column.sticky ? {
+                        position: 'sticky',
+                        width: `${columnWidths[column.id] || column.width || 150}px`,
+                        maxWidth: `${columnWidths[column.id] || column.width || 150}px`,
+                        left: `${stickyOffsets[column.id]}px`,
+                        zIndex: 3,
+                        boxShadow: column === lastStickyUserCol ? frozenShadow : undefined,
+                      } : {}),
                     }}
                   >
                     {column.cell

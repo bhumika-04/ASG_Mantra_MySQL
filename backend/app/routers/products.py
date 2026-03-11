@@ -49,7 +49,7 @@ async def get_all_products(
     search: Optional[str] = Query(None, description="Search by product name, SKU, or brand"),
     category: Optional[str] = Query(None, description="Filter by category"),
     brand: Optional[str] = Query(None, description="Filter by brand"),
-    is_active: Optional[bool] = Query(None, description="Filter by active status"),
+    is_active: Optional[bool] = Query(True, description="Filter by active status"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=1000),
     db: Session = Depends(get_db),
@@ -251,6 +251,15 @@ async def update_product(
     if product_data.unitPrice is not None:
         product.UnitPrice = product_data.unitPrice
 
+    if product_data.unitWeight is not None:
+        product.UnitWeight = product_data.unitWeight
+
+    if product_data.packSize is not None:
+        product.PackSize = product_data.packSize
+
+    if product_data.gs1 is not None:
+        product.Gs1 = product_data.gs1
+
     if product_data.isActive is not None:
         product.IsActive = product_data.isActive
 
@@ -336,30 +345,111 @@ async def link_blinkit_product(
     if not target:
         raise HTTPException(status_code=404, detail="Target product not found")
 
+    # Prevent overwriting an existing different BlinkitId
+    if target.BlinkitId and target.BlinkitId != blinkit_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Target product already has Blinkit ID {target.BlinkitId}. Unlink it first."
+        )
+
     placeholder_sku = f"UNLINKED-BLNK-{blinkit_id}"[:50]
     placeholder = db.query(Product).filter(Product.AsgSku == placeholder_sku).first()
 
     try:
-        # Set BlinkitId on the real product
+        # 1. Set BlinkitId on the real/target product
         target.BlinkitId = blinkit_id
 
         if placeholder and placeholder.Id != target.Id:
-            # Migrate BlinkitSales rows
-            from app.models.blinkit_sales import BlinkitSalesData
-            from app.models.blinkit_inventory import BlinkitInventoryData
-            db.query(BlinkitSalesData).filter(
-                BlinkitSalesData.ProductId == placeholder.Id
-            ).update({"ProductId": target.Id})
-            db.query(BlinkitInventoryData).filter(
-                BlinkitInventoryData.ProductId == placeholder.Id
-            ).update({"ProductId": target.Id})
-            # Deactivate placeholder
+            # 2. Clear BlinkitId on placeholder so BlinkitSales/BlinkitInventory rows
+            #    (which join via Product.BlinkitId = ItemId) only resolve to the target — no double-counting
+            placeholder.BlinkitId = None
+
+            # 3. Migrate ProductId FK rows from placeholder → target
+            from app.models.blinkit_po_item import BlinkitPOItemData
+            from app.models.inventory import Inventory
+            db.query(BlinkitPOItemData).filter(
+                BlinkitPOItemData.ProductId == placeholder.Id
+            ).update({"ProductId": target.Id}, synchronize_session=False)
+            db.query(Inventory).filter(
+                Inventory.ProductId == placeholder.Id
+            ).update({"ProductId": target.Id}, synchronize_session=False)
+
+            # 4. Deactivate the placeholder
             placeholder.IsActive = False
 
         db.commit()
         return {
             "success": True,
             "message": f"Blinkit ID {blinkit_id} linked to {target.ProductName}",
+            "target_sku": target.AsgSku,
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/link-amazon")
+async def link_amazon_product(
+    data: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Link an Amazon ASIN to an existing ASG product.
+    - Finds the UNLINKED-AMZN-{asin} placeholder product
+    - Sets AmazonId on the target (real) ASG product
+    - Migrates AmazonPOItemData.ProductId and Inventory.ProductId from placeholder → target
+    - Deactivates the placeholder
+    Admin/Manager only.
+    """
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    asin = str(data.get("asin", "")).strip()
+    target_product_id = data.get("target_product_id")
+
+    if not asin or not target_product_id:
+        raise HTTPException(status_code=400, detail="asin and target_product_id are required")
+
+    target = db.query(Product).filter(Product.Id == target_product_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target product not found")
+
+    # Prevent overwriting an existing different AmazonId
+    if target.AmazonId and target.AmazonId != asin:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Target product already has Amazon ID {target.AmazonId}. Unlink it first."
+        )
+
+    placeholder_sku = f"UNLINKED-AMZN-{asin}"[:50]
+    placeholder = db.query(Product).filter(Product.AsgSku == placeholder_sku).first()
+
+    try:
+        # 1. Set AmazonId on the real/target product
+        target.AmazonId = asin
+
+        if placeholder and placeholder.Id != target.Id:
+            # 2. Clear AmazonId on placeholder to prevent double-counting in any AmazonId joins
+            placeholder.AmazonId = None
+
+            # 3. Migrate ProductId FK rows from placeholder → target
+            from app.models.amazon_po_item import AmazonPOItemData
+            from app.models.inventory import Inventory
+            db.query(AmazonPOItemData).filter(
+                AmazonPOItemData.ProductId == placeholder.Id
+            ).update({"ProductId": target.Id}, synchronize_session=False)
+            db.query(Inventory).filter(
+                Inventory.ProductId == placeholder.Id
+            ).update({"ProductId": target.Id}, synchronize_session=False)
+
+            # 4. Deactivate the placeholder
+            placeholder.IsActive = False
+
+        db.commit()
+        return {
+            "success": True,
+            "message": f"Amazon ASIN {asin} linked to {target.ProductName}",
             "target_sku": target.AsgSku,
         }
     except Exception as e:

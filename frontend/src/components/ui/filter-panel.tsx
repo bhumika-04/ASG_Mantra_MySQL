@@ -11,6 +11,7 @@ export interface FilterValues {
   channel: string;
   search: string;
   status: string;
+  state: string;
   priceMin: string;
   priceMax: string;
 }
@@ -22,6 +23,7 @@ export const DEFAULT_FILTER_VALUES: FilterValues = {
   channel: 'all',
   search: '',
   status: 'all',
+  state: 'all',
   priceMin: '',
   priceMax: '',
 };
@@ -48,7 +50,7 @@ const DATE_PRESETS = [
   { label: 'Last 1Y',  getFrom: () => monthsAgo(12), getTo: () => today() },
 ];
 
-function countActive(v: FilterValues): number {
+function countActive(v: FilterValues, inventoryDates?: string[], selectedInventoryDate?: string): number {
   let n = 0;
   if (v.period !== 'all') n++;
   if (v.dateFrom) n++;
@@ -56,8 +58,10 @@ function countActive(v: FilterValues): number {
   if (v.channel !== 'all') n++;
   if (v.search) n++;
   if (v.status !== 'all') n++;
+  if (v.state !== 'all') n++;
   if (v.priceMin) n++;
   if (v.priceMax) n++;
+  if (inventoryDates?.length && selectedInventoryDate && selectedInventoryDate !== inventoryDates[0]) n++;
   return n;
 }
 
@@ -71,8 +75,13 @@ interface FilterPanelProps {
   showSearch?: boolean;
   showStatus?: boolean;
   showPriceRange?: boolean;
+  showState?: boolean;
+  stateOptions?: { label: string; value: string }[];
   statusOptions?: { label: string; value: string }[];
   searchPlaceholder?: string;
+  inventoryDates?: string[];
+  selectedInventoryDate?: string;
+  onInventoryDateChange?: (date: string) => void;
 }
 
 export function FilterPanel({
@@ -85,12 +94,17 @@ export function FilterPanel({
   showSearch = false,
   showStatus = false,
   showPriceRange = false,
+  showState = false,
+  stateOptions = [],
   statusOptions = [],
   searchPlaceholder = 'Search products...',
+  inventoryDates,
+  selectedInventoryDate,
+  onInventoryDateChange,
 }: FilterPanelProps) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const active = countActive(values);
+  const active = countActive(values, inventoryDates, selectedInventoryDate);
 
   // Find which preset is currently active (if any)
   const activePreset = DATE_PRESETS.find(
@@ -230,6 +244,31 @@ export function FilterPanel({
               </div>
             )}
 
+            {/* Inventory Snapshot Date */}
+            {inventoryDates && inventoryDates.length > 1 && onInventoryDateChange && (
+              <div>
+                <div className="flex items-center gap-1.5 mb-2">
+                  <CalendarDays className="h-3.5 w-3.5 text-muted-foreground" />
+                  <p className="text-xs font-semibold text-foreground uppercase tracking-wider">Snapshot Date</p>
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {inventoryDates.map(d => (
+                    <button
+                      key={d}
+                      onClick={() => onInventoryDateChange(d)}
+                      className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
+                        selectedInventoryDate === d
+                          ? 'bg-blue-600 text-white border-blue-600'
+                          : 'bg-muted/50 text-muted-foreground border-border hover:bg-muted hover:text-foreground'
+                      }`}
+                    >
+                      {d}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Channel */}
             {showChannel && (
               <div>
@@ -271,6 +310,28 @@ export function FilterPanel({
                       onClick={() => onChange('status', o.value)}
                       className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
                         values.status === o.value
+                          ? 'bg-blue-600 text-white border-blue-600'
+                          : 'bg-muted/50 text-muted-foreground border-border hover:bg-muted hover:text-foreground'
+                      }`}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* State */}
+            {showState && stateOptions.length > 0 && (
+              <div>
+                <p className="text-xs font-semibold text-foreground uppercase tracking-wider mb-2">State</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {stateOptions.map(o => (
+                    <button
+                      key={o.value}
+                      onClick={() => onChange('state', o.value)}
+                      className={`px-2.5 py-1 text-xs rounded-md border transition-colors ${
+                        values.state === o.value
                           ? 'bg-blue-600 text-white border-blue-600'
                           : 'bg-muted/50 text-muted-foreground border-border hover:bg-muted hover:text-foreground'
                       }`}

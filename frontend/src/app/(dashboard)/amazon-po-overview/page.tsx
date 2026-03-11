@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { FilterBar } from '@/components/ui/filter-bar';
 import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
@@ -17,74 +18,57 @@ import {
   Download,
 } from 'lucide-react';
 import api from '@/lib/api';
-import { POStatusModal, POModalData } from '@/components/ui/po-status-modal';
 
 interface POOverviewItem {
   id: number;
   ids: number[];
+  po_id: number;
   po_number: string;
   po_date: string;
   orderDateRaw: string | null;
   po_expiry: string;
-  expectedDeliveryDateRaw: string | null;
   products: number;
   totalQty: number;
   packed_qty: number;
   gap: number;
   status: string;
+  location: string;
+  state: string;
 }
 
-function isDelayed(expectedDate: string | null, status: string): boolean {
-  if (!expectedDate || status === 'Delivered' || status === 'Cancelled' || status === 'Delayed') return false;
-  return new Date(expectedDate) < new Date(new Date().toDateString());
-}
-
-// Map internal statuses → display names matching reference design
-const STATUS_DISPLAY: Record<string, string> = {
-  'Created': 'Pending',
-  'Packed': 'Ready',
-  'Dispatched': 'Shipped',
-  'In Transit': 'Partial',
-  'Delivered': 'Delivered',
-  'Delayed': 'Pending',
-  'Cancelled': 'Cancelled',
-};
-
-function displayStatus(status: string) {
-  return STATUS_DISPLAY[status] || status;
-}
-
-// KPI config keyed by display name
+// KPI config keyed by DB status name
 const KPI_CONFIG: Record<string, { icon: React.ReactNode; color: string; bg: string }> = {
-  'Pending':   { icon: <Clock className="h-5 w-5" />,        color: 'text-orange-600',  bg: 'bg-orange-100' },
-  'Partial':   { icon: <AlertCircle className="h-5 w-5" />,  color: 'text-yellow-600',  bg: 'bg-yellow-100' },
-  'Ready':     { icon: <PackageCheck className="h-5 w-5" />, color: 'text-emerald-600', bg: 'bg-emerald-100' },
-  'Shipped':   { icon: <Truck className="h-5 w-5" />,        color: 'text-blue-600',    bg: 'bg-blue-100' },
-  'Delivered': { icon: <CheckCircle2 className="h-5 w-5" />, color: 'text-emerald-600', bg: 'bg-emerald-100' },
+  'Created':    { icon: <Clock className="h-5 w-5" />,        color: 'text-orange-600',  bg: 'bg-orange-100' },
+  'Dispatched': { icon: <Truck className="h-5 w-5" />,        color: 'text-blue-600',    bg: 'bg-blue-100' },
+  'In Transit': { icon: <AlertCircle className="h-5 w-5" />,  color: 'text-yellow-600',  bg: 'bg-yellow-100' },
+  'Delivered':  { icon: <CheckCircle2 className="h-5 w-5" />, color: 'text-emerald-600', bg: 'bg-emerald-100' },
+  'Delayed':    { icon: <AlertCircle className="h-5 w-5" />,  color: 'text-red-600',     bg: 'bg-red-100' },
 };
 
-// Badge styles for grid status column
+// Badge styles keyed by DB status name
 const BADGE_STYLES: Record<string, string> = {
-  'Pending':   'bg-orange-50 text-orange-700 border-orange-200',
-  'Partial':   'bg-yellow-50 text-yellow-700 border-yellow-200',
-  'Ready':     'bg-emerald-50 text-emerald-700 border-emerald-200',
-  'Shipped':   'bg-blue-50 text-blue-700 border-blue-200',
-  'Delivered': 'bg-emerald-50 text-emerald-700 border-emerald-200',
-  'Cancelled': 'bg-gray-50 text-gray-600 border-gray-200',
+  'Created':    'bg-gray-50 text-gray-700 border-gray-200',
+  'Dispatched': 'bg-blue-50 text-blue-700 border-blue-200',
+  'In Transit': 'bg-yellow-50 text-yellow-700 border-yellow-200',
+  'Delivered':  'bg-emerald-50 text-emerald-700 border-emerald-200',
+  'Delayed':    'bg-red-50 text-red-700 border-red-200',
+  'Cancelled':  'bg-gray-50 text-gray-600 border-gray-200',
+  'Diff Loss':  'bg-purple-50 text-purple-700 border-purple-200',
+  'Closed':     'bg-slate-50 text-slate-600 border-slate-200',
 };
 
 export default function AmazonPOOverviewPage() {
+  const router = useRouter();
   const [search, setSearch] = useState('');
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
   const [poData, setPoData] = useState<POOverviewItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [selectedPO, setSelectedPO] = useState<POModalData | null>(null);
 
   useEffect(() => {
     const fetchPOData = async () => {
       try {
         setIsLoading(true);
-        const response = await api.purchaseOrders.getAmazon({ page_size: 100 }) as any;
+        const response = await api.purchaseOrders.getAmazon({ page_size: 1000 }) as any;
 
         // Group POs by PO number
         const grouped = new Map<string, any>();
@@ -92,19 +76,22 @@ export default function AmazonPOOverviewPage() {
         response.items?.forEach((po: any) => {
           const poNum = po.po_number;
           if (!grouped.has(poNum)) {
+            const locationParts = [po.ship_to_location_code, po.ship_to_city, po.ship_to_state].filter(Boolean);
             grouped.set(poNum, {
               id: po.id,
               ids: [po.id],
+              po_id: po.po_id,
               po_number: poNum,
               po_date: po.order_date ? new Date(po.order_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A',
               orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
               po_expiry: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A',
-              expectedDeliveryDateRaw: po.expected_delivery_date || null,
               products: 1,
               totalQty: po.quantity || 0,
               packed_qty: po.packed_qty ?? 0,
               gap: po.gap ?? 0,
               status: po.status || 'Created',
+              location: locationParts.join(', ') || '—',
+              state: po.ship_to_state || '—',
             });
           } else {
             const existing = grouped.get(poNum);
@@ -116,10 +103,9 @@ export default function AmazonPOOverviewPage() {
           }
         });
 
-        // Auto-flag delayed POs and map to display status names
+        // Use raw DB status directly
         const data = Array.from(grouped.values()).map((po: any) => {
-          const rawStatus = isDelayed(po.expectedDeliveryDateRaw, po.status) ? 'Delayed' : po.status;
-          return { ...po, status: displayStatus(rawStatus) };
+          return { ...po, status: po.status || 'Created' };
         });
         setPoData(data);
       } catch (error) {
@@ -132,25 +118,23 @@ export default function AmazonPOOverviewPage() {
     fetchPOData();
   }, []);
 
-  const handleStatusUpdated = (poNumber: string, newStatus: string) => {
-    setPoData(prev => prev.map(p => p.po_number === poNumber ? { ...p, status: newStatus } : p));
-  };
-
   const poStatusOptions = [
-    { label: 'All', value: 'all' },
-    { label: 'Pending', value: 'Pending' },
-    { label: 'Partial', value: 'Partial' },
-    { label: 'Ready', value: 'Ready' },
-    { label: 'Shipped', value: 'Shipped' },
-    { label: 'Delivered', value: 'Delivered' },
+    { label: 'All',        value: 'all' },
+    { label: 'Created',    value: 'Created' },
+    { label: 'Dispatched', value: 'Dispatched' },
+    { label: 'In Transit', value: 'In Transit' },
+    { label: 'Delivered',  value: 'Delivered' },
+    { label: 'Delayed',    value: 'Delayed' },
+    { label: 'Cancelled',  value: 'Cancelled' },
   ];
 
   const filteredData = useMemo(() => {
     let filtered = [...poData];
 
-    if (search) {
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
       filtered = filtered.filter(po =>
-        po.po_number.toLowerCase().includes(search.toLowerCase())
+        (po.po_number || '').toLowerCase().includes(q)
       );
     }
 
@@ -165,32 +149,41 @@ export default function AmazonPOOverviewPage() {
       filtered = filtered.filter(po => po.status === filters.status);
     }
 
+    if (filters.state !== 'all') {
+      filtered = filtered.filter(po => po.state === filters.state);
+    }
+
     if (filters.channel !== 'all' && filters.channel !== 'amazon') {
       filtered = [];
     }
 
     return filtered;
-  }, [poData, search, filters.dateFrom, filters.dateTo, filters.status, filters.channel]);
+  }, [poData, search, filters.dateFrom, filters.dateTo, filters.status, filters.state, filters.channel]);
+
+  const stateOptions = useMemo(() => {
+    const states = [...new Set(poData.map(p => p.state).filter(s => s && s !== '—'))].sort();
+    return [{ label: 'All', value: 'all' }, ...states.map(s => ({ label: s, value: s }))];
+  }, [poData]);
 
   // Calculate stats using display status names
   const stats = useMemo(() => {
-    const pending = poData.filter(p => p.status === 'Pending').length;
-    const partial = poData.filter(p => p.status === 'Partial').length;
-    const ready = poData.filter(p => p.status === 'Ready').length;
-    const shipped = poData.filter(p => p.status === 'Shipped').length;
-    const delivered = poData.filter(p => p.status === 'Delivered').length;
+    const created    = poData.filter(p => p.status === 'Created').length;
+    const dispatched = poData.filter(p => p.status === 'Dispatched').length;
+    const inTransit  = poData.filter(p => p.status === 'In Transit').length;
+    const delivered  = poData.filter(p => p.status === 'Delivered').length;
+    const delayed    = poData.filter(p => p.status === 'Delayed').length;
 
-    return { pending, partial, ready, shipped, delivered };
+    return { created, dispatched, inTransit, delivered, delayed };
   }, [poData]);
 
   const getStatusBadge = (status: string) => {
     const style = BADGE_STYLES[status] || 'bg-gray-50 text-gray-700 border-gray-200';
     const iconMap: Record<string, React.ReactNode> = {
-      'Pending': <Clock className="h-3.5 w-3.5 mr-1" />,
-      'Partial': <AlertCircle className="h-3.5 w-3.5 mr-1" />,
-      'Ready': <PackageCheck className="h-3.5 w-3.5 mr-1" />,
-      'Shipped': <Truck className="h-3.5 w-3.5 mr-1" />,
-      'Delivered': <CheckCircle2 className="h-3.5 w-3.5 mr-1" />,
+      'Created':    <Clock className="h-3.5 w-3.5 mr-1" />,
+      'Dispatched': <Truck className="h-3.5 w-3.5 mr-1" />,
+      'In Transit': <AlertCircle className="h-3.5 w-3.5 mr-1" />,
+      'Delivered':  <CheckCircle2 className="h-3.5 w-3.5 mr-1" />,
+      'Delayed':    <AlertCircle className="h-3.5 w-3.5 mr-1" />,
     };
     return { style, icon: iconMap[status] };
   };
@@ -201,9 +194,12 @@ export default function AmazonPOOverviewPage() {
       header: 'PO Number',
       accessorKey: 'po_number',
       sortable: true,
+      sticky: true,
       width: 180,
       minWidth: 150,
-      cell: (row) => <span className="font-medium text-blue-600">{row.po_number}</span>,
+      cell: (row) => (
+        <span className="font-medium text-blue-600">{row.po_number}</span>
+      ),
     },
     {
       id: 'poDate',
@@ -224,8 +220,17 @@ export default function AmazonPOOverviewPage() {
       cell: (row) => <span className="text-sm">{row.po_expiry}</span>,
     },
     {
+      id: 'location',
+      header: 'Location',
+      accessorKey: 'location',
+      sortable: true,
+      width: 180,
+      minWidth: 140,
+      cell: (row) => <span className="text-sm text-muted-foreground">{row.location}</span>,
+    },
+    {
       id: 'products',
-      header: 'Products',
+      header: 'Item Count',
       accessorKey: 'products',
       sortable: true,
       width: 110,
@@ -266,7 +271,7 @@ export default function AmazonPOOverviewPage() {
     },
   ];
 
-  const gridState = useDataGrid(gridColumns);
+  const gridState = useDataGrid(gridColumns, 'amazon-po-overview');
 
   if (isLoading) {
     return (
@@ -282,11 +287,11 @@ export default function AmazonPOOverviewPage() {
   }
 
   const kpiCards = [
-    { label: 'Pending', count: stats.pending, status: 'Pending' },
-    { label: 'Partial', count: stats.partial, status: 'Partial' },
-    { label: 'Ready', count: stats.ready, status: 'Ready' },
-    { label: 'Shipped', count: stats.shipped, status: 'Shipped' },
-    { label: 'Delivered', count: stats.delivered, status: 'Delivered' },
+    { label: 'Created',    count: stats.created,    status: 'Created' },
+    { label: 'Dispatched', count: stats.dispatched, status: 'Dispatched' },
+    { label: 'In Transit', count: stats.inTransit,  status: 'In Transit' },
+    { label: 'Delivered',  count: stats.delivered,  status: 'Delivered' },
+    { label: 'Delayed',    count: stats.delayed,    status: 'Delayed' },
   ];
 
   return (
@@ -332,8 +337,11 @@ export default function AmazonPOOverviewPage() {
               onChange={(key, value) => setFilters(prev => ({ ...prev, [key]: value }))}
               onClear={() => { setFilters(DEFAULT_FILTER_VALUES); setSearch(''); }}
               showDateRange
+              showChannel={false}
               showStatus
               statusOptions={poStatusOptions}
+              showState={stateOptions.length > 1}
+              stateOptions={stateOptions}
             />
             <ViewOptionsButton
               columns={gridColumns}
@@ -341,6 +349,8 @@ export default function AmazonPOOverviewPage() {
               onToggleColumn={gridState.toggleColumnVisibility}
               rowDensity={gridState.rowDensity}
               onDensityChange={gridState.setRowDensity}
+              onSave={gridState.saveCurrentView}
+              onReset={gridState.resetView}
             />
             {filteredData.length > 0 && (
               <Button
@@ -352,6 +362,7 @@ export default function AmazonPOOverviewPage() {
                     'PO Number': p.po_number,
                     'PO Date': p.po_date,
                     'PO Expiry': p.po_expiry,
+                    'Location': p.location,
                     'Products': p.products,
                     'Total Qty': p.totalQty,
                     'Status': p.status,
@@ -383,18 +394,11 @@ export default function AmazonPOOverviewPage() {
             <DataGrid
               data={filteredData}
               gridState={gridState}
-              onRowClick={(row) => setSelectedPO({ id: row.id, ids: row.ids, po_number: row.po_number, status: row.status, quantity: row.totalQty })}
+              onRowClick={(row) => router.push(`/amazon-po?search=${encodeURIComponent(row.po_number)}`)}
             />
           )}
         </div>
       </div>
-
-      {/* PO Status Update Modal */}
-      <POStatusModal
-        po={selectedPO}
-        onClose={() => setSelectedPO(null)}
-        onStatusUpdated={handleStatusUpdated}
-      />
     </ProtectedRoute>
   );
 }

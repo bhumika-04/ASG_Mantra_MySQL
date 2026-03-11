@@ -221,17 +221,19 @@ async def sync_alerts(
     - Products with total stock < LOW_STOCK_THRESHOLD → Warning "Low Stock" alert
     Skips products that already have an unresolved alert.
     """
-    # Get total stock per product across all channels
-    stock_sub = (
-        db.query(
-            Inventory.ProductId,
-            func.sum(Inventory.CurrentStock).label("total_stock"),
-        )
-        .group_by(Inventory.ProductId)
-        .subquery()
-    )
+    # Use latest inventory date only (date-wise snapshots)
+    latest_date = db.query(func.max(Inventory.InventoryDate)).scalar()
 
-    # Get all active products with their stock
+    # Get packed+unpacked stock per product from latest snapshot
+    stock_q = db.query(
+        Inventory.ProductId,
+        func.sum(Inventory.PackedQty + Inventory.UnpackedQty).label("total_stock"),
+    ).group_by(Inventory.ProductId)
+    if latest_date:
+        stock_q = stock_q.filter(Inventory.InventoryDate == latest_date)
+    stock_sub = stock_q.subquery()
+
+    # Get all active products with their stock (exclude auto-created unlinked)
     products = (
         db.query(
             Product.Id,
@@ -241,6 +243,7 @@ async def sync_alerts(
         )
         .outerjoin(stock_sub, Product.Id == stock_sub.c.ProductId)
         .filter(Product.IsActive == True)
+        .filter(~Product.AsgSku.like('UNLINKED-%'))
         .all()
     )
 

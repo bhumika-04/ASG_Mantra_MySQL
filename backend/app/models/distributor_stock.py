@@ -34,11 +34,18 @@ class DistributorStockData(Base):
 
     # Product
     ItemName = Column(String(300), nullable=False)
+    SKU = Column(String(100), nullable=True)
 
     # Weekly stock movement
     OpeningQty = Column(Integer, nullable=True)   # Stock at start of week
     ClosingQty = Column(Integer, nullable=True)    # Current stock at distributor warehouse
     SaleQty = Column(Integer, nullable=True)       # Units dispatched to platform this week
+
+    # Region-wise stock
+    DL_Qty = Column(Integer, nullable=True)
+    MH_Qty = Column(Integer, nullable=True)
+    KT_Qty = Column(Integer, nullable=True)
+    WB_Qty = Column(Integer, nullable=True)
 
     # Metadata
     CreatedAt = Column(DateTime, default=func.getdate())
@@ -49,8 +56,13 @@ class DistributorStockData(Base):
             "reportDate": self.ReportDate.isoformat() if self.ReportDate else None,
             "distributorId": self.DistributorId,
             "itemName": self.ItemName,
+            "sku": self.SKU,
             "openingQty": self.OpeningQty,
             "closingQty": self.ClosingQty,
             "saleQty": self.SaleQty,
+            "dlQty": self.DL_Qty,
+            "mhQty": self.MH_Qty,
+            "ktQty": self.KT_Qty,
+            "wbQty": self.WB_Qty,
             "createdAt": self.CreatedAt.isoformat() if self.CreatedAt else None,
         }

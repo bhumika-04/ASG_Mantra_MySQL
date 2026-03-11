@@ -7,38 +7,56 @@ import { X } from 'lucide-react';
 import api from '@/lib/api';
 
 export interface POModalData {
-  id: number;
-  ids?: number[];
+  id: number;          // item.Id (used for item-level updates)
+  ids?: number[];      // multiple item IDs (used by overview for item-level bulk)
+  po_id?: number;      // AmazonPO.Id or BlinkitPO.Id (used for PO-header updates)
+  channel?: string;    // 'amazon' | 'blinkit' — determines which endpoint to call
   po_number: string;
   status: string;
   quantity: number;
 }
 
 const TRANSITIONS: Record<string, string[]> = {
-  'Created': ['Dispatched', 'Cancelled'],
+  'Created': ['Packed', 'Dispatched', 'Cancelled'],
+  'Packed': ['Dispatched', 'Cancelled'],
   'Dispatched': ['In Transit', 'Delayed', 'Cancelled'],
   'In Transit': ['Delivered', 'Delayed', 'Cancelled'],
   'Delayed': ['In Transit', 'Delivered', 'Cancelled'],
   'Delivered': [],
   'Cancelled': [],
+  // display-name aliases used by overview pages
+  'Pending': ['Ready', 'Shipped', 'Cancelled'],
+  'Ready': ['Shipped', 'Cancelled'],
+  'Shipped': ['Partial', 'Delivered', 'Cancelled'],
+  'Partial': ['Shipped', 'Delivered', 'Cancelled'],
 };
 
 const STATUS_STYLES: Record<string, string> = {
   'Created': 'bg-gray-50 text-gray-700 border-gray-200',
+  'Packed': 'bg-emerald-50 text-emerald-700 border-emerald-200',
   'Dispatched': 'bg-yellow-50 text-yellow-700 border-yellow-200',
   'In Transit': 'bg-blue-50 text-blue-700 border-blue-200',
   'Delivered': 'bg-emerald-50 text-emerald-700 border-emerald-200',
   'Delayed': 'bg-red-50 text-red-700 border-red-200',
   'Cancelled': 'bg-gray-50 text-gray-600 border-gray-200',
+  'Pending': 'bg-orange-50 text-orange-700 border-orange-200',
+  'Ready': 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  'Shipped': 'bg-blue-50 text-blue-700 border-blue-200',
+  'Partial': 'bg-yellow-50 text-yellow-700 border-yellow-200',
 };
 
 const SELECTED_STYLES: Record<string, string> = {
   'Created': 'bg-gray-100 text-gray-800 border-gray-400 ring-2 ring-gray-300',
+  'Packed': 'bg-emerald-100 text-emerald-800 border-emerald-400 ring-2 ring-emerald-300',
   'Dispatched': 'bg-yellow-100 text-yellow-800 border-yellow-400 ring-2 ring-yellow-300',
   'In Transit': 'bg-blue-100 text-blue-800 border-blue-400 ring-2 ring-blue-300',
   'Delivered': 'bg-emerald-100 text-emerald-800 border-emerald-400 ring-2 ring-emerald-300',
   'Delayed': 'bg-red-100 text-red-800 border-red-400 ring-2 ring-red-300',
   'Cancelled': 'bg-gray-100 text-gray-800 border-gray-400 ring-2 ring-gray-300',
+  'Pending': 'bg-orange-100 text-orange-800 border-orange-400 ring-2 ring-orange-300',
+  'Ready': 'bg-emerald-100 text-emerald-800 border-emerald-400 ring-2 ring-emerald-300',
+  'Shipped': 'bg-blue-100 text-blue-800 border-blue-400 ring-2 ring-blue-300',
+  'Partial': 'bg-yellow-100 text-yellow-800 border-yellow-400 ring-2 ring-yellow-300',
 };
 
 export function POStatusModal({
@@ -78,8 +96,18 @@ export function POStatusModal({
     }
 
     try {
-      const ids = po.ids && po.ids.length > 0 ? po.ids : [po.id];
-      await Promise.all(ids.map(id => api.purchaseOrders.updateStatus(id, payload)));
+      // If po_id + channel present → update PO header status (overview/lifecycle pages)
+      if (po.po_id && po.channel) {
+        if (po.channel === 'amazon') {
+          await api.purchaseOrders.updateAmazonPOStatus(po.po_id, payload);
+        } else {
+          await api.purchaseOrders.updateBlinkitPOStatus(po.po_id, payload);
+        }
+      } else {
+        // Fall back to item-level updates (detail pages with multiple item IDs)
+        const ids = po.ids && po.ids.length > 0 ? po.ids : [po.id];
+        await Promise.all(ids.map(id => api.purchaseOrders.updateStatus(id, payload)));
+      }
       onStatusUpdated(po.po_number, newStatus);
       onClose();
     } catch {
@@ -100,7 +128,7 @@ export function POStatusModal({
             <p className="text-xs text-muted-foreground">{po.quantity.toLocaleString()} units</p>
           </div>
           <div className="flex items-center gap-2">
-            <Badge variant="outline" className={STATUS_STYLES[po.status]}>{po.status}</Badge>
+            <Badge variant="outline" className={STATUS_STYLES[po.status] || 'bg-gray-50 text-gray-700 border-gray-200'}>{po.status}</Badge>
             <button onClick={onClose} className="p-1 rounded hover:bg-muted transition-colors">
               <X className="h-4 w-4 text-muted-foreground" />
             </button>
@@ -122,7 +150,7 @@ export function POStatusModal({
                     key={s}
                     onClick={() => setNewStatus(s)}
                     className={`px-3 py-1.5 rounded-lg border text-sm font-medium transition-all ${
-                      newStatus === s ? SELECTED_STYLES[s] : 'border-input hover:bg-muted'
+                      newStatus === s ? (SELECTED_STYLES[s] || 'bg-gray-100 border-gray-400 ring-2 ring-gray-300') : 'border-input hover:bg-muted'
                     }`}
                   >
                     {s}

@@ -1,13 +1,14 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { DataGrid, GridColumn, useDataGrid } from '@/components/ui/data-grid';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { TrendingUp, ShoppingCart, Package, Box, Download } from 'lucide-react';
+import { TrendingUp, ShoppingCart, Package, Box, Download, Search } from 'lucide-react';
 import { exportToCSV } from '@/lib/export';
 import {
   BarChart,
@@ -33,22 +34,19 @@ interface TopProduct {
   total: number;
 }
 
-const TIME_OPTIONS = [
-  { label: '3 Months', value: '3months' },
-  { label: '6 Months', value: '6months' },
-  { label: '1 Year', value: '1year' },
-  { label: 'All Time', value: 'all' },
-];
-
-function filterMonthly(data: any[], period: string) {
-  if (period === 'all') return data;
-  const n = period === '3months' ? 3 : period === '6months' ? 6 : 12;
-  return data.slice(-n);
+function filterMonthly(data: any[], mode: string, customStart: string, customEnd: string) {
+  if (mode === 'all') return data;
+  const { start_date, end_date } = computeDateRange(mode as FilterMode, customStart, customEnd);
+  return data.filter(d => {
+    const m = (d.month || '').slice(0, 7);
+    if (start_date && m < start_date.slice(0, 7)) return false;
+    if (end_date && m > end_date.slice(0, 7)) return false;
+    return true;
+  });
 }
 
 export default function SalesOverviewPage() {
-  const [salesTrendPeriod, setSalesTrendPeriod] = useState('6months');
-  const [distPeriod, setDistPeriod] = useState('6months');
+  const { filterMode, customStart, customEnd } = useFilter();
   const [isLoading, setIsLoading] = useState(true);
   const [stats, setStats] = useState({
     total_revenue: 0,
@@ -59,19 +57,20 @@ export default function SalesOverviewPage() {
   });
   const [topProducts, setTopProducts] = useState<TopProduct[]>([]);
   const [monthlyData, setMonthlyData] = useState<any[]>([]);
+  const [productSearch, setProductSearch] = useState('');
+  const [productChannel, setProductChannel] = useState<'all' | 'amazon' | 'blinkit'>('all');
 
   useEffect(() => {
     const fetchSalesOverview = async () => {
       try {
         setIsLoading(true);
 
-        // Use dedicated analytics endpoints (AmazonSales and BlinkitSales tables).
-        // Always fetch full history (1825 days) since data has actual report dates.
-        // Use Promise.allSettled so one failure doesn't blank the whole page.
+        const { start_date, end_date } = computeDateRange(filterMode, customStart, customEnd);
+
         const results = await Promise.allSettled([
-          (api as any).amazonSalesData.getAnalytics({ days: 1825 }),
-          (api as any).blinkitSalesData.getAnalytics({ days: 1825 }),
-          api.dashboard.getCharts(),
+          api.amazonSalesData.getAnalytics({ start_date, end_date }),
+          api.blinkitSalesData.getAnalytics({ start_date, end_date }),
+          api.dashboard.getCharts({ start_date, end_date }),
           api.dashboard.getProductOverview({ page_size: 100 }),
         ]);
 
@@ -150,7 +149,6 @@ export default function SalesOverviewPage() {
 
         const sortedProducts = Array.from(productMap.values())
           .sort((a, b) => b.total - a.total)
-          .slice(0, 10)
           .map((p, index) => ({ rank: index + 1, ...p }));
 
         setTopProducts(sortedProducts);
@@ -165,7 +163,7 @@ export default function SalesOverviewPage() {
     };
 
     fetchSalesOverview();
-  }, []);
+  }, [filterMode, customStart, customEnd]);
 
   // Calculate percentages
   const totalRevenue = stats.amazon_revenue + stats.blinkit_revenue;
@@ -177,8 +175,7 @@ export default function SalesOverviewPage() {
     : 0;
 
   const gridColumns: GridColumn<TopProduct>[] = [
-    { id: 'rank', header: '#', accessorKey: 'rank', width: 60, minWidth: 50, align: 'center', cell: (row) => <span className="text-muted-foreground font-medium">{row.rank}</span> },
-        { id: 'name', header: 'Product', accessorKey: 'name', sortable: true, width: 360, minWidth: 200, cell: (row) => (
+    { id: 'name', header: 'Product Name', accessorKey: 'name', sortable: true, width: 320, minWidth: 200, cell: (row) => (
       <span
         className="font-medium text-sm leading-snug"
         style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
@@ -187,19 +184,29 @@ export default function SalesOverviewPage() {
         {row.name || '—'}
       </span>
     ) },
-    { id: 'sku', header: 'SKU', accessorKey: 'sku', width: 175, minWidth: 130, cell: (row) => <Badge variant="outline" className="bg-slate-50 text-slate-700 border-slate-200 font-mono text-xs whitespace-nowrap">{row.sku}</Badge> },
-    { id: 'amazon', header: 'Amazon', accessorKey: 'amazon', sortable: true, width: 130, minWidth: 110, align: 'right', cell: (row) => (
+    { id: 'sku', header: 'ASG SKU', accessorKey: 'sku', sticky: true, width: 175, minWidth: 130, cell: (row) => <Badge variant="outline" className="bg-slate-50 text-slate-700 border-slate-200 font-mono text-xs whitespace-nowrap">{row.sku}</Badge> },
+    { id: 'amazon', header: 'Amazon Units', accessorKey: 'amazon', sortable: true, width: 130, minWidth: 110, align: 'right', cell: (row) => (
       <Badge variant="outline" className={row.amazon > 0 ? 'bg-blue-50 text-blue-700 border-blue-200 font-semibold' : 'bg-gray-50 text-gray-400 border-gray-200'}>{row.amazon.toLocaleString()}</Badge>
     )},
-    { id: 'blinkit', header: 'Blinkit', accessorKey: 'blinkit', sortable: true, width: 130, minWidth: 110, align: 'right', cell: (row) => (
+    { id: 'blinkit', header: 'Blinkit Units', accessorKey: 'blinkit', sortable: true, width: 130, minWidth: 110, align: 'right', cell: (row) => (
       <Badge variant="outline" className={row.blinkit > 0 ? 'bg-yellow-50 text-yellow-700 border-yellow-200 font-semibold' : 'bg-gray-50 text-gray-400 border-gray-200'}>{row.blinkit.toLocaleString()}</Badge>
     )},
-    { id: 'total', header: 'Total', accessorKey: 'total', sortable: true, width: 130, minWidth: 110, align: 'right', cell: (row) => (
+    { id: 'total', header: 'Total Units', accessorKey: 'total', sortable: true, width: 130, minWidth: 110, align: 'right', cell: (row) => (
       <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200 font-bold">{row.total.toLocaleString()}</Badge>
     )},
   ];
 
-  const gridState = useDataGrid(gridColumns);
+  const filteredTopProducts = topProducts.filter(p => {
+    if (productChannel === 'amazon' && p.amazon === 0) return false;
+    if (productChannel === 'blinkit' && p.blinkit === 0) return false;
+    if (productSearch.trim()) {
+      const q = productSearch.trim().toLowerCase();
+      if (!p.name.toLowerCase().includes(q) && !p.sku.toLowerCase().includes(q)) return false;
+    }
+    return true;
+  });
+
+  const gridState = useDataGrid(gridColumns, 'sales-overview');
 
   if (isLoading) {
     return (
@@ -251,16 +258,11 @@ export default function SalesOverviewPage() {
           {/* Monthly Sales Trend Chart */}
           <Card className="lg:col-span-2">
             <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base font-medium">Monthly Sales Trend</CardTitle>
-                <select value={salesTrendPeriod} onChange={(e) => setSalesTrendPeriod(e.target.value)} className="h-7 text-xs border border-border rounded-md px-2 py-1 bg-background text-foreground cursor-pointer">
-                  {TIME_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                </select>
-              </div>
+              <CardTitle className="text-base font-medium">Monthly Sales Trend</CardTitle>
             </CardHeader>
             <CardContent>
               <ResponsiveContainer width="100%" height={320}>
-                <BarChart data={filterMonthly(monthlyData, salesTrendPeriod)}>
+                <BarChart data={filterMonthly(monthlyData, filterMode, customStart, customEnd)}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                   <XAxis
                     dataKey="month"
@@ -292,16 +294,11 @@ export default function SalesOverviewPage() {
           {/* Channel Distribution */}
           <Card>
             <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base font-medium">Channel Distribution</CardTitle>
-                <select value={distPeriod} onChange={(e) => setDistPeriod(e.target.value)} className="h-7 text-xs border border-border rounded-md px-2 py-1 bg-background text-foreground cursor-pointer">
-                  {TIME_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                </select>
-              </div>
+              <CardTitle className="text-base font-medium">Channel Distribution</CardTitle>
             </CardHeader>
             <CardContent>
               {(() => {
-                const filteredDist = filterMonthly(monthlyData, distPeriod);
+                const filteredDist = filterMonthly(monthlyData, filterMode, customStart, customEnd);
                 const distTotal = filteredDist.reduce((s: number, r: any) => s + (r.Amazon || 0) + (r.Blinkit || 0), 0);
                 const distAmz = filteredDist.reduce((s: number, r: any) => s + (r.Amazon || 0), 0);
                 const distBlk = filteredDist.reduce((s: number, r: any) => s + (r.Blinkit || 0), 0);
@@ -338,35 +335,79 @@ export default function SalesOverviewPage() {
 
         {/* Top Products Table */}
         <Card>
-          <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
+          <CardHeader className="pb-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <CardTitle className="text-base font-medium">Top Selling Products</CardTitle>
-              {topProducts.length > 0 && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8"
-                  onClick={() => exportToCSV(
-                    topProducts.map(p => ({
-                      'Rank': p.rank,
-                      'Product': p.name,
-                      'SKU': p.sku,
-                      'Amazon Units': p.amazon,
-                      'Blinkit Qty': p.blinkit,
-                      'Total': p.total,
-                    })),
-                    'sales_overview_top_products'
-                  )}
-                >
-                  <Download className="h-4 w-4 mr-2" />
-                  Export
-                </Button>
-              )}
+              <div className="flex items-center gap-2 flex-wrap">
+                {/* Search */}
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                  <input
+                    type="text"
+                    placeholder="Search by name or SKU..."
+                    value={productSearch}
+                    onChange={e => setProductSearch(e.target.value.replace(/^\s+/, ''))}
+                    className="h-8 pl-8 pr-3 text-sm border border-border rounded-md bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 w-52"
+                  />
+                </div>
+                {/* Channel filter pills */}
+                <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
+                  {(['all', 'amazon', 'blinkit'] as const).map(ch => (
+                    <button
+                      key={ch}
+                      onClick={() => setProductChannel(ch)}
+                      className={`px-2.5 py-1 text-xs font-medium rounded transition-colors capitalize ${
+                        productChannel === ch
+                          ? ch === 'amazon'
+                            ? 'bg-blue-600 text-white'
+                            : ch === 'blinkit'
+                            ? 'bg-yellow-500 text-white'
+                            : 'bg-primary text-primary-foreground'
+                          : 'text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {ch === 'all' ? 'All' : ch.charAt(0).toUpperCase() + ch.slice(1)}
+                    </button>
+                  ))}
+                </div>
+                {topProducts.length > 0 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8"
+                    onClick={() => exportToCSV(
+                      filteredTopProducts.map(p => ({
+                        'Rank': p.rank,
+                        'Product': p.name,
+                        'SKU': p.sku,
+                        'Amazon Units': p.amazon,
+                        'Blinkit Qty': p.blinkit,
+                        'Total': p.total,
+                      })),
+                      'sales_overview_top_products'
+                    )}
+                  >
+                    <Download className="h-4 w-4 mr-2" />
+                    Export
+                  </Button>
+                )}
+              </div>
             </div>
+            {(productSearch || productChannel !== 'all') && (
+              <p className="text-xs text-muted-foreground mt-1">
+                Showing {filteredTopProducts.length} of {topProducts.length} products
+              </p>
+            )}
           </CardHeader>
           <CardContent>
             {topProducts.length > 0 ? (
-              <DataGrid data={topProducts} gridState={gridState} />
+              filteredTopProducts.length > 0 ? (
+                <DataGrid data={filteredTopProducts} gridState={gridState} />
+              ) : (
+                <div className="text-center py-12 text-muted-foreground text-sm">
+                  No products match your search or filter
+                </div>
+              )
             ) : (
               <div className="text-center py-12 text-muted-foreground">
                 No top products data available

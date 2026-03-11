@@ -9,7 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import {
   Upload, Package, Database, Plus, FileText,
-  CheckCircle, XCircle, AlertCircle, Download, Eye, RefreshCw, Link2,
+  CheckCircle, XCircle, AlertCircle, Download, Eye, RefreshCw, Link2, Pencil, X,
 } from 'lucide-react';
 import api from '@/lib/api';
 import { toast } from 'sonner';
@@ -65,6 +65,67 @@ export default function ProductMasterPage() {
     packSize: '',
   });
 
+  // Product autocomplete state (for "Add Manually" tab)
+  const [selectedProduct, setSelectedProduct] = useState<any | null>(null);
+  const [productSearch, setProductSearch] = useState('');
+  const [showProductDropdown, setShowProductDropdown] = useState(false);
+  const productSearchRef = useRef<HTMLInputElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const formCardRef = useRef<HTMLDivElement>(null);
+
+  const filteredForAutocomplete = productSearch.trim().length > 0
+    ? products.filter((p) =>
+        p.productName?.toLowerCase().includes(productSearch.toLowerCase()) ||
+        p.asgSku?.toLowerCase().includes(productSearch.toLowerCase()) ||
+        p.amazonId?.toLowerCase().includes(productSearch.toLowerCase()) ||
+        p.blinkitId?.toLowerCase().includes(productSearch.toLowerCase())
+      ).slice(0, 10)
+    : [];
+
+  const handleSelectProduct = (p: any) => {
+    setSelectedProduct(p);
+    setProductSearch(p.productName);
+    setShowProductDropdown(false);
+    setFormData({
+      productName: p.productName || '',
+      asgSku: p.asgSku || '',
+      amazonId: p.amazonId || '',
+      blinkitId: p.blinkitId || '',
+      gs1: p.gs1 || '',
+      brand: p.brand || '',
+      category: p.category || '',
+      unitPrice: p.unitPrice != null ? String(p.unitPrice) : '',
+      unitWeight: p.unitWeight || '',
+      packSize: p.packSize != null ? String(p.packSize) : '',
+    });
+    // Scroll form into view on mobile / small screens
+    setTimeout(() => formCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);
+  };
+
+  const handleClearSelection = () => {
+    setSelectedProduct(null);
+    setProductSearch('');
+    setFormData({
+      productName: '', asgSku: '', amazonId: '', blinkitId: '',
+      gs1: '', brand: '', category: '', unitPrice: '', unitWeight: '', packSize: '',
+    });
+    setTimeout(() => productSearchRef.current?.focus(), 50);
+  };
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (
+        dropdownRef.current && !dropdownRef.current.contains(e.target as Node) &&
+        productSearchRef.current && !productSearchRef.current.contains(e.target as Node)
+      ) {
+        setShowProductDropdown(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
   // Link Blinkit state
   const [linkingId, setLinkingId] = useState<number | null>(null);
   const [linkSearch, setLinkSearch] = useState('');
@@ -79,7 +140,7 @@ export default function ProductMasterPage() {
     p.productName?.toLowerCase().includes(linkSearch.toLowerCase())
   );
 
-  const handleLinkBlinkit = async (unlinkedProduct: any) => {
+  const handleLinkProduct = async (unlinkedProduct: any) => {
     if (!linkTargetId) {
       toast.error('Please select an ASG product to link to.');
       return;
@@ -91,8 +152,14 @@ export default function ProductMasterPage() {
     }
     try {
       setIsLinking(true);
-      await api.products.linkBlinkit(unlinkedProduct.blinkitId, target.id);
-      toast.success(`Blinkit ID ${unlinkedProduct.blinkitId} linked to ${target.productName}`);
+      const isAmazon = unlinkedProduct.asgSku?.startsWith('UNLINKED-AMZN-');
+      if (isAmazon) {
+        await api.products.linkAmazon(unlinkedProduct.amazonId, target.id);
+        toast.success(`Amazon ASIN ${unlinkedProduct.amazonId} linked to ${target.productName}`);
+      } else {
+        await api.products.linkBlinkit(unlinkedProduct.blinkitId, target.id);
+        toast.success(`Blinkit ID ${unlinkedProduct.blinkitId} linked to ${target.productName}`);
+      }
       setLinkingId(null);
       setLinkSearch('');
       setLinkTargetId(null);
@@ -181,17 +248,28 @@ export default function ProductMasterPage() {
         unitPrice: formData.unitPrice ? parseFloat(formData.unitPrice) : undefined,
         packSize: formData.packSize ? parseInt(formData.packSize) : undefined,
       };
-      await api.products.create(payload);
-      toast.success('Product added successfully!', {
-        description: `${formData.productName} has been added to the product master`,
-      });
+      if (selectedProduct) {
+        // Update existing product
+        await api.products.update(selectedProduct.id, payload);
+        toast.success('Product updated successfully!', {
+          description: `${formData.productName} has been updated`,
+        });
+      } else {
+        // Create new product
+        await api.products.create(payload);
+        toast.success('Product added successfully!', {
+          description: `${formData.productName} has been added to the product master`,
+        });
+      }
+      setSelectedProduct(null);
+      setProductSearch('');
       setFormData({
         productName: '', asgSku: '', amazonId: '', blinkitId: '',
         gs1: '', brand: '', category: '', unitPrice: '', unitWeight: '', packSize: '',
       });
       fetchProducts();
     } catch (error: any) {
-      toast.error(error.message || 'Failed to add product');
+      toast.error(error.message || (selectedProduct ? 'Failed to update product' : 'Failed to add product'));
     } finally {
       setIsSaving(false);
     }
@@ -238,10 +316,11 @@ export default function ProductMasterPage() {
                 variant="outline"
                 size="sm"
                 onClick={() => {
-                  const headers = ['Product Name', 'ASG SKU ID', 'Amazon ID', 'Blinkit ID', 'GS1', 'Brand', 'Category', 'Unit Price', 'Unit Weight', 'Pack Size'];
+                  const headers = ['Product Name', 'ASG SKU ID', 'Amazon ASIN', 'Blinkit SKU ID', 'GS1 Code', 'Brand', 'Category', 'MRP', 'Unit Weight', 'Pack Size'];
                   const sample = [
-                    ['ASG Mantra Rosemary Hair Oil 100ml', 'ASG-001', 'B0CRZ1J1K1', '12345001', '8906123450011', 'ASG Mantra', 'Hair Care', '299.00', '100g', '1'],
-                    ['ASG Mantra Vitamin C Face Wash 100g', 'ASG-004', 'B0CRZ1J4K4', '12345004', '8906123450042', 'ASG Mantra', 'Skin Care', '249.00', '100g', '1'],
+                    ['Organix Mantra Peppermint Essential Oil 15ML', 'ASG-OM-PEPPERMINT-OIL-15ML', 'B0D1PPMINT1', '10271001', '8906172500101', 'Organix Mantra', 'Personal Care', '349.00', '15ml', '1'],
+                    ['Organix Mantra Argan Hair Oil 50ML', 'ASG-OM-ARGAN-HAIR-OIL-50ML', 'B0D2ARGAN50', '10271002', '8906172500202', 'Organix Mantra', 'Hair Care', '499.00', '50ml', '1'],
+                    ['Organix Mantra Activated Charcoal Face Wash 100G', 'ASG-OM-CHARCOAL-FW-100G', 'B0D3CHRCL00', '10271003', '8906172500303', 'Organix Mantra', 'Skin Care', '299.00', '100g', '1'],
                   ];
                   const csv = [headers.join(','), ...sample.map(r => r.join(','))].join('\n');
                   const blob = new Blob([csv], { type: 'text/csv' });
@@ -645,24 +724,93 @@ export default function ProductMasterPage() {
               {/* ── Add Manually Tab ── */}
               <TabsContent value="manual" className="space-y-4 mt-6">
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-                  <Card>
+                  <Card ref={formCardRef}>
                     <CardHeader>
                       <CardTitle className="flex items-center gap-2 text-lg">
-                        <Plus className="h-5 w-5 text-blue-500" />
-                        Add New Product
+                        {selectedProduct ? (
+                          <><Pencil className="h-5 w-5 text-amber-500" />Edit Product</>
+                        ) : (
+                          <><Plus className="h-5 w-5 text-blue-500" />Add New Product</>
+                        )}
                       </CardTitle>
+                      {selectedProduct && (
+                        <div className="flex items-center gap-2 mt-1 p-2 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800">
+                          <Pencil className="h-3 w-3 shrink-0" />
+                          <span>Editing: <strong>{selectedProduct.productName}</strong> — fill in missing IDs and save.</span>
+                          <button onClick={handleClearSelection} className="ml-auto text-amber-600 hover:text-amber-800">
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      )}
                     </CardHeader>
                     <CardContent className="space-y-4">
                       <div className="grid grid-cols-2 gap-4">
-                        <div className="col-span-2 space-y-2">
+                        {/* Product Name — autocomplete search */}
+                        <div className="col-span-2 space-y-2 relative">
                           <label className="text-sm font-medium">
                             Product Name <span className="text-red-500">*</span>
                           </label>
-                          <Input
-                            placeholder="Enter product name"
-                            value={formData.productName}
-                            onChange={(e) => handleInputChange('productName', e.target.value)}
-                          />
+                          <div className="relative">
+                            <Input
+                              ref={productSearchRef}
+                              placeholder="Type to search existing products or enter a new name…"
+                              value={selectedProduct ? formData.productName : productSearch}
+                              onChange={(e) => {
+                                if (selectedProduct) {
+                                  handleInputChange('productName', e.target.value);
+                                } else {
+                                  setProductSearch(e.target.value);
+                                  handleInputChange('productName', e.target.value);
+                                  setShowProductDropdown(true);
+                                }
+                              }}
+                              onFocus={() => { if (!selectedProduct) setShowProductDropdown(true); }}
+                              className={selectedProduct ? 'pr-8 border-amber-300 bg-amber-50/40' : ''}
+                            />
+                            {selectedProduct && (
+                              <button
+                                onClick={handleClearSelection}
+                                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                                title="Clear selection"
+                              >
+                                <X className="h-4 w-4" />
+                              </button>
+                            )}
+                          </div>
+                          {/* Dropdown */}
+                          {showProductDropdown && !selectedProduct && filteredForAutocomplete.length > 0 && (
+                            <div
+                              ref={dropdownRef}
+                              className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow-lg max-h-56 overflow-y-auto text-sm"
+                            >
+                              {filteredForAutocomplete.map((p) => (
+                                <div
+                                  key={p.id}
+                                  className="px-3 py-2 cursor-pointer hover:bg-blue-50 border-b last:border-0"
+                                  onMouseDown={() => handleSelectProduct(p)}
+                                >
+                                  <div className="font-medium truncate">{p.productName}</div>
+                                  <div className="flex items-center gap-3 mt-0.5 text-xs text-muted-foreground">
+                                    <span className="font-mono">SKU: {p.asgSku}</span>
+                                    {p.amazonId
+                                      ? <span className="text-green-600">ASIN ✓</span>
+                                      : <span className="text-red-400">ASIN missing</span>}
+                                    {p.blinkitId
+                                      ? <span className="text-green-600">Blinkit ✓</span>
+                                      : <span className="text-red-400">Blinkit missing</span>}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {showProductDropdown && !selectedProduct && productSearch.trim().length > 0 && filteredForAutocomplete.length === 0 && (
+                            <div
+                              ref={dropdownRef}
+                              className="absolute z-50 w-full mt-1 bg-white border rounded-md shadow text-sm px-3 py-2 text-muted-foreground"
+                            >
+                              No existing product found — will create new
+                            </div>
+                          )}
                         </div>
 
                         <div className="col-span-2 space-y-2">
@@ -670,7 +818,7 @@ export default function ProductMasterPage() {
                             ASG SKU <span className="text-red-500">*</span>
                           </label>
                           <Input
-                            placeholder="ASG-001"
+                            placeholder="e.g. ASG-OM-EPSOM-1KG"
                             value={formData.asgSku}
                             onChange={(e) => handleInputChange('asgSku', e.target.value)}
                           />
@@ -679,7 +827,7 @@ export default function ProductMasterPage() {
                         <div className="space-y-2">
                           <label className="text-sm font-medium">Amazon ASIN</label>
                           <Input
-                            placeholder="B07C16V2TC"
+                            placeholder="e.g. B07C16V2TC"
                             value={formData.amazonId}
                             onChange={(e) => handleInputChange('amazonId', e.target.value)}
                           />
@@ -688,7 +836,7 @@ export default function ProductMasterPage() {
                         <div className="space-y-2">
                           <label className="text-sm font-medium">Blinkit SKU ID</label>
                           <Input
-                            placeholder="12345001"
+                            placeholder="e.g. 10169419"
                             value={formData.blinkitId}
                             onChange={(e) => handleInputChange('blinkitId', e.target.value)}
                           />
@@ -697,7 +845,7 @@ export default function ProductMasterPage() {
                         <div className="space-y-2">
                           <label className="text-sm font-medium">GS-1 Code</label>
                           <Input
-                            placeholder="890617250XXXX"
+                            placeholder="e.g. 8906172500011"
                             value={formData.gs1}
                             onChange={(e) => handleInputChange('gs1', e.target.value)}
                           />
@@ -706,7 +854,7 @@ export default function ProductMasterPage() {
                         <div className="space-y-2">
                           <label className="text-sm font-medium">Brand</label>
                           <Input
-                            placeholder="Brand name"
+                            placeholder="e.g. Organix Mantra"
                             value={formData.brand}
                             onChange={(e) => handleInputChange('brand', e.target.value)}
                           />
@@ -724,7 +872,7 @@ export default function ProductMasterPage() {
                         <div className="space-y-2">
                           <label className="text-sm font-medium">Unit Weight</label>
                           <Input
-                            placeholder="100g / 250ml"
+                            placeholder="e.g. 100g / 250ml"
                             value={formData.unitWeight}
                             onChange={(e) => handleInputChange('unitWeight', e.target.value)}
                           />
@@ -733,10 +881,14 @@ export default function ProductMasterPage() {
                         <div className="space-y-2">
                           <label className="text-sm font-medium">Pack Size</label>
                           <Input
-                            type="number"
-                            placeholder="1"
+                            type="text"
+                            inputMode="numeric"
+                            placeholder="e.g. 1"
                             value={formData.packSize}
-                            onChange={(e) => handleInputChange('packSize', e.target.value)}
+                            onChange={(e) => {
+                              const val = e.target.value.replace(/[^0-9]/g, '');
+                              handleInputChange('packSize', val);
+                            }}
                           />
                         </div>
 
@@ -745,7 +897,7 @@ export default function ProductMasterPage() {
                           <Input
                             type="number"
                             step="0.01"
-                            placeholder="299.00"
+                            placeholder="e.g. 299.00"
                             value={formData.unitPrice}
                             onChange={(e) => handleInputChange('unitPrice', e.target.value)}
                           />
@@ -755,9 +907,13 @@ export default function ProductMasterPage() {
                       <Button
                         onClick={handleSaveProduct}
                         disabled={isSaving}
-                        className="w-full bg-blue-600 hover:bg-blue-700"
+                        className={`w-full ${selectedProduct ? 'bg-amber-600 hover:bg-amber-700' : 'bg-blue-600 hover:bg-blue-700'}`}
                       >
-                        {isSaving ? 'Saving...' : 'Add Product'}
+                        {isSaving
+                          ? 'Saving...'
+                          : selectedProduct
+                          ? 'Update Product'
+                          : 'Add Product'}
                       </Button>
                     </CardContent>
                   </Card>
@@ -769,6 +925,9 @@ export default function ProductMasterPage() {
                         <FileText className="h-5 w-5 text-blue-500" />
                         All Products ({products.length})
                       </CardTitle>
+                      <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1">
+                        <Pencil className="h-3 w-3" /> Click any product to edit it
+                      </p>
                     </CardHeader>
                     <CardContent className="p-0">
                       <div className="overflow-y-auto max-h-[560px]">
@@ -787,15 +946,31 @@ export default function ProductMasterPage() {
                         ) : (
                           <div className="divide-y">
                             {products.map((product) => {
-                              const isUnlinked = product.asgSku?.startsWith('UNLINKED-BLNK-');
+                              const isBlinkitUnlinked = product.asgSku?.startsWith('UNLINKED-BLNK-');
+                              const isAmazonUnlinked = product.asgSku?.startsWith('UNLINKED-AMZN-');
+                              const isUnlinked = isBlinkitUnlinked || isAmazonUnlinked;
+                              const unlinkedLabel = isAmazonUnlinked
+                                ? `Amazon ASIN: ${product.amazonId}`
+                                : `Blinkit ID: ${product.blinkitId}`;
+                              const isSelected = selectedProduct?.id === product.id;
                               return (
                                 <div
                                   key={product.id}
-                                  className={`px-4 py-3 transition-colors ${isUnlinked ? 'bg-orange-50 border-l-4 border-orange-400' : 'hover:bg-muted/50'}`}
+                                  className={`px-4 py-3 transition-colors cursor-pointer group
+                                    ${isSelected
+                                      ? 'bg-blue-50 border-l-4 border-blue-500'
+                                      : isUnlinked
+                                      ? 'bg-orange-50 border-l-4 border-orange-400 hover:bg-orange-100'
+                                      : 'hover:bg-muted/50 border-l-4 border-transparent hover:border-blue-300'
+                                    }`}
+                                  onClick={() => handleSelectProduct(product)}
                                 >
                                   <div className="flex items-start justify-between gap-2">
                                     <div className="min-w-0">
-                                      <p className="font-medium text-sm truncate">{product.productName}</p>
+                                      <div className="flex items-center gap-1.5">
+                                        <p className="font-medium text-sm truncate">{product.productName}</p>
+                                        <Pencil className={`h-3 w-3 text-blue-400 shrink-0 transition-opacity ${isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-60'}`} />
+                                      </div>
                                       <div className="flex items-center gap-3 mt-1 flex-wrap">
                                         <span className="text-xs text-muted-foreground font-mono">SKU: {product.asgSku}</span>
                                         {product.amazonId && (
@@ -811,7 +986,7 @@ export default function ProductMasterPage() {
                                         size="sm"
                                         variant="outline"
                                         className="shrink-0 text-orange-600 border-orange-300 hover:bg-orange-50"
-                                        onClick={() => { setLinkingId(product.id); setLinkSearch(''); }}
+                                        onClick={(e) => { e.stopPropagation(); setLinkingId(product.id); setLinkSearch(''); setLinkTargetId(null); }}
                                       >
                                         <Link2 className="h-3 w-3 mr-1" />Link
                                       </Button>
@@ -820,7 +995,7 @@ export default function ProductMasterPage() {
                                   {isUnlinked && linkingId === product.id && (
                                     <div className="mt-2 space-y-2">
                                       <p className="text-xs text-orange-700 font-medium">
-                                        Blinkit: <span className="font-mono">{product.blinkitId}</span> — "{product.productName}"
+                                        {unlinkedLabel} — "{product.productName}"
                                       </p>
                                       <Input
                                         className="h-7 text-xs"
@@ -848,7 +1023,7 @@ export default function ProductMasterPage() {
                                       )}
                                       <div className="flex gap-2">
                                         <Button size="sm" className="h-7 text-xs" disabled={isLinking || !linkTargetId}
-                                          onClick={() => handleLinkBlinkit(product)}>
+                                          onClick={() => handleLinkProduct(product)}>
                                           {isLinking ? 'Linking...' : 'Confirm Link'}
                                         </Button>
                                         <Button size="sm" variant="ghost" className="h-7 text-xs"

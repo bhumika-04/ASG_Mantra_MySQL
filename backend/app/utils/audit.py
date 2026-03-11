@@ -32,6 +32,7 @@ def log_audit(
             RecordId=str(record_id) if record_id else None,
             OldValues=json.dumps(old_values) if old_values else None,
             NewValues=json.dumps(new_values) if new_values else None,
+            CreatedAt=datetime.now(),
         )
         db.add(entry)
     except Exception:
@@ -64,7 +65,7 @@ def log_upload(
             ErrorRows=error_rows,
             Errors=json.dumps(errors[:20]) if errors else None,
             Status=status,
-            ProcessedAt=datetime.utcnow(),
+            ProcessedAt=datetime.now(),
         )
         db.add(entry)
     except Exception:

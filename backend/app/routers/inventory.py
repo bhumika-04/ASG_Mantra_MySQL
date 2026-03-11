@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 from typing import Optional, List
-from datetime import datetime, date as date_type
+from datetime import datetime
 
 from app.database import get_db
 from app.models.user import User
@@ -14,7 +14,7 @@ from app.models.inventory import Inventory
 from app.models.product import Product
 from app.models.amazon_inventory import AmazonInventoryData
 from app.models.blinkit_inventory import BlinkitInventoryData
-from app.schemas.inventory import InventoryResponse, InventoryUpdate
+from app.schemas.inventory import InventoryUpdate
 from app.schemas.common import PaginatedResponse
 from app.utils.dependencies import get_current_user
 
@@ -112,64 +112,88 @@ async def get_inventory(
 
 @router.get("/low-stock", response_model=dict)
 async def get_low_stock_dashboard(
-    limit: int = Query(5, ge=1, le=50, description="Number of items to return"),
-    channel: Optional[str] = Query(None, description="Filter by channel"),
+    limit: int = Query(10, ge=1, le=50, description="Number of items to return"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
-    Get low stock items for dashboard display
-    Returns items that have pending 'To Pack' quantities in Purchase Orders
-    (Ordered quantity > Packed quantity), indicating need for more inventory
+    High-level low stock alerts for dashboard.
+    Uses LEFT JOIN from Products → latest Inventory record.
+    Includes products with no inventory record (treated as 0 packed = critical).
+    Severity: 'critical' = packed == 0 or no record, 'low' = packed 1-200.
     """
-    from sqlalchemy import func, case
-    from app.models.purchase_order import PurchaseOrder
+    from sqlalchemy.orm import outerjoin
 
-    # Query to find products with pending "To Pack" quantities
-    # Group PO quantities by product (across all channels)
-    subquery = db.query(
-        PurchaseOrder.ProductId,
-        func.sum(
-            case(
-                (PurchaseOrder.Quantity > PurchaseOrder.ReceivedQuantity,
-                 PurchaseOrder.Quantity - PurchaseOrder.ReceivedQuantity),
-                else_=0
+    latest_date = db.query(func.max(Inventory.InventoryDate)).scalar()
+
+    # Subquery: latest inventory per product
+    if latest_date:
+        inv_sq = (
+            db.query(
+                Inventory.ProductId,
+                Inventory.Id.label('inv_id'),
+                Inventory.PackedQty,
+                Inventory.UnpackedQty,
+                Inventory.InventoryDate,
             )
-        ).label('to_pack_qty')
-    ).filter(
-        PurchaseOrder.Status.in_(['Created', 'Packed', 'Dispatched', 'In Transit', 'Delayed'])
-    ).group_by(PurchaseOrder.ProductId).subquery()
+            .filter(Inventory.InventoryDate == latest_date)
+            .subquery()
+        )
+        rows = (
+            db.query(Product, inv_sq)
+            .outerjoin(inv_sq, Product.Id == inv_sq.c.ProductId)
+            .filter(Product.IsActive == True)
+            # Exclude auto-created unlinked products (no proper ASG SKU)
+            .filter(~Product.AsgSku.like('UNLINKED-%'))
+            .filter(
+                or_(
+                    inv_sq.c.inv_id == None,          # no inventory record
+                    inv_sq.c.PackedQty <= 200,        # low packed stock
+                )
+            )
+            .order_by(func.coalesce(inv_sq.c.PackedQty, -1).asc())
+            .all()
+        )
+    else:
+        # No inventory data at all — show all active products (with proper SKU) as critical
+        rows = (
+            db.query(Product)
+            .filter(Product.IsActive == True)
+            .filter(~Product.AsgSku.like('UNLINKED-%'))
+            .all()
+        )
 
-    # Join with Inventory (ASG stock) and Product
-    query = db.query(
-        Inventory,
-        Product,
-        subquery.c.to_pack_qty
-    ).join(
-        Product, Inventory.ProductId == Product.Id
-    ).join(
-        subquery,
-        Inventory.ProductId == subquery.c.ProductId
-    ).filter(
-        subquery.c.to_pack_qty > 0
-    )
+    alerts = []
+    for row in rows:
+        if latest_date:
+            prod = row[0]
+            has_record = row.inv_id is not None
+            packed = int(row.PackedQty or 0) if has_record else 0
+            unpacked = int(row.UnpackedQty or 0) if has_record else 0
+        else:
+            prod = row
+            packed = 0
+            unpacked = 0
+            has_record = False
 
-    # Order by highest to_pack_qty first (most urgent)
-    query = query.order_by(subquery.c.to_pack_qty.desc()).limit(limit)
-
-    results = query.all()
-
-    items = []
-    for inv, prod, to_pack_qty in results:
-        items.append({
-            "id": inv.Id,
+        alerts.append({
+            "id": prod.Id,
             "productName": prod.ProductName,
             "asgSku": prod.AsgSku,
-            "currentStock": inv.CurrentStock,
-            "toPackQty": int(to_pack_qty or 0),
+            "packedQty": packed,
+            "unpackedQty": unpacked,
+            "severity": "critical" if packed == 0 else "low",
+            "inventoryDate": latest_date.isoformat() if latest_date and has_record else None,
         })
 
-    return {"items": items, "total": len(items)}
+    alerts.sort(key=lambda x: (0 if x["severity"] == "critical" else 1, x["packedQty"]))
+
+    return {
+        "items": alerts[:limit],
+        "total": len(alerts),
+        "critical_count": sum(1 for a in alerts if a["severity"] == "critical"),
+        "low_count": sum(1 for a in alerts if a["severity"] == "low"),
+    }
 
 
 @router.get("/alerts/low-stock", response_model=List[dict])
@@ -343,8 +367,9 @@ async def get_dispatch_overview(
         blinkit = int(row.blinkit_stock or 0)
         total_stock = amazon + blinkit
 
-        # Simplified status (ReorderLevel removed)
-        if total_stock == 0:
+        # Status based on ASG warehouse stock (packed + unpacked)
+        asg_stock = packed + unpacked
+        if asg_stock == 0:
             status = 'Out of Stock'
         else:
             status = 'Healthy'

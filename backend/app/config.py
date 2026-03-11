@@ -55,7 +55,10 @@ class Settings(BaseSettings):
             conn_str = f"DRIVER={{{self.DB_DRIVER}}};SERVER={self.DB_SERVER};DATABASE={self.DB_NAME};Trusted_Connection=yes;TrustServerCertificate=yes"
             return f"mssql+pyodbc:///?odbc_connect={quote_plus(conn_str)}"
         else:
-            return f"mssql+pyodbc://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_SERVER}:{self.DB_PORT}/{self.DB_NAME}?driver={self.DB_DRIVER.replace(' ', '+')}&TrustServerCertificate=yes"
+            # Use ODBC connection string format to safely handle special characters
+            # in passwords (e.g. @) and MSSQL server notation (IP,port)
+            conn_str = f"DRIVER={{{self.DB_DRIVER}}};SERVER={self.DB_SERVER},{self.DB_PORT};DATABASE={self.DB_NAME};UID={self.DB_USER};PWD={self.DB_PASSWORD};TrustServerCertificate=yes"
+            return f"mssql+pyodbc:///?odbc_connect={quote_plus(conn_str)}"
 
     @property
     def allowed_origins_list(self) -> List[str]:

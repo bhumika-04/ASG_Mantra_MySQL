@@ -24,6 +24,7 @@ from app.utils.dependencies import get_current_user
 from app.schemas.amazon_po import AmazonPOConfirmRequest
 from app.routers.uploads import find_or_create_product, find_or_create_warehouse
 from app.utils.audit import log_audit, log_upload
+from app.services.amazon_pdf_parser import extract_amazon_po_from_pdf
 
 
 def _get_packing_alerts_amazon(db: Session, items: list) -> list:
@@ -31,16 +32,28 @@ def _get_packing_alerts_amazon(db: Session, items: list) -> list:
     items: list of (asin, title, ordered_qty)
     Returns list of alert dicts for items where packed < ordered.
     """
+    if not items:
+        return []
+
+    asins = [asin for asin, _, qty in items if asin and qty]
+    if not asins:
+        return []
+
+    # Single query: join Product + Inventory to get packed qty per ASIN
+    rows = db.query(
+        Product.AmazonId,
+        func.sum(Inventory.PackedQty).label('packed_qty')
+    ).outerjoin(Inventory, Inventory.ProductId == Product.Id)\
+     .filter(Product.AmazonId.in_(asins))\
+     .group_by(Product.AmazonId).all()
+
+    packed_map = {row.AmazonId: int(row.packed_qty or 0) for row in rows}
+
     alerts = []
     for asin, title, ordered_qty in items:
         if not asin or not ordered_qty:
             continue
-        product = db.query(Product).filter(Product.AmazonId == asin).first()
-        packed_qty = 0
-        if product:
-            packed_qty = db.query(func.sum(Inventory.PackedQty)).filter(
-                Inventory.ProductId == product.Id
-            ).scalar() or 0
+        packed_qty = packed_map.get(asin, 0)
         gap = int(ordered_qty) - packed_qty
         if gap > 0:
             alerts.append({
@@ -51,6 +64,48 @@ def _get_packing_alerts_amazon(db: Session, items: list) -> list:
                 "gap": gap,
             })
     return alerts
+
+
+def _deduct_from_packed_inventory_amazon(db: Session, items: list) -> list:
+    """Deduct ordered qty from PackedQty in Inventory for each Amazon PO item.
+    items: list of (asin, title, ordered_qty)
+    Returns list of shortfall warnings for items where packed_qty < ordered_qty.
+    """
+    warnings = []
+    for asin, title, ordered_qty in items:
+        if not asin or not ordered_qty:
+            continue
+        product = db.query(Product).filter(Product.AmazonId == asin).first()
+        if not product:
+            continue
+
+        # Get all inventory rows for this product (latest date per warehouse)
+        inv_rows = db.query(Inventory).filter(
+            Inventory.ProductId == product.Id,
+            Inventory.PackedQty > 0
+        ).order_by(Inventory.InventoryDate.desc()).all()
+
+        total_packed = sum(i.PackedQty for i in inv_rows)
+        qty_to_deduct = int(ordered_qty)
+        remaining = qty_to_deduct
+
+        for inv in inv_rows:
+            if remaining <= 0:
+                break
+            deduct = min(inv.PackedQty, remaining)
+            inv.PackedQty -= deduct
+            inv.CurrentStock = max(0, inv.CurrentStock - deduct)
+            remaining -= deduct
+
+        if remaining > 0 or total_packed == 0:
+            warnings.append({
+                "asin": asin,
+                "title": title or asin,
+                "ordered_qty": qty_to_deduct,
+                "packed_qty": total_packed,
+                "shortfall": max(remaining, qty_to_deduct - total_packed),
+            })
+    return warnings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -168,34 +223,71 @@ def detect_sales_format(columns: list) -> str:
     return 'VendorCSV'
 
 
+def _is_placeholder_name(name: str) -> bool:
+    """Returns True if ProductName is an ASIN or auto-generated placeholder, not a real name."""
+    if not name:
+        return True
+    import re
+    if re.match(r'^B0[A-Z0-9]{6,}$', name.strip()):
+        return True
+    if name.startswith('Product '):
+        return True
+    return False
+
+
+def _is_placeholder_sku(sku: str) -> bool:
+    """Returns True if AsgSku is a placeholder (UNLINKED-AMZN-, AMZ-, BLK-)."""
+    if not sku:
+        return True
+    return sku.startswith('UNLINKED-AMZN-') or sku.startswith('AMZ-') or sku.startswith('BLK-')
+
+
 def _ensure_product_amazon(db: Session, asin: str, title: str, brand: str, category: str, seen: set, model_number: str = None) -> bool:
-    """Auto-create a Product record for an unknown ASIN.
+    """Auto-create or update a Product record for an Amazon ASIN.
     Uses model_number (ASG SKU from CSV) if available, otherwise falls back to
     placeholder AsgSku = 'UNLINKED-AMZN-{asin}' so user can fill in the real SKU later.
+    Also updates ProductName/AsgSku on existing products when better data arrives.
     Returns True if a new product was created, False if it already existed.
     """
     if asin in seen:
         return False
     seen.add(asin)
-    # Already linked by ASIN
-    if db.query(Product).filter(Product.AmazonId == asin).first():
-        logger.debug(f"[Product] ASIN {asin} already linked in Products — skipping auto-create")
-        return False
-    # Already linked by model number / AsgSku
+
     clean_model = (model_number or '').strip()
-    if clean_model and clean_model.lower() != 'nan':
-        if db.query(Product).filter(Product.AsgSku == clean_model).first():
-            logger.debug(f"[Product] Model number {clean_model} already exists — skipping auto-create")
-            return False
-        sku = clean_model[:50]
-    else:
-        sku = f"UNLINKED-AMZN-{asin}"[:50]
-        if db.query(Product).filter(Product.AsgSku == sku).first():
-            logger.debug(f"[Product] Placeholder SKU {sku} already exists — skipping auto-create")
-            return False
+    if clean_model.lower() == 'nan':
+        clean_model = ''
+
+    # Find existing product by ASIN first, then by model number
+    product = db.query(Product).filter(Product.AmazonId == asin).first()
+    if not product and clean_model:
+        product = db.query(Product).filter(Product.AsgSku == clean_model).first()
+
+    if product:
+        updated = False
+        # Update ProductName if current name is a placeholder/ASIN and we have a real title
+        if title and title != 'nan' and _is_placeholder_name(product.ProductName):
+            product.ProductName = title[:255]
+            updated = True
+        # Update AsgSku if current SKU is a placeholder and we have a real model number
+        if clean_model and _is_placeholder_sku(product.AsgSku):
+            product.AsgSku = clean_model[:50]
+            updated = True
+        # Link AmazonId if not set
+        if asin and not product.AmazonId:
+            product.AmazonId = asin[:50]
+            updated = True
+        if brand and not product.Brand:
+            product.Brand = brand[:100]
+            updated = True
+        if updated:
+            logger.debug(f"[Product] Updated existing product id={product.Id}: name={product.ProductName}, sku={product.AsgSku}")
+        return False
+
+    # Create new product
+    sku = clean_model[:50] if clean_model else f"UNLINKED-AMZN-{asin}"[:50]
     logger.info(f"[Product] Auto-creating product: ASIN={asin}, SKU={sku}")
     db.add(Product(
-        ProductName=(title or asin)[:255],
+        ProductName=(title or f"Product {sku}")[:255],
         AsgSku=sku,
         AmazonId=asin,
         Brand=brand[:100] if brand else None,
@@ -1081,6 +1173,16 @@ async def preview_amazon_po(
                             'placeholderSku': placeholder,
                         })
 
+        # Check for duplicate PO numbers already in the database
+        duplicate_pos = []
+        for po in po_summary:
+            existing = db.query(AmazonPOData).filter(AmazonPOData.PONumber == po['poNumber']).first()
+            if existing:
+                duplicate_pos.append({
+                    'poNumber': po['poNumber'],
+                    'uploadedOn': existing.CreatedAt.strftime('%d %b %Y') if existing.CreatedAt else 'unknown date',
+                })
+
         return {
             'success': True,
             'validRows': valid_rows,
@@ -1088,6 +1190,7 @@ async def preview_amazon_po(
             'newFacilities': [],
             'poSummary': po_summary,
             'poItems': po_items,
+            'duplicatePos': duplicate_pos,
         }
     except HTTPException:
         raise
@@ -1137,7 +1240,7 @@ async def upload_amazon_po(
 
                 po = AmazonPOData(
                     PONumber=po_number,
-                    POStatus=safe_str(row.get('Status') or row.get('POStatus'), 50),
+                    POStatus='Created',
                     VendorCode=safe_str(row.get('VendorCode') or row.get('Vendor'), 50),
                     ShipToLocationCode=ship_to_code,
                     ShipToCity=ship_to_city,
@@ -1213,6 +1316,7 @@ async def upload_amazon_po(
     log_audit(db, current_user.Id, "UPLOAD", "AmazonPO", None,
               new_values={"type": "AmazonPO", "file": file.filename, "rows": rows_processed, "pos": po_created})
     db.commit()
+    # Notify about low/insufficient packed inventory (no auto-deduction — manual via AcceptedQty)
     packing_alerts = _get_packing_alerts_amazon(db, packing_items)
     return {
         "success": True,
@@ -1236,6 +1340,8 @@ async def upload_amazon_po(
 @router.get("/analytics")
 async def get_amazon_sales_analytics(
     days: int = Query(1825, ge=1, le=1825, description="Number of days to look back"),
+    start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD (overrides days)"),
+    end_date: Optional[str] = Query(None, description="End date YYYY-MM-DD (default: today)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -1245,9 +1351,10 @@ async def get_amazon_sales_analytics(
     RKExcel rows:   OrderedUnits is NULL; DRR_D1 (daily run rate) is a separate metric.
     Only VendorCSV OrderedUnits are used for 'total units' — DRR is not ordered units.
     """
-    end_dt = date.today()
-    start_dt = end_dt - timedelta(days=days)
-    start_dt_s = start_dt.isoformat()  # e.g. '2021-02-10'
+    end_dt = date.fromisoformat(end_date) if end_date else date.today()
+    start_dt = date.fromisoformat(start_date) if start_date else (end_dt - timedelta(days=days))
+    start_dt_s = start_dt.isoformat()
+    end_dt_s = end_dt.isoformat()
 
     try:
         # Use raw T-SQL for all queries to guarantee MSSQL/pyodbc compatibility.
@@ -1268,8 +1375,8 @@ async def get_amazon_sales_analytics(
                 SUM(OrderedRevenue)                             AS total_revenue,
                 MAX(ReportDate)                                 AS max_date
             FROM AmazonSales
-            WHERE ReportDate >= :start_dt
-        """), {"start_dt": start_dt_s}).fetchone()
+            WHERE ReportDate >= :start_dt AND ReportDate <= :end_dt
+        """), {"start_dt": start_dt_s, "end_dt": end_dt_s}).fetchone()
 
         total_records_in_range = int(summary_row[0] or 0)
         active_products        = int(summary_row[1] or 0)
@@ -1305,19 +1412,19 @@ async def get_amazon_sales_analytics(
             if prev_u > 0:
                 monthly_growth = round(((current_u - prev_u) / prev_u) * 100, 1)
 
-        # ----- Top 10 products -----
+        # ----- All products -----
         top_rows = db.execute(text("""
-            SELECT TOP 10
+            SELECT
                 ASIN,
                 MAX(ProductTitle)                               AS product_title,
                 MAX(SKU)                                        AS sku,
                 SUM(ISNULL(OrderedUnits, 0))                    AS total_units,
                 SUM(OrderedRevenue)                             AS total_revenue
             FROM AmazonSales
-            WHERE ReportDate >= :start_dt AND SourceFile = 'VendorCSV'
+            WHERE ReportDate >= :start_dt AND ReportDate <= :end_dt AND SourceFile = 'VendorCSV'
             GROUP BY ASIN
             ORDER BY SUM(ISNULL(OrderedUnits, 0)) DESC
-        """), {"start_dt": start_dt_s}).fetchall()
+        """), {"start_dt": start_dt_s, "end_dt": end_dt_s}).fetchall()
 
         top_products = [
             {
@@ -1337,10 +1444,10 @@ async def get_amazon_sales_analytics(
                 SUM(ISNULL(OrderedUnits, 0))          AS total_units,
                 SUM(OrderedRevenue)                   AS total_revenue
             FROM AmazonSales
-            WHERE ReportDate >= :start_dt AND SourceFile = 'VendorCSV'
+            WHERE ReportDate >= :start_dt AND ReportDate <= :end_dt AND SourceFile = 'VendorCSV'
             GROUP BY ReportDate
             ORDER BY ReportDate
-        """), {"start_dt": start_dt_s}).fetchall()
+        """), {"start_dt": start_dt_s, "end_dt": end_dt_s}).fetchall()
 
         if len(daily_rows) > 1:
             daily_trend = [
@@ -1396,6 +1503,69 @@ async def get_amazon_sales_analytics(
         "top_products": top_products,
         "daily_trend":  daily_trend,
     }
+
+
+# ============================================================
+# ENDPOINT 8: Amazon Sales — All Products (paginated)
+# ============================================================
+@router.get("/products")
+async def list_amazon_sales_products(
+    search: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """List all products from AmazonSales aggregated by ASIN, with pagination and search."""
+    try:
+        search_clause = ""
+        params: dict = {"offset": (page - 1) * page_size, "page_size": page_size}
+        if search:
+            search_clause = "AND (ProductTitle LIKE :search OR ASIN LIKE :search OR SKU LIKE :search)"
+            params["search"] = f"%{search}%"
+
+        count_sql = f"""
+            SELECT COUNT(DISTINCT ASIN)
+            FROM AmazonSales
+            WHERE ASIN IS NOT NULL {search_clause}
+        """
+        total = int(db.execute(text(count_sql), params).scalar() or 0)
+
+        rows = db.execute(text(f"""
+            SELECT
+                s.ASIN,
+                COALESCE(NULLIF(MAX(s.ProductTitle), ''), p.ProductName, s.ASIN) AS product_title,
+                MAX(s.SKU)                                   AS sku,
+                SUM(ISNULL(s.OrderedUnits, 0))               AS total_units,
+                SUM(ISNULL(s.OrderedRevenue, 0))             AS total_revenue,
+                MIN(s.ReportDate)                            AS first_sale,
+                MAX(s.ReportDate)                            AS last_sale
+            FROM AmazonSales s
+            LEFT JOIN Products p ON p.AmazonId = s.ASIN
+            WHERE s.ASIN IS NOT NULL {search_clause}
+            GROUP BY s.ASIN, p.ProductName
+            ORDER BY SUM(ISNULL(s.OrderedUnits, 0)) DESC
+            OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
+        """), params).fetchall()
+
+        items = [
+            {
+                "asin":         row[0] or "",
+                "productTitle": row[1] or row[0] or "Unknown",
+                "sku":          row[2] or "",
+                "totalUnits":   int(row[3] or 0),
+                "totalRevenue": float(row[4] or 0),
+                "firstSale":    row[5].isoformat() if row[5] else None,
+                "lastSale":     row[6].isoformat() if row[6] else None,
+            }
+            for row in rows
+        ]
+
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        return {"items": items, "total": total, "page": page, "page_size": page_size, "total_pages": total_pages}
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Amazon products query failed: {exc}")
 
 
 def _parse_date(val) -> date:
@@ -1467,6 +1637,7 @@ async def update_amazon_po_status(
 @router.post("/purchase-orders/extract-pdf")
 async def extract_amazon_po_pdf(
     file: UploadFile = File(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Extract PO data from an Amazon Vendor Central PO PDF for preview."""
@@ -1481,10 +1652,18 @@ async def extract_amazon_po_pdf(
     if len(contents) == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    from app.services.amazon_pdf_parser import extract_amazon_po_from_pdf
     result = extract_amazon_po_from_pdf(contents)
 
-    return result.to_dict()
+    data = result.to_dict()
+
+    # Check if this PO already exists in the DB
+    po_number = data.get("header", {}).get("po_number")
+    if po_number:
+        existing = db.query(AmazonPOData).filter(AmazonPOData.PONumber == po_number).first()
+        if existing:
+            data["duplicateWarning"] = f"PO {po_number} is already in the database (uploaded on {existing.CreatedAt.strftime('%d %b %Y') if existing.CreatedAt else 'unknown date'}). Confirming will be rejected."
+
+    return data
 
 
 # ============================================================
@@ -1520,7 +1699,7 @@ async def confirm_amazon_po_pdf(
     # Create PO header
     po = AmazonPOData(
         PONumber=header.po_number,
-        POStatus=safe_str(header.po_status or body.status, 50),
+        POStatus='Created',
         VendorCode=safe_str(header.vendor_code, 50),
         ShipToLocationCode=safe_str(header.ship_to_location_code, 50),
         ShipToCity=safe_str(header.ship_to_city, 100),
@@ -1567,14 +1746,36 @@ async def confirm_amazon_po_pdf(
     # Create line items
     items_created = 0
     for item in items:
+        # Resolve product first so we can store ProductId on the item
+        asin = safe_str(item.asin, 20)
+        model_number = safe_str(item.model_number, 100)
+        title = safe_str(item.title, 500)
+        product = None
+        if asin or model_number:
+            from app.models.product import Product
+            filters = []
+            if asin:
+                filters.append(Product.AmazonId == asin)
+            if model_number:
+                filters.append(Product.AsgSku == model_number)
+            from sqlalchemy import or_ as _or
+            existing_product = db.query(Product).filter(_or(*filters)).first()
+            if existing_product:
+                product = existing_product
+            else:
+                product = find_or_create_product(db, asin=asin, model_number=model_number, product_title=title)
+                if product:
+                    products_created.append({"name": title or asin, "sku": model_number, "asin": asin})
+
         po_item = AmazonPOItemData(
             POId=po.Id,
             PONumber=header.po_number,
-            ASIN=safe_str(item.asin, 20) or '',
+            ASIN=asin or '',
+            ProductId=product.Id if product else None,
             ExternalId=safe_str(item.external_id, 50),
-            ModelNumber=safe_str(item.model_number, 100),
+            ModelNumber=model_number,
             HSN=safe_str(item.hsn, 20),
-            Title=safe_str(item.title, 500),
+            Title=title,
             CancellationStatus=safe_str(item.cancellation_status, 50),
             CancellationDate=_parse_date(item.cancellation_date),
             WindowType=safe_str(item.window_type, 50),
@@ -1589,26 +1790,13 @@ async def confirm_amazon_po_pdf(
         db.add(po_item)
         items_created += 1
 
-        # Auto-create product if missing
-        asin = safe_str(item.asin, 20)
-        model_number = safe_str(item.model_number, 100)
-        title = safe_str(item.title, 500)
-        if asin or model_number:
-            from app.models.product import Product
-            existing_product = db.query(Product).filter(
-                (Product.AmazonId == asin) | (Product.AsgSku == model_number)
-            ).first()
-            if not existing_product:
-                find_or_create_product(db, asin=asin, model_number=model_number, product_title=title)
-                products_created.append({"name": title or asin, "sku": model_number, "asin": asin})
-
     log_upload(db, "AmazonPO", "Amazon", f"PDF-{header.po_number}", 0, current_user.Id,
                total_rows=len(items), success_rows=items_created, error_rows=0, status="Success")
     log_audit(db, current_user.Id, "UPLOAD", "AmazonPO", str(po.Id),
               new_values={"type": "AmazonPO_PDF", "po_number": header.po_number, "items": items_created})
     db.commit()
 
-    # Check packing gaps for all PO items
+    # Notify about low/insufficient packed inventory (no auto-deduction — manual via AcceptedQty)
     amazon_items = [
         (safe_str(i.asin, 20), safe_str(i.title, 500), i.quantity_requested)
         for i in items if i.asin and i.quantity_requested

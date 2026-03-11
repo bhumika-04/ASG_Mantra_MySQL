@@ -6,12 +6,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Badge } from '@/components/ui/badge';
 import {
   Package, Plus, Download, Table, Trash2, CheckCircle2, AlertCircle,
-  FileText, Upload, Eye, XCircle, AlertTriangle,
+  FileText, Upload, Eye, XCircle, AlertTriangle, Calendar, ChevronDown,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '@/lib/api';
@@ -49,6 +48,8 @@ interface PreviewRow {
   productName: string | null;
   packedQty: number;
   unpackedQty: number;
+  currentPackedQty: number | null;
+  currentUnpackedQty: number | null;
   warehouse: string | null;
   warehouseFound: boolean;
   channel: string;
@@ -85,8 +86,14 @@ export default function InventoryUploadPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [warehouses, setWarehouses] = useState<AsgWarehouse[]>([]);
   const [loadingData, setLoadingData] = useState(true);
+  const [inventoryMap, setInventoryMap] = useState<Record<string, { packedQty: number; unpackedQty: number }>>({});
+  const [selectedProductStock, setSelectedProductStock] = useState<{ packedQty: number; unpackedQty: number } | null>(null);
   const [productSearch, setProductSearch] = useState('');
   const [warehouseSearch, setWarehouseSearch] = useState('');
+  const [productDropdownOpen, setProductDropdownOpen] = useState(false);
+  const [warehouseDropdownOpen, setWarehouseDropdownOpen] = useState(false);
+  const productDropdownRef = useRef<HTMLDivElement>(null);
+  const warehouseDropdownRef = useRef<HTMLDivElement>(null);
   const [formData, setFormData] = useState({
     productId: 0,
     productName: '',
@@ -96,23 +103,44 @@ export default function InventoryUploadPage() {
     packedQty: 0,
     unpackedQty: 0,
   });
+  const [inventoryDate, setInventoryDate] = useState(new Date().toISOString().split('T')[0]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (productDropdownRef.current && !productDropdownRef.current.contains(e.target as Node)) {
+        setProductDropdownOpen(false);
+      }
+      if (warehouseDropdownRef.current && !warehouseDropdownRef.current.contains(e.target as Node)) {
+        setWarehouseDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
 
   useEffect(() => {
     const fetchData = async () => {
       try {
         const token = localStorage.getItem('token');
-        const [productsData, warehousesData] = await Promise.all([
+        const [productsData, warehousesData, inventoryData] = await Promise.all([
           api.products.getAll(),
           fetch('http://localhost:8000/api/distributors/asg-warehouses?active_only=true', {
             headers: { 'Authorization': `Bearer ${token}` }
           }).then(r => r.json()),
+          api.inventory.getDispatchOverview({ page_size: 1000 }),
         ]);
         const productsArray = Array.isArray(productsData) ? productsData : ((productsData as any)?.items || []);
         const warehousesArray = Array.isArray(warehousesData) ? warehousesData : ((warehousesData as any)?.items || []);
+        const invItems: any[] = (inventoryData as any)?.items || [];
+        const invMap: Record<string, { packedQty: number; unpackedQty: number }> = {};
+        for (const item of invItems) {
+          if (item.asgSku) invMap[item.asgSku] = { packedQty: item.packedQty || 0, unpackedQty: item.unpackedQty || 0 };
+        }
 
         setProducts(productsArray);
         setWarehouses(warehousesArray);
+        setInventoryMap(invMap);
       } catch (error) {
         console.error('Error fetching data:', error);
         toast.error('Failed to load products and warehouses');
@@ -139,7 +167,7 @@ export default function InventoryUploadPage() {
 
     try {
       setIsPreviewing(true);
-      const result = await api.upload.inventoryPreview(file) as PreviewResult;
+      const result = await api.upload.inventoryPreview(file, inventoryDate) as PreviewResult;
       setPreviewResult(result);
     } catch (error: any) {
       toast.error(error.message || 'Failed to preview file');
@@ -154,7 +182,7 @@ export default function InventoryUploadPage() {
     if (!selectedFile) return;
     setIsUploading(true);
     try {
-      const result = await api.upload.inventory(selectedFile) as UploadResult;
+      const result = await api.upload.inventory(selectedFile, inventoryDate) as UploadResult;
       setUploadResult(result);
       setPreviewResult(null);
       setSelectedFile(null);
@@ -175,11 +203,11 @@ export default function InventoryUploadPage() {
   };
 
   const handleDownloadTemplate = () => {
-    const headers = ['Product Name', 'ASG SKU ID', 'Packed Qty', 'Unpacked Qty', 'Warehouse'];
+    const headers = ['ASG SKU ID', 'Packed Qty', 'Unpacked Qty', 'Warehouse', 'Product Name'];
     const sampleData = [
-      ['Epsom Salt 1KG', 'ASG-OM-EPSOM-1KG', '150', '50', 'ASG Main'],
-      ['Rosemary Oil 15ML', 'ASG-OM-ROSE-15ML', '200', '0', 'ASG Main'],
-      ['Tea Tree Oil 15ML', 'ASG-OM-TT-15ML', '75', '125', 'ASG Main'],
+      ['ASG-OM-EPSOM-1KG', '150', '50', 'ASG Main', 'Epsom Salt 1KG'],
+      ['ASG-OM-ROSE-15ML', '200', '0', 'ASG Main', 'Rosemary Oil 15ML'],
+      ['ASG-OM-TT-15ML', '75', '125', 'ASG Main', 'Tea Tree Oil 15ML'],
     ];
 
     const csvContent = [headers.join(','), ...sampleData.map(row => row.join(','))].join('\n');
@@ -224,6 +252,7 @@ export default function InventoryUploadPage() {
       packedQty: 0,
       unpackedQty: 0,
     });
+    setSelectedProductStock(null);
     setProductSearch('');
     setWarehouseSearch('');
     toast.success('Entry added successfully!');
@@ -238,6 +267,7 @@ export default function InventoryUploadPage() {
         productName: product.productName,
         asgSku: product.asgSku,
       });
+      setSelectedProductStock(inventoryMap[product.asgSku] ?? { packedQty: 0, unpackedQty: 0 });
     }
   };
 
@@ -285,7 +315,9 @@ export default function InventoryUploadPage() {
       const formData = new FormData();
       formData.append('file', file);
 
-      const response = await fetch('http://localhost:8000/api/upload/inventory', {
+      const url = new URL('http://localhost:8000/api/upload/inventory');
+      url.searchParams.set('inventory_date', inventoryDate);
+      const response = await fetch(url.toString(), {
         method: 'POST',
         headers: { 'Authorization': `Bearer ${token}` },
         body: formData,
@@ -309,8 +341,8 @@ export default function InventoryUploadPage() {
   };
 
   const filteredProducts = products.filter(p =>
-    p.productName.toLowerCase().includes(productSearch.toLowerCase()) ||
-    p.asgSku.toLowerCase().includes(productSearch.toLowerCase())
+    (p.productName || '').toLowerCase().includes(productSearch.toLowerCase()) ||
+    (p.asgSku || '').toLowerCase().includes(productSearch.toLowerCase())
   );
 
   const filteredAsgWarehouses = warehouses.filter(w =>
@@ -394,6 +426,19 @@ export default function InventoryUploadPage() {
                   </TabsList>
 
                   <TabsContent value="excel" className="space-y-4 mt-6">
+                    {/* Inventory Date picker (always visible in excel tab) */}
+                    <div className="flex items-center gap-2">
+                      <Calendar className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                      <label className="text-sm font-medium whitespace-nowrap">Inventory Date</label>
+                      <input
+                        type="date"
+                        value={inventoryDate}
+                        onChange={(e) => setInventoryDate(e.target.value)}
+                        className="h-9 text-sm border border-border rounded-md px-2 bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 w-40"
+                      />
+                      <span className="text-xs text-muted-foreground">Stock quantities will be recorded for this date</span>
+                    </div>
+
                     {/* Step 1: File selection (shown when no preview) */}
                     {!previewResult && (
                       <>
@@ -435,9 +480,8 @@ export default function InventoryUploadPage() {
                               <Badge variant="secondary">ASG SKU ID</Badge>
                               <Badge variant="secondary">Packed Qty</Badge>
                               <Badge variant="secondary">Unpacked Qty</Badge>
+                              <Badge variant="secondary">Warehouse</Badge>
                               <Badge variant="outline">Product Name (optional)</Badge>
-                              <Badge variant="outline">Warehouse (optional)</Badge>
-                              <Badge variant="outline">Channel (optional)</Badge>
                             </div>
                           </CardContent>
                         </Card>
@@ -485,10 +529,13 @@ export default function InventoryUploadPage() {
                               <tr>
                                 <th className="text-left p-2 font-medium whitespace-nowrap">#</th>
                                 <th className="text-left p-2 font-medium whitespace-nowrap">Status</th>
+                                <th className="text-left p-2 font-medium whitespace-nowrap">Inventory Date</th>
                                 <th className="text-left p-2 font-medium whitespace-nowrap">ASG SKU</th>
                                 <th className="text-left p-2 font-medium whitespace-nowrap">Product Name</th>
-                                <th className="text-right p-2 font-medium whitespace-nowrap">Packed</th>
-                                <th className="text-right p-2 font-medium whitespace-nowrap">Unpacked</th>
+                                <th className="text-right p-2 font-medium whitespace-nowrap text-gray-400">Cur. Packed</th>
+                                <th className="text-right p-2 font-medium whitespace-nowrap text-gray-400">Cur. Unpacked</th>
+                                <th className="text-right p-2 font-medium whitespace-nowrap">New Packed</th>
+                                <th className="text-right p-2 font-medium whitespace-nowrap">New Unpacked</th>
                                 <th className="text-left p-2 font-medium whitespace-nowrap">Warehouse</th>
                               </tr>
                             </thead>
@@ -519,11 +566,18 @@ export default function InventoryUploadPage() {
                                       </span>
                                     )}
                                   </td>
+                                  <td className="p-2 font-mono text-xs text-blue-700 whitespace-nowrap">{inventoryDate}</td>
                                   <td className="p-2 font-mono">{row.asgSku}</td>
                                   <td className="p-2 whitespace-nowrap max-w-[180px] truncate" title={row.productName || undefined}>
                                     {row.productName || (
                                       <span className="text-red-500 italic">Not found</span>
                                     )}
+                                  </td>
+                                  <td className="p-2 text-right text-gray-400 font-mono text-xs">
+                                    {row.currentPackedQty !== null ? row.currentPackedQty : '—'}
+                                  </td>
+                                  <td className="p-2 text-right text-gray-400 font-mono text-xs">
+                                    {row.currentUnpackedQty !== null ? row.currentUnpackedQty : '—'}
                                   </td>
                                   <td className="p-2 text-right text-emerald-700 font-medium">{row.packedQty}</td>
                                   <td className="p-2 text-right text-amber-700 font-medium">{row.unpackedQty}</td>
@@ -577,41 +631,81 @@ export default function InventoryUploadPage() {
                         </CardHeader>
                         <CardContent className="space-y-4">
                           <div className="space-y-2">
+                            <label className="text-sm font-medium flex items-center gap-1">
+                              <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
+                              Inventory Date
+                            </label>
+                            <input
+                              type="date"
+                              value={inventoryDate}
+                              onChange={(e) => setInventoryDate(e.target.value)}
+                              className="h-9 w-full text-sm border border-border rounded-md px-2 bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            />
+                          </div>
+                          <div className="space-y-2">
                             <label className="text-sm font-medium">
                               Product Name <span className="text-destructive">*</span>
                             </label>
-                            <Select
-                              value={formData.productId ? formData.productId.toString() : ''}
-                              onValueChange={handleProductSelect}
-                              disabled={loadingData}
-                            >
-                              <SelectTrigger>
-                                <SelectValue placeholder={loadingData ? 'Loading products...' : 'Select product'} />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <div className="px-2 pt-1 pb-1">
-                                  <Input
-                                    placeholder="Search products..."
-                                    value={productSearch}
-                                    onChange={(e) => setProductSearch(e.target.value)}
-                                    onKeyDown={(e) => e.stopPropagation()}
-                                    className="h-8 text-sm"
-                                  />
-                                </div>
-                                {filteredProducts.length === 0 ? (
-                                  <div className="px-2 py-3 text-sm text-muted-foreground text-center">
-                                    No products found
+                            <div className="relative" ref={productDropdownRef}>
+                              <button
+                                type="button"
+                                disabled={loadingData}
+                                onClick={() => { setProductDropdownOpen(v => !v); setProductSearch(''); }}
+                                className="flex items-center justify-between w-full h-10 px-3 py-2 text-sm border border-input rounded-md bg-background hover:bg-accent/50 focus:outline-none focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                <span className={formData.productName ? 'text-foreground' : 'text-muted-foreground'}>
+                                  {loadingData ? 'Loading products…' : (formData.productName || 'Select product')}
+                                </span>
+                                <ChevronDown className="h-4 w-4 opacity-50 flex-shrink-0" />
+                              </button>
+                              {productDropdownOpen && (
+                                <div className="absolute top-full left-0 right-0 z-50 mt-1 border border-border rounded-md bg-background shadow-lg">
+                                  <div className="p-2 border-b border-border">
+                                    <Input
+                                      placeholder="Search products…"
+                                      value={productSearch}
+                                      onChange={(e) => setProductSearch(e.target.value)}
+                                      autoFocus
+                                      className="h-8 text-sm"
+                                    />
                                   </div>
-                                ) : (
-                                  filteredProducts.map((product) => (
-                                    <SelectItem key={product.id} value={product.id.toString()}>
-                                      {product.productName}
-                                    </SelectItem>
-                                  ))
-                                )}
-                              </SelectContent>
-                            </Select>
+                                  <div className="max-h-52 overflow-y-auto">
+                                    {filteredProducts.length === 0 ? (
+                                      <div className="px-3 py-3 text-sm text-muted-foreground text-center">No products found</div>
+                                    ) : filteredProducts.map(p => (
+                                      <div
+                                        key={p.id}
+                                        onClick={() => { handleProductSelect(p.id.toString()); setProductDropdownOpen(false); setProductSearch(''); }}
+                                        className="px-3 py-2 text-sm cursor-pointer hover:bg-muted transition-colors"
+                                      >
+                                        {p.productName}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
                           </div>
+
+                          {/* Current stock info */}
+                          {selectedProductStock !== null && (
+                            <div className="flex items-center gap-3 px-3 py-2.5 rounded-lg bg-muted/60 border border-border text-sm">
+                              <Package className="h-4 w-4 text-muted-foreground flex-shrink-0" />
+                              <span className="text-muted-foreground text-xs font-medium">Current Stock:</span>
+                              <span className="flex items-center gap-1 text-xs">
+                                <span className="font-semibold text-emerald-700">{selectedProductStock.packedQty.toLocaleString()}</span>
+                                <span className="text-muted-foreground">packed</span>
+                              </span>
+                              <span className="text-muted-foreground">·</span>
+                              <span className="flex items-center gap-1 text-xs">
+                                <span className="font-semibold text-amber-700">{selectedProductStock.unpackedQty.toLocaleString()}</span>
+                                <span className="text-muted-foreground">unpacked</span>
+                              </span>
+                              <span className="ml-auto text-xs text-muted-foreground font-medium">
+                                Total: {(selectedProductStock.packedQty + selectedProductStock.unpackedQty).toLocaleString()}
+                              </span>
+                            </div>
+                          )}
 
                           <div className="grid grid-cols-2 gap-4">
                             <div className="space-y-2">
@@ -627,37 +721,45 @@ export default function InventoryUploadPage() {
                               <label className="text-sm font-medium">
                                 ASG Warehouse <span className="text-destructive">*</span>
                               </label>
-                              <Select
-                                value={formData.warehouseId ? formData.warehouseId.toString() : ''}
-                                onValueChange={handleWarehouseSelect}
-                                disabled={loadingData}
-                              >
-                                <SelectTrigger>
-                                  <SelectValue placeholder={loadingData ? 'Loading...' : 'Select warehouse'} />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <div className="px-2 pt-1 pb-1">
-                                    <Input
-                                      placeholder="Search warehouses..."
-                                      value={warehouseSearch}
-                                      onChange={(e) => setWarehouseSearch(e.target.value)}
-                                      onKeyDown={(e) => e.stopPropagation()}
-                                      className="h-8 text-sm"
-                                    />
-                                  </div>
-                                  {filteredAsgWarehouses.length === 0 ? (
-                                    <div className="px-2 py-3 text-sm text-muted-foreground text-center">
-                                      No warehouses found
+                              <div className="relative" ref={warehouseDropdownRef}>
+                                <button
+                                  type="button"
+                                  disabled={loadingData}
+                                  onClick={() => { setWarehouseDropdownOpen(v => !v); setWarehouseSearch(''); }}
+                                  className="flex items-center justify-between w-full h-10 px-3 py-2 text-sm border border-input rounded-md bg-background hover:bg-accent/50 focus:outline-none focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  <span className={formData.warehouse ? 'text-foreground' : 'text-muted-foreground'}>
+                                    {loadingData ? 'Loading…' : (formData.warehouse || 'Select warehouse')}
+                                  </span>
+                                  <ChevronDown className="h-4 w-4 opacity-50 flex-shrink-0" />
+                                </button>
+                                {warehouseDropdownOpen && (
+                                  <div className="absolute top-full left-0 right-0 z-50 mt-1 border border-border rounded-md bg-background shadow-lg">
+                                    <div className="p-2 border-b border-border">
+                                      <Input
+                                        placeholder="Search warehouses…"
+                                        value={warehouseSearch}
+                                        onChange={(e) => setWarehouseSearch(e.target.value)}
+                                        autoFocus
+                                        className="h-8 text-sm"
+                                      />
                                     </div>
-                                  ) : (
-                                    filteredAsgWarehouses.map((warehouse) => (
-                                      <SelectItem key={warehouse.id} value={warehouse.id.toString()}>
-                                        {warehouse.warehouseName}{warehouse.city ? ` — ${warehouse.city}` : ''}
-                                      </SelectItem>
-                                    ))
-                                  )}
-                                </SelectContent>
-                              </Select>
+                                    <div className="max-h-48 overflow-y-auto">
+                                      {filteredAsgWarehouses.length === 0 ? (
+                                        <div className="px-3 py-3 text-sm text-muted-foreground text-center">No warehouses found</div>
+                                      ) : filteredAsgWarehouses.map(w => (
+                                        <div
+                                          key={w.id}
+                                          onClick={() => { handleWarehouseSelect(w.id.toString()); setWarehouseDropdownOpen(false); setWarehouseSearch(''); }}
+                                          className="px-3 py-2 text-sm cursor-pointer hover:bg-muted transition-colors"
+                                        >
+                                          {w.warehouseName}{w.city ? ` — ${w.city}` : ''}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           </div>
 
@@ -774,30 +876,30 @@ export default function InventoryUploadPage() {
                     <table className="w-full text-xs">
                       <thead className="bg-muted/50">
                         <tr>
-                          <th className="text-left p-2 font-medium whitespace-nowrap">Product Name</th>
                           <th className="text-left p-2 font-medium whitespace-nowrap">ASG SKU ID *</th>
                           <th className="text-right p-2 font-medium whitespace-nowrap">Packed Qty *</th>
                           <th className="text-right p-2 font-medium whitespace-nowrap">Unpacked Qty *</th>
+                          <th className="text-left p-2 font-medium whitespace-nowrap">Warehouse *</th>
                         </tr>
                       </thead>
                       <tbody>
                         <tr className="border-t">
-                          <td className="p-2 whitespace-nowrap">Epsom Salt 1KG</td>
                           <td className="p-2 font-mono whitespace-nowrap">ASG-OM-EPSOM-1KG</td>
                           <td className="p-2 text-right text-emerald-600 font-medium">150</td>
                           <td className="p-2 text-right text-amber-600 font-medium">50</td>
+                          <td className="p-2 whitespace-nowrap">ASG Main</td>
                         </tr>
                         <tr className="border-t">
-                          <td className="p-2 whitespace-nowrap">Rosemary Oil 15ML</td>
                           <td className="p-2 font-mono whitespace-nowrap">ASG-OM-ROSE-15ML</td>
                           <td className="p-2 text-right text-emerald-600 font-medium">200</td>
                           <td className="p-2 text-right text-muted-foreground">0</td>
+                          <td className="p-2 whitespace-nowrap">ASG Main</td>
                         </tr>
                         <tr className="border-t">
-                          <td className="p-2 whitespace-nowrap">Tea Tree Oil 15ML</td>
                           <td className="p-2 font-mono whitespace-nowrap">ASG-OM-TT-15ML</td>
                           <td className="p-2 text-right text-emerald-600 font-medium">75</td>
                           <td className="p-2 text-right text-amber-600 font-medium">125</td>
+                          <td className="p-2 whitespace-nowrap">ASG Main</td>
                         </tr>
                       </tbody>
                     </table>
@@ -806,11 +908,11 @@ export default function InventoryUploadPage() {
                   <div className="space-y-3 pt-2 border-t">
                     <div>
                       <h4 className="font-medium text-sm mb-1">Required Columns <span className="text-red-500">*</span></h4>
-                      <p className="text-xs text-muted-foreground">ASG SKU ID, Packed Qty, Unpacked Qty</p>
+                      <p className="text-xs text-muted-foreground">ASG SKU ID, Packed Qty, Unpacked Qty, Warehouse</p>
                     </div>
                     <div>
                       <h4 className="font-medium text-sm mb-1">Optional Columns</h4>
-                      <p className="text-xs text-muted-foreground">Product Name, Warehouse, Channel</p>
+                      <p className="text-xs text-muted-foreground">Product Name</p>
                     </div>
                     <div>
                       <h4 className="font-medium text-sm mb-1">Upload Flow</h4>
@@ -824,7 +926,7 @@ export default function InventoryUploadPage() {
                       <h4 className="font-medium text-sm mb-1">Notes</h4>
                       <ul className="text-xs text-muted-foreground space-y-0.5">
                         <li>• Accepted formats: .xlsx, .xls, .csv (max 10 MB)</li>
-                        <li>• If Channel is omitted, updates both Amazon &amp; Blinkit</li>
+                        <li>• Warehouse column is required for each row</li>
                         <li>• Packed and Unpacked values must be integers</li>
                       </ul>
                     </div>

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { FilterBar } from '@/components/ui/filter-bar';
 import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
@@ -17,63 +18,63 @@ import {
   Download,
 } from 'lucide-react';
 import api from '@/lib/api';
-import { POStatusModal, POModalData } from '@/components/ui/po-status-modal';
 
 interface POOverviewItem {
   id: number;
+  po_id: number;
   po_number: string;
   po_date: string;
   orderDateRaw: string | null;
   deliveryDate: string;
-  expectedDeliveryDateRaw: string | null;
+  shipTo: string;
   state: string;
-  feWarehouse: string;
-  beWarehouse: string;
+  items: number;
+  totalQty: number;
   status: string;
-  quantity: number;
 }
 
-function isDelayed(expectedDate: string | null, status: string): boolean {
-  if (!expectedDate || status === 'Delivered' || status === 'Cancelled' || status === 'Delayed') return false;
-  return new Date(expectedDate) < new Date(new Date().toDateString());
-}
-
-// Map internal statuses → display names
-const STATUS_DISPLAY: Record<string, string> = {
-  'Created': 'Pending',
-  'Packed': 'Ready',
-  'Dispatched': 'Shipped',
-  'In Transit': 'Partial',
-  'Delivered': 'Delivered',
-  'Delayed': 'Pending',
-  'Cancelled': 'Cancelled',
-};
-
-function displayStatus(status: string) {
-  return STATUS_DISPLAY[status] || status;
-}
-
-// KPI config
+// KPI config keyed by DB status name
 const KPI_CONFIG: Record<string, { icon: React.ReactNode; color: string; bg: string }> = {
-  'Pending':   { icon: <Clock className="h-5 w-5" />,        color: 'text-orange-600',  bg: 'bg-orange-100' },
-  'Partial':   { icon: <AlertCircle className="h-5 w-5" />,  color: 'text-yellow-600',  bg: 'bg-yellow-100' },
-  'Ready':     { icon: <PackageCheck className="h-5 w-5" />, color: 'text-emerald-600', bg: 'bg-emerald-100' },
-  'Shipped':   { icon: <Truck className="h-5 w-5" />,        color: 'text-blue-600',    bg: 'bg-blue-100' },
-  'Delivered': { icon: <CheckCircle2 className="h-5 w-5" />, color: 'text-emerald-600', bg: 'bg-emerald-100' },
+  'Created':    { icon: <Clock className="h-5 w-5" />,        color: 'text-orange-600',  bg: 'bg-orange-100' },
+  'Dispatched': { icon: <Truck className="h-5 w-5" />,        color: 'text-blue-600',    bg: 'bg-blue-100' },
+  'In Transit': { icon: <AlertCircle className="h-5 w-5" />,  color: 'text-yellow-600',  bg: 'bg-yellow-100' },
+  'Delivered':  { icon: <CheckCircle2 className="h-5 w-5" />, color: 'text-emerald-600', bg: 'bg-emerald-100' },
+  'Delayed':    { icon: <AlertCircle className="h-5 w-5" />,  color: 'text-red-600',     bg: 'bg-red-100' },
 };
 
-// Badge styles
+// Badge styles keyed by DB status name
 const BADGE_STYLES: Record<string, string> = {
-  'Pending':   'bg-orange-50 text-orange-700 border-orange-200',
-  'Partial':   'bg-yellow-50 text-yellow-700 border-yellow-200',
-  'Ready':     'bg-emerald-50 text-emerald-700 border-emerald-200',
-  'Shipped':   'bg-blue-50 text-blue-700 border-blue-200',
-  'Delivered': 'bg-emerald-50 text-emerald-700 border-emerald-200',
-  'Cancelled': 'bg-gray-50 text-gray-600 border-gray-200',
+  'Created':    'bg-gray-50 text-gray-700 border-gray-200',
+  'Dispatched': 'bg-blue-50 text-blue-700 border-blue-200',
+  'In Transit': 'bg-yellow-50 text-yellow-700 border-yellow-200',
+  'Delivered':  'bg-emerald-50 text-emerald-700 border-emerald-200',
+  'Delayed':    'bg-red-50 text-red-700 border-red-200',
+  'Cancelled':  'bg-gray-50 text-gray-600 border-gray-200',
+  'Diff Loss':  'bg-purple-50 text-purple-700 border-purple-200',
+  'Closed':     'bg-slate-50 text-slate-600 border-slate-200',
 };
 
-// Extract state from ShipToAddress (try to parse Indian state names)
-function extractState(address: string | null, shipToName: string | null): string {
+// GST state code → state name (India)
+const GSTIN_STATE_MAP: Record<string, string> = {
+  '01': 'Jammu & Kashmir', '02': 'Himachal Pradesh', '03': 'Punjab',
+  '04': 'Chandigarh', '05': 'Uttarakhand', '06': 'Haryana',
+  '07': 'Delhi', '08': 'Rajasthan', '09': 'Uttar Pradesh',
+  '10': 'Bihar', '11': 'Sikkim', '12': 'Arunachal Pradesh',
+  '13': 'Nagaland', '14': 'Manipur', '15': 'Mizoram',
+  '16': 'Tripura', '17': 'Meghalaya', '18': 'Assam',
+  '19': 'West Bengal', '20': 'Jharkhand', '21': 'Odisha',
+  '22': 'Chhattisgarh', '23': 'Madhya Pradesh', '24': 'Gujarat',
+  '27': 'Maharashtra', '29': 'Karnataka', '30': 'Goa',
+  '32': 'Kerala', '33': 'Tamil Nadu', '36': 'Telangana',
+  '37': 'Andhra Pradesh',
+};
+
+// Extract state — GSTIN prefix is most reliable, fall back to address text
+function extractState(address: string | null, shipToName: string | null, gstin?: string | null): string {
+  if (gstin && gstin.length >= 2) {
+    const code = gstin.substring(0, 2);
+    if (GSTIN_STATE_MAP[code]) return GSTIN_STATE_MAP[code];
+  }
   if (!address && !shipToName) return '—';
   const text = (address || '') + ' ' + (shipToName || '');
   const states = [
@@ -89,20 +90,16 @@ function extractState(address: string | null, shipToName: string | null): string
 }
 
 export default function BlinkitPOOverviewPage() {
+  const router = useRouter();
   const [search, setSearch] = useState('');
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
-  const [stateFilter, setStateFilter] = useState('all');
-  const [feFilter, setFeFilter] = useState('all');
-  const [beFilter, setBeFilter] = useState('all');
   const [poData, setPoData] = useState<POOverviewItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [selectedPO, setSelectedPO] = useState<POModalData | null>(null);
-
   useEffect(() => {
     const fetchPOData = async () => {
       try {
         setIsLoading(true);
-        const response = await api.purchaseOrders.getBlinkit({ page_size: 100 }) as any;
+        const response = await api.purchaseOrders.getBlinkit({ page_size: 1000 }) as any;
 
         // Group by PO number for overview
         const grouped = new Map<string, any>();
@@ -112,32 +109,32 @@ export default function BlinkitPOOverviewPage() {
           const rawStatus = po.status || 'Created';
           const shipToName = po.ship_to_name || '';
           const shipToAddress = po.ship_to_address || '';
-          const state = extractState(shipToAddress, shipToName);
+          const state = extractState(shipToAddress, shipToName, po.ship_to_gstin);
 
           if (!grouped.has(poNum)) {
             grouped.set(poNum, {
               id: po.id,
+              po_id: po.po_id,
               po_number: poNum,
               po_date: po.order_date ? new Date(po.order_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A',
               orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
               deliveryDate: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A',
-              expectedDeliveryDateRaw: po.expected_delivery_date || null,
+              shipTo: shipToName || '—',
               state,
-              feWarehouse: shipToName || '—',
-              beWarehouse: '—',
+              items: 1,
+              totalQty: po.quantity || 0,
               rawStatus,
-              quantity: po.quantity || 0,
             });
           } else {
             const existing = grouped.get(poNum);
-            existing.quantity += po.quantity || 0;
+            existing.items += 1;
+            existing.totalQty += po.quantity || 0;
           }
         });
 
-        // Map to display statuses
+        // Use raw DB status directly
         const data = Array.from(grouped.values()).map((po: any) => {
-          const finalRaw = isDelayed(po.expectedDeliveryDateRaw, po.rawStatus) ? 'Delayed' : po.rawStatus;
-          return { ...po, status: displayStatus(finalRaw) };
+          return { ...po, status: po.rawStatus || 'Created' };
         });
         setPoData(data);
       } catch (error) {
@@ -150,41 +147,23 @@ export default function BlinkitPOOverviewPage() {
     fetchPOData();
   }, []);
 
-  const handleStatusUpdated = (poNumber: string, newStatus: string) => {
-    setPoData(prev => prev.map(p => p.po_number === poNumber ? { ...p, status: newStatus } : p));
-  };
-
   const poStatusOptions = [
-    { label: 'All', value: 'all' },
-    { label: 'Pending', value: 'Pending' },
-    { label: 'Partial', value: 'Partial' },
-    { label: 'Ready', value: 'Ready' },
-    { label: 'Shipped', value: 'Shipped' },
-    { label: 'Delivered', value: 'Delivered' },
+    { label: 'All',        value: 'all' },
+    { label: 'Created',    value: 'Created' },
+    { label: 'Dispatched', value: 'Dispatched' },
+    { label: 'In Transit', value: 'In Transit' },
+    { label: 'Delivered',  value: 'Delivered' },
+    { label: 'Delayed',    value: 'Delayed' },
+    { label: 'Cancelled',  value: 'Cancelled' },
   ];
-
-  // Build filter options from data
-  const stateOptions = useMemo(() => {
-    const states = [...new Set(poData.map(p => p.state).filter(s => s !== '—'))].sort();
-    return [{ label: 'All States', value: 'all' }, ...states.map(s => ({ label: s, value: s }))];
-  }, [poData]);
-
-  const feOptions = useMemo(() => {
-    const warehouses = [...new Set(poData.map(p => p.feWarehouse).filter(s => s !== '—'))].sort();
-    return [{ label: 'All FE Warehouses', value: 'all' }, ...warehouses.map(s => ({ label: s, value: s }))];
-  }, [poData]);
-
-  const beOptions = useMemo(() => {
-    const warehouses = [...new Set(poData.map(p => p.beWarehouse).filter(s => s !== '—'))].sort();
-    return [{ label: 'All BE Warehouses', value: 'all' }, ...warehouses.map(s => ({ label: s, value: s }))];
-  }, [poData]);
 
   const filteredData = useMemo(() => {
     let filtered = [...poData];
 
-    if (search) {
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
       filtered = filtered.filter(po =>
-        po.po_number.toLowerCase().includes(search.toLowerCase())
+        (po.po_number || '').toLowerCase().includes(q)
       );
     }
 
@@ -199,37 +178,36 @@ export default function BlinkitPOOverviewPage() {
       filtered = filtered.filter(po => po.status === filters.status);
     }
 
-    if (stateFilter !== 'all') {
-      filtered = filtered.filter(po => po.state === stateFilter);
-    }
-    if (feFilter !== 'all') {
-      filtered = filtered.filter(po => po.feWarehouse === feFilter);
-    }
-    if (beFilter !== 'all') {
-      filtered = filtered.filter(po => po.beWarehouse === beFilter);
+    if (filters.state !== 'all') {
+      filtered = filtered.filter(po => po.state === filters.state);
     }
 
     return filtered;
-  }, [poData, search, filters.dateFrom, filters.dateTo, filters.status, stateFilter, feFilter, beFilter]);
+  }, [poData, search, filters.dateFrom, filters.dateTo, filters.status, filters.state]);
+
+  const stateOptions = useMemo(() => {
+    const states = [...new Set(poData.map(p => p.state).filter(s => s && s !== '—'))].sort();
+    return [{ label: 'All', value: 'all' }, ...states.map(s => ({ label: s, value: s }))];
+  }, [poData]);
 
   // Stats using display status names
   const stats = useMemo(() => {
-    const pending = poData.filter(p => p.status === 'Pending').length;
-    const partial = poData.filter(p => p.status === 'Partial').length;
-    const ready = poData.filter(p => p.status === 'Ready').length;
-    const shipped = poData.filter(p => p.status === 'Shipped').length;
-    const delivered = poData.filter(p => p.status === 'Delivered').length;
-    return { pending, partial, ready, shipped, delivered };
+    const created    = poData.filter(p => p.status === 'Created').length;
+    const dispatched = poData.filter(p => p.status === 'Dispatched').length;
+    const inTransit  = poData.filter(p => p.status === 'In Transit').length;
+    const delivered  = poData.filter(p => p.status === 'Delivered').length;
+    const delayed    = poData.filter(p => p.status === 'Delayed').length;
+    return { created, dispatched, inTransit, delivered, delayed };
   }, [poData]);
 
   const getStatusBadge = (status: string) => {
     const style = BADGE_STYLES[status] || 'bg-gray-50 text-gray-700 border-gray-200';
     const iconMap: Record<string, React.ReactNode> = {
-      'Pending': <Clock className="h-3.5 w-3.5 mr-1" />,
-      'Partial': <AlertCircle className="h-3.5 w-3.5 mr-1" />,
-      'Ready': <PackageCheck className="h-3.5 w-3.5 mr-1" />,
-      'Shipped': <Truck className="h-3.5 w-3.5 mr-1" />,
-      'Delivered': <CheckCircle2 className="h-3.5 w-3.5 mr-1" />,
+      'Created':    <Clock className="h-3.5 w-3.5 mr-1" />,
+      'Dispatched': <Truck className="h-3.5 w-3.5 mr-1" />,
+      'In Transit': <AlertCircle className="h-3.5 w-3.5 mr-1" />,
+      'Delivered':  <CheckCircle2 className="h-3.5 w-3.5 mr-1" />,
+      'Delayed':    <AlertCircle className="h-3.5 w-3.5 mr-1" />,
     };
     return { style, icon: iconMap[status] };
   };
@@ -240,9 +218,12 @@ export default function BlinkitPOOverviewPage() {
       header: 'PO Number',
       accessorKey: 'po_number',
       sortable: true,
+      sticky: true,
       width: 180,
       minWidth: 150,
-      cell: (row) => <span className="font-medium text-blue-600">{row.po_number}</span>,
+      cell: (row) => (
+        <span className="font-medium text-blue-600">{row.po_number}</span>
+      ),
     },
     {
       id: 'poDate',
@@ -263,6 +244,15 @@ export default function BlinkitPOOverviewPage() {
       cell: (row) => <span className="text-sm">{row.deliveryDate}</span>,
     },
     {
+      id: 'shipTo',
+      header: 'Ship To',
+      accessorKey: 'shipTo',
+      sortable: true,
+      width: 220,
+      minWidth: 160,
+      cell: (row) => <span className="text-sm text-muted-foreground">{row.shipTo}</span>,
+    },
+    {
       id: 'state',
       header: 'State',
       accessorKey: 'state',
@@ -272,22 +262,24 @@ export default function BlinkitPOOverviewPage() {
       cell: (row) => <span className="text-sm">{row.state}</span>,
     },
     {
-      id: 'feWarehouse',
-      header: 'FE Warehouse',
-      accessorKey: 'feWarehouse',
+      id: 'items',
+      header: 'Total Items',
+      accessorKey: 'items',
       sortable: true,
-      width: 200,
-      minWidth: 150,
-      cell: (row) => <span className="text-sm">{row.feWarehouse}</span>,
+      width: 110,
+      minWidth: 90,
+      align: 'center',
+      cell: (row) => <span className="font-semibold">{row.items}</span>,
     },
     {
-      id: 'beWarehouse',
-      header: 'BE Warehouse',
-      accessorKey: 'beWarehouse',
+      id: 'totalQty',
+      header: 'Total Qty',
+      accessorKey: 'totalQty',
       sortable: true,
-      width: 200,
-      minWidth: 150,
-      cell: (row) => <span className="text-sm">{row.beWarehouse}</span>,
+      width: 110,
+      minWidth: 90,
+      align: 'right',
+      cell: (row) => <span className="font-semibold">{row.totalQty.toLocaleString()}</span>,
     },
     {
       id: 'status',
@@ -309,7 +301,7 @@ export default function BlinkitPOOverviewPage() {
     },
   ];
 
-  const gridState = useDataGrid(gridColumns);
+  const gridState = useDataGrid(gridColumns, 'blinkit-po-overview');
 
   if (isLoading) {
     return (
@@ -325,11 +317,11 @@ export default function BlinkitPOOverviewPage() {
   }
 
   const kpiCards = [
-    { label: 'Pending', count: stats.pending, status: 'Pending' },
-    { label: 'Partial', count: stats.partial, status: 'Partial' },
-    { label: 'Ready', count: stats.ready, status: 'Ready' },
-    { label: 'Shipped', count: stats.shipped, status: 'Shipped' },
-    { label: 'Delivered', count: stats.delivered, status: 'Delivered' },
+    { label: 'Created',    count: stats.created,    status: 'Created' },
+    { label: 'Dispatched', count: stats.dispatched, status: 'Dispatched' },
+    { label: 'In Transit', count: stats.inTransit,  status: 'In Transit' },
+    { label: 'Delivered',  count: stats.delivered,  status: 'Delivered' },
+    { label: 'Delayed',    count: stats.delayed,    status: 'Delayed' },
   ];
 
   return (
@@ -373,10 +365,13 @@ export default function BlinkitPOOverviewPage() {
             <FilterPanel
               values={filters}
               onChange={(key, value) => setFilters(prev => ({ ...prev, [key]: value }))}
-              onClear={() => { setFilters(DEFAULT_FILTER_VALUES); setSearch(''); setStateFilter('all'); setFeFilter('all'); setBeFilter('all'); }}
+              onClear={() => { setFilters(DEFAULT_FILTER_VALUES); setSearch(''); }}
               showDateRange
+              showChannel={false}
               showStatus
               statusOptions={poStatusOptions}
+              showState={stateOptions.length > 1}
+              stateOptions={stateOptions}
             />
             <ViewOptionsButton
               columns={gridColumns}
@@ -384,6 +379,8 @@ export default function BlinkitPOOverviewPage() {
               onToggleColumn={gridState.toggleColumnVisibility}
               rowDensity={gridState.rowDensity}
               onDensityChange={gridState.setRowDensity}
+              onSave={gridState.saveCurrentView}
+              onReset={gridState.resetView}
             />
             {filteredData.length > 0 && (
               <Button
@@ -395,9 +392,10 @@ export default function BlinkitPOOverviewPage() {
                     'PO Number': p.po_number,
                     'PO Date': p.po_date,
                     'Delivery Date': p.deliveryDate,
+                    'Ship To': p.shipTo,
                     'State': p.state,
-                    'FE Warehouse': p.feWarehouse,
-                    'BE Warehouse': p.beWarehouse,
+                    'Total Items': p.items,
+                    'Total Qty': p.totalQty,
                     'Status': p.status,
                   })),
                   'blinkit_po_overview'
@@ -409,37 +407,6 @@ export default function BlinkitPOOverviewPage() {
             )}
           </div>
         </FilterBar>
-
-        {/* Location Filters */}
-        <div className="flex items-center gap-3 flex-wrap">
-          <div className="flex items-center gap-2">
-            <select
-              value={stateFilter}
-              onChange={(e) => setStateFilter(e.target.value)}
-              className="h-9 text-sm border rounded-md px-3 py-1.5 bg-background"
-            >
-              {stateOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          </div>
-          <div className="flex items-center gap-2">
-            <select
-              value={feFilter}
-              onChange={(e) => setFeFilter(e.target.value)}
-              className="h-9 text-sm border rounded-md px-3 py-1.5 bg-background"
-            >
-              {feOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          </div>
-          <div className="flex items-center gap-2">
-            <select
-              value={beFilter}
-              onChange={(e) => setBeFilter(e.target.value)}
-              className="h-9 text-sm border rounded-md px-3 py-1.5 bg-background"
-            >
-              {beOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          </div>
-        </div>
 
         {/* Data Grid */}
         <div className="space-y-4">
@@ -458,18 +425,11 @@ export default function BlinkitPOOverviewPage() {
             <DataGrid
               data={filteredData}
               gridState={gridState}
-              onRowClick={(row) => setSelectedPO({ id: row.id, po_number: row.po_number, status: row.status, quantity: row.quantity })}
+              onRowClick={(row) => router.push(`/blinkit-po?search=${encodeURIComponent(row.po_number)}`)}
             />
           )}
         </div>
       </div>
-
-      {/* PO Status Update Modal */}
-      <POStatusModal
-        po={selectedPO}
-        onClose={() => setSelectedPO(null)}
-        onStatusUpdated={handleStatusUpdated}
-      />
     </ProtectedRoute>
   );
 }

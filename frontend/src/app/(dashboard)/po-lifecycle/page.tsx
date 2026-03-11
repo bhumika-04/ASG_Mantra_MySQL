@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -21,11 +21,12 @@ import {
   Download,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { useRouter } from 'next/navigation';
 import api from '@/lib/api';
-import { POStatusModal, POModalData } from '@/components/ui/po-status-modal';
 
 interface PurchaseOrder {
   id: number;
+  po_id: number;
   po_number: string;
   channel: string;
   quantity: number;
@@ -33,24 +34,54 @@ interface PurchaseOrder {
   expectedDate: string;
   expectedDateRaw: string | null;
   orderDateRaw: string | null;
+  state: string;
+  city: string;
   hub: string;
   courier: string;
   tat: string;
   status: string;
 }
 
-function isDelayed(expectedDate: string | null, status: string): boolean {
-  if (!expectedDate || status === 'Delivered' || status === 'Cancelled' || status === 'Delayed') return false;
-  return new Date(expectedDate) < new Date(new Date().toDateString());
+const GSTIN_STATE_MAP: Record<string, string> = {
+  '01': 'Jammu & Kashmir', '02': 'Himachal Pradesh', '03': 'Punjab',
+  '04': 'Chandigarh', '05': 'Uttarakhand', '06': 'Haryana',
+  '07': 'Delhi', '08': 'Rajasthan', '09': 'Uttar Pradesh',
+  '10': 'Bihar', '11': 'Sikkim', '18': 'Assam', '19': 'West Bengal',
+  '20': 'Jharkhand', '21': 'Odisha', '22': 'Chhattisgarh',
+  '23': 'Madhya Pradesh', '24': 'Gujarat', '26': 'Goa',
+  '27': 'Maharashtra', '29': 'Karnataka', '30': 'Kerala',
+  '33': 'Tamil Nadu', '36': 'Telangana', '37': 'Andhra Pradesh',
+};
+
+const CITY_KEYWORDS = [
+  'Mumbai', 'Delhi', 'Bangalore', 'Bengaluru', 'Hyderabad', 'Chennai', 'Kolkata',
+  'Pune', 'Ahmedabad', 'Jaipur', 'Lucknow', 'Surat', 'Nagpur', 'Indore', 'Thane',
+  'Gurgaon', 'Gurugram', 'Noida', 'Chandigarh', 'Coimbatore', 'Kochi', 'Mysuru',
+  'Vadodara', 'Bhopal', 'Visakhapatnam', 'Patna', 'Nashik', 'Rajkot', 'Varanasi',
+];
+
+function extractStateFromGstin(gstin?: string | null): string {
+  if (gstin && gstin.length >= 2) {
+    const code = gstin.substring(0, 2);
+    if (GSTIN_STATE_MAP[code]) return GSTIN_STATE_MAP[code];
+  }
+  return '-';
+}
+
+function extractCityFromText(text?: string | null): string {
+  if (!text) return '-';
+  for (const city of CITY_KEYWORDS) {
+    if (text.toLowerCase().includes(city.toLowerCase())) return city;
+  }
+  return '-';
 }
 
 export default function POLifecyclePage() {
+  const router = useRouter();
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
   const [poSearch, setPoSearch] = useState('');
   const [allOrders, setAllOrders] = useState<PurchaseOrder[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [selectedPO, setSelectedPO] = useState<POModalData | null>(null);
-
   useEffect(() => {
     const fetchPurchaseOrders = async () => {
       try {
@@ -58,14 +89,22 @@ export default function POLifecyclePage() {
 
         // Fetch from both Amazon and Blinkit PO tables (the real data sources)
         const [amazonRes, blinkitRes] = await Promise.all([
-          api.purchaseOrders.getAmazon({ page_size: 200 }) as any,
-          api.purchaseOrders.getBlinkit({ page_size: 200 }) as any,
+          api.purchaseOrders.getAmazon({ page_size: 1000 }) as any,
+          api.purchaseOrders.getBlinkit({ page_size: 1000 }) as any,
         ]);
 
         const toRow = (po: any, channel: string) => {
           const rawStatus = po.status || 'Created';
+          const isBlinkit = channel === 'Blinkit';
+          const state = isBlinkit
+            ? extractStateFromGstin(po.ship_to_gstin)
+            : (po.ship_to_state || '-');
+          const city = isBlinkit
+            ? extractCityFromText((po.ship_to_address || '') + ' ' + (po.ship_to_name || ''))
+            : (po.ship_to_city || '-');
           return {
             id: po.id,
+            po_id: po.po_id,
             po_number: po.po_number,
             channel,
             quantity: po.quantity || 0,
@@ -73,10 +112,12 @@ export default function POLifecyclePage() {
             expectedDate: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }) : '-',
             expectedDateRaw: po.expected_delivery_date || null,
             orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
-            hub: '-',
+            state,
+            city,
+            hub: po.ship_to_location_code || po.ship_to_name || '-',
             courier: po.courier || '-',
             tat: '-',
-            status: isDelayed(po.expected_delivery_date, rawStatus) ? 'Delayed' : rawStatus,
+            status: rawStatus,
           };
         };
 
@@ -104,10 +145,6 @@ export default function POLifecyclePage() {
     fetchPurchaseOrders();
   }, []);
 
-  const handleStatusUpdated = (poNumber: string, newStatus: string) => {
-    setAllOrders(prev => prev.map(o => o.po_number === poNumber ? { ...o, status: newStatus } : o));
-  };
-
   const poStatusOptions = [
     { label: 'All', value: 'all' },
     { label: 'Created', value: 'Created' },
@@ -118,18 +155,25 @@ export default function POLifecyclePage() {
     { label: 'Diff Loss', value: 'Diff Loss' },
   ];
 
-  // Filter orders by channel, status, date range, and search
+  // State options derived from all orders
+  const stateOptions = useMemo(() => {
+    const states = [...new Set(allOrders.map(o => o.state).filter(s => s && s !== '-' && s !== '—'))].sort();
+    return [{ label: 'All', value: 'all' }, ...states.map(s => ({ label: s, value: s }))];
+  }, [allOrders]);
+
+  // Filter orders by channel, status, state, date range, and search
   const filteredOrders = allOrders.filter(order => {
-    if (filters.channel !== 'all' && order.channel.toLowerCase() !== filters.channel) return false;
+    if (filters.channel !== 'all' && (order.channel || '').toLowerCase() !== filters.channel) return false;
     if (filters.status !== 'all' && order.status !== filters.status) return false;
+    if (filters.state !== 'all' && order.state !== filters.state) return false;
     if (filters.dateFrom && order.orderDateRaw && order.orderDateRaw < filters.dateFrom) return false;
     if (filters.dateTo && order.orderDateRaw && order.orderDateRaw > filters.dateTo) return false;
-    if (poSearch) {
-      const q = poSearch.toLowerCase();
+    if (poSearch.trim()) {
+      const q = poSearch.trim().toLowerCase();
       if (
-        !order.po_number.toLowerCase().includes(q) &&
-        !order.hub.toLowerCase().includes(q) &&
-        !order.courier.toLowerCase().includes(q)
+        !(order.po_number || '').toLowerCase().includes(q) &&
+        !(order.hub || '').toLowerCase().includes(q) &&
+        !(order.courier || '').toLowerCase().includes(q)
       ) return false;
     }
     return true;
@@ -140,16 +184,20 @@ export default function POLifecyclePage() {
   const totalUnits = filteredOrders.reduce((sum, order) => sum + order.quantity, 0);
   const linkedPOs = filteredOrders.filter(o => o.status !== 'Created').length;
   const inTransitPOs = filteredOrders.filter(o => o.status === 'In Transit').length;
-  const delayedPOs = filteredOrders.filter(o => o.status === 'Delayed');
-  const delayedCount = delayedPOs.length;
-  const delayedUnits = delayedPOs.reduce((sum, order) => sum + order.quantity, 0);
+  const delayedCount = filteredOrders.filter(o => o.status === 'Delayed').length;
 
   // Lifecycle counts based on filtered data
-  const createdCount = filteredOrders.filter(o => o.status === 'Created').length;
-  const dispatchedCount = filteredOrders.filter(o => o.status === 'Dispatched').length;
-  const inTransitCount = filteredOrders.filter(o => o.status === 'In Transit').length;
-  const deliveredCount = filteredOrders.filter(o => o.status === 'Delivered').length;
-  const diffLossCount = filteredOrders.filter(o => o.status === 'Diff Loss').length;
+  // Lifecycle flow = cumulative funnel: each stage shows POs that have reached OR passed that stage
+  const LIFECYCLE_ORDER = ['Created', 'Dispatched', 'In Transit', 'Delivered', 'Diff Loss'];
+  const stageIndex = (status: string) => {
+    const idx = LIFECYCLE_ORDER.indexOf(status);
+    return idx === -1 ? 0 : idx; // unknown statuses count as Created
+  };
+  const createdCount    = filteredOrders.length; // all POs entered the system = Created
+  const dispatchedCount = filteredOrders.filter(o => stageIndex(o.status) >= 1).length;
+  const inTransitCount  = filteredOrders.filter(o => stageIndex(o.status) >= 2).length;
+  const deliveredCount  = filteredOrders.filter(o => stageIndex(o.status) >= 3).length;
+  const diffLossCount   = filteredOrders.filter(o => o.status === 'Diff Loss').length;
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -187,9 +235,12 @@ export default function POLifecyclePage() {
       header: 'PO Number',
       accessorKey: 'po_number',
       sortable: true,
-      width: 150,
-      minWidth: 130,
-      cell: (row) => <span className="font-medium text-primary">{row.po_number}</span>,
+      sticky: true,
+      width: 190,
+      minWidth: 160,
+      cell: (row) => (
+        <span className="font-medium text-primary">{row.po_number}</span>
+      ),
     },
     {
       id: 'channel',
@@ -232,8 +283,26 @@ export default function POLifecyclePage() {
       cell: (row) => <span className="text-muted-foreground">{row.expectedDate}</span>,
     },
     {
+      id: 'state',
+      header: 'State',
+      accessorKey: 'state',
+      sortable: true,
+      width: 120,
+      minWidth: 100,
+      cell: (row) => <span className="text-muted-foreground">{row.state}</span>,
+    },
+    {
+      id: 'city',
+      header: 'City',
+      accessorKey: 'city',
+      sortable: true,
+      width: 130,
+      minWidth: 110,
+      cell: (row) => <span className="text-muted-foreground">{row.city}</span>,
+    },
+    {
       id: 'hub',
-      header: 'Hub',
+      header: 'Hub / Location',
       accessorKey: 'hub',
       width: 130,
       minWidth: 110,
@@ -260,8 +329,8 @@ export default function POLifecyclePage() {
       id: 'status',
       header: 'Status',
       accessorKey: 'status',
-      width: 130,
-      minWidth: 110,
+      width: 150,
+      minWidth: 130,
       align: 'center',
       cell: (row) => (
         <Badge variant="outline" className={getStatusColor(row.status)}>
@@ -271,7 +340,7 @@ export default function POLifecyclePage() {
     },
   ];
 
-  const gridState = useDataGrid(gridColumns);
+  const gridState = useDataGrid(gridColumns, 'po-lifecycle');
 
   if (isLoading) {
     return (
@@ -335,8 +404,7 @@ export default function POLifecyclePage() {
               <div className="flex items-center gap-3">
                 <AlertTriangle className="h-5 w-5 text-amber-600" />
                 <div>
-                  <p className="font-semibold text-amber-900">{delayedCount} PO delayed beyond expected delivery date</p>
-                  <p className="text-sm text-amber-700">Total delayed quantity: {delayedUnits.toLocaleString()} units</p>
+                  <p className="font-semibold text-amber-900">{delayedCount} PO{delayedCount > 1 ? 's' : ''} marked as Delayed</p>
                 </div>
               </div>
             </CardContent>
@@ -508,13 +576,20 @@ export default function POLifecyclePage() {
 
         {/* All Purchase Orders Grid */}
         <Card>
-          <CardHeader>
+          <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
-              <div>
-                <CardTitle>All Purchase Orders</CardTitle>
-                <p className="text-sm text-muted-foreground">{filteredOrders.length} orders</p>
-              </div>
-              <div className="flex items-center gap-2">
+              <CardTitle>All Purchase Orders</CardTitle>
+              <p className="text-sm text-muted-foreground">{filteredOrders.length} orders</p>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <FilterBar
+              searchPlaceholder="Search by PO number, hub, courier..."
+              searchValue={poSearch}
+              onSearchChange={setPoSearch}
+              className="mb-4"
+            >
+              <div className="flex items-center gap-2 ml-auto">
                 <FilterPanel
                   values={filters}
                   onChange={(key, value) => setFilters(prev => ({ ...prev, [key]: value }))}
@@ -523,6 +598,8 @@ export default function POLifecyclePage() {
                   showDateRange
                   showStatus
                   statusOptions={poStatusOptions}
+                  showState={stateOptions.length > 1}
+                  stateOptions={stateOptions}
                 />
                 <ViewOptionsButton
                   columns={gridColumns}
@@ -530,6 +607,8 @@ export default function POLifecyclePage() {
                   onToggleColumn={gridState.toggleColumnVisibility}
                   rowDensity={gridState.rowDensity}
                   onDensityChange={gridState.setRowDensity}
+                  onSave={gridState.saveCurrentView}
+                  onReset={gridState.resetView}
                 />
                 <Button
                   variant="outline"
@@ -542,6 +621,8 @@ export default function POLifecyclePage() {
                       'Quantity': o.quantity,
                       'Dispatch Date': o.dispatchDate,
                       'Expected Date': o.expectedDate,
+                      'State': o.state,
+                      'City': o.city,
                       'Hub': o.hub,
                       'Courier': o.courier,
                       'TAT': o.tat,
@@ -554,20 +635,15 @@ export default function POLifecyclePage() {
                   Export
                 </Button>
               </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <FilterBar
-              searchPlaceholder="Search by PO number, hub, courier..."
-              searchValue={poSearch}
-              onSearchChange={setPoSearch}
-              className="mb-4"
-            />
+            </FilterBar>
             {filteredOrders.length > 0 ? (
               <DataGrid
                 data={filteredOrders}
                 gridState={gridState}
-                onRowClick={(row) => setSelectedPO({ id: row.id, po_number: row.po_number, status: row.status, quantity: row.quantity })}
+                onRowClick={(row) => {
+                  const path = row.channel === 'Amazon' ? '/amazon-po' : '/blinkit-po';
+                  router.push(`${path}?search=${encodeURIComponent(row.po_number)}`);
+                }}
               />
             ) : (
               <div className="text-center py-12 text-muted-foreground">
@@ -578,13 +654,6 @@ export default function POLifecyclePage() {
           </CardContent>
         </Card>
       </div>
-
-      {/* PO Status Update Modal */}
-      <POStatusModal
-        po={selectedPO}
-        onClose={() => setSelectedPO(null)}
-        onStatusUpdated={handleStatusUpdated}
-      />
     </ProtectedRoute>
   );
 }

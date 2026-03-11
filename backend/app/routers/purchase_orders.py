@@ -4,11 +4,9 @@ Handles purchase order lifecycle, creation, and tracking
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
-from typing import Optional, List
-from datetime import datetime
-
-from datetime import date
+from sqlalchemy import desc, func
+from typing import Optional
+from datetime import datetime, date
 
 from app.database import get_db
 from app.models.user import User
@@ -32,7 +30,7 @@ async def get_amazon_purchase_orders(
     search: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=100),
+    page_size: int = Query(50, ge=1, le=1000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -54,45 +52,51 @@ async def get_amazon_purchase_orders(
     offset = (page - 1) * page_size
     po_items = query.order_by(desc(AmazonPOData.OrderedOnDate)).offset(offset).limit(page_size).all()
 
+    # Batch load products by ASIN (eliminates N+1)
+    asins = list({item.ASIN for item in po_items if item.ASIN})
+    products_by_asin: dict = {}
+    if asins:
+        prods = db.query(Product).filter(Product.AmazonId.in_(asins)).all()
+        products_by_asin = {p.AmazonId: p for p in prods}
+
+    # Batch load packed qty sums per product (latest inventory date only)
+    product_ids = [p.Id for p in products_by_asin.values()]
+    packed_by_product: dict = {}
+    if product_ids:
+        latest_inv_date = db.query(func.max(Inventory.InventoryDate)).scalar()
+        inv_q = db.query(Inventory.ProductId, func.sum(Inventory.PackedQty)).filter(
+            Inventory.ProductId.in_(product_ids)
+        )
+        if latest_inv_date:
+            inv_q = inv_q.filter(Inventory.InventoryDate == latest_inv_date)
+        packed_by_product = {row[0]: int(row[1] or 0) for row in inv_q.group_by(Inventory.ProductId).all()}
+
     today = date.today()
     items = []
     for item in po_items:
         po = item.po
-        packed_qty = 0
-        product_id = None
-        asg_sku = None
-        product_name = item.Title or item.ModelNumber or item.ASIN or ''
-
-        # Look up Product by ASIN to get packed qty
-        product = db.query(Product).filter(Product.AmazonId == item.ASIN).first()
-        if product:
-            product_id = product.Id
-            asg_sku = product.AsgSku
-            product_name = product.ProductName
-            from sqlalchemy import func
-            packed_qty = db.query(func.sum(Inventory.PackedQty)).filter(
-                Inventory.ProductId == product.Id
-            ).scalar() or 0
+        product = products_by_asin.get(item.ASIN)
+        product_id = product.Id if product else None
+        asg_sku = product.AsgSku if product else None
+        product_name = (product.ProductName if product else None) or item.Title or item.ModelNumber or item.ASIN or ''
+        packed_qty = packed_by_product.get(product_id, 0) if product_id else 0
 
         qty_requested = item.QuantityRequested or 0
         gap = max(0, qty_requested - packed_qty)
 
-        # Use item-level ExpectedDate; fall back to PO-level
-        expected_date = None
-        if item.ExpectedDate:
-            expected_date = item.ExpectedDate.isoformat()
-        elif po and po.OrderedOnDate:
-            expected_date = None  # no fallback — leave None
+        expected_date = item.ExpectedDate.isoformat() if item.ExpectedDate else None
 
-        po_status = (po.POStatus if po else None) or 'Created'
+        po_header_status = (po.POStatus if po else None) or 'Created'
+        item_status = item.ItemStatus or po_header_status
         is_delayed = bool(
             item.ExpectedDate
             and item.ExpectedDate < today
-            and po_status not in ('Received', 'Delivered', 'Cancelled', 'Closed')
+            and po_header_status not in ('Received', 'Delivered', 'Cancelled', 'Closed')
         )
 
         items.append({
             "id": item.Id,
+            "po_id": item.POId,
             "po_number": item.PONumber,
             "product_id": product_id,
             "product_name": product_name,
@@ -101,12 +105,14 @@ async def get_amazon_purchase_orders(
             "order_date": po.OrderedOnDate.isoformat() if po and po.OrderedOnDate else None,
             "expected_delivery_date": expected_date,
             "quantity": qty_requested,
+            "accepted_quantity": item.AcceptedQuantity,
             "received_quantity": item.QuantityReceived or 0,
             "packed_qty": packed_qty,
             "gap": gap,
             "unit_price": float(item.UnitCost) if item.UnitCost else 0.0,
             "total_amount": float(item.TotalCost) if item.TotalCost else 0.0,
-            "status": po_status,
+            "status": item_status,
+            "po_status": po_header_status,
             "is_delayed": is_delayed,
             "ship_to_city": po.ShipToCity if po else None,
             "ship_to_state": po.ShipToState if po else None,
@@ -127,7 +133,7 @@ async def get_blinkit_purchase_orders(
     search: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=100),
+    page_size: int = Query(50, ge=1, le=1000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -148,46 +154,67 @@ async def get_blinkit_purchase_orders(
     offset = (page - 1) * page_size
     po_items = query.order_by(desc(BlinkitPOData.PODate)).offset(offset).limit(page_size).all()
 
+    # Batch load products — priority: EagleCode→BlinkitId, ItemCode→BlinkitId, ItemCode→AsgSku
+    eagle_codes = list({str(item.EagleCode) for item in po_items if item.EagleCode})
+    item_codes = list({item.ItemCode for item in po_items if item.ItemCode})
+    all_blinkit_ids = list(set(eagle_codes + item_codes))
+
+    products_by_blinkit_id: dict = {}
+    if all_blinkit_ids:
+        prods = db.query(Product).filter(Product.BlinkitId.in_(all_blinkit_ids)).all()
+        products_by_blinkit_id = {p.BlinkitId: p for p in prods}
+
+    products_by_asg_sku: dict = {}
+    unmatched_item_codes = [c for c in item_codes if c not in products_by_blinkit_id]
+    if unmatched_item_codes:
+        prods = db.query(Product).filter(Product.AsgSku.in_(unmatched_item_codes)).all()
+        products_by_asg_sku = {p.AsgSku: p for p in prods}
+
+    # Batch load packed qty sums per product (latest inventory date only)
+    all_product_ids = list({p.Id for p in list(products_by_blinkit_id.values()) + list(products_by_asg_sku.values())})
+    packed_by_product: dict = {}
+    if all_product_ids:
+        latest_inv_date = db.query(func.max(Inventory.InventoryDate)).scalar()
+        inv_q = db.query(Inventory.ProductId, func.sum(Inventory.PackedQty)).filter(
+            Inventory.ProductId.in_(all_product_ids)
+        )
+        if latest_inv_date:
+            inv_q = inv_q.filter(Inventory.InventoryDate == latest_inv_date)
+        packed_by_product = {row[0]: int(row[1] or 0) for row in inv_q.group_by(Inventory.ProductId).all()}
+
     today = date.today()
     items = []
     for item in po_items:
         po = item.po
-        packed_qty = 0
-        product_id = None
-        asg_sku = None
-        blinkit_id = item.ItemCode or (str(item.EagleCode) if item.EagleCode else None)
-        product_name = item.ItemName or item.ItemCode or ''
-
-        # Look up Product: BlinkitId by EagleCode, then BlinkitId by ItemCode, then AsgSku by ItemCode
+        # Resolve product using priority order
         product = None
         if item.EagleCode:
-            product = db.query(Product).filter(Product.BlinkitId == str(item.EagleCode)).first()
+            product = products_by_blinkit_id.get(str(item.EagleCode))
         if not product and item.ItemCode:
-            product = db.query(Product).filter(Product.BlinkitId == item.ItemCode).first()
+            product = products_by_blinkit_id.get(item.ItemCode)
         if not product and item.ItemCode:
-            product = db.query(Product).filter(Product.AsgSku == item.ItemCode).first()
+            product = products_by_asg_sku.get(item.ItemCode)
 
-        if product:
-            product_id = product.Id
-            asg_sku = product.AsgSku
-            product_name = product.ProductName
-            from sqlalchemy import func
-            packed_qty = db.query(func.sum(Inventory.PackedQty)).filter(
-                Inventory.ProductId == product.Id
-            ).scalar() or 0
+        product_id = product.Id if product else None
+        asg_sku = product.AsgSku if product else None
+        product_name = (product.ProductName if product else None) or item.ItemName or item.ItemCode or ''
+        blinkit_id = item.ItemCode or (str(item.EagleCode) if item.EagleCode else None)
+        packed_qty = packed_by_product.get(product_id, 0) if product_id else 0
 
-        qty = float(item.QTY) if item.QTY else 0
+        qty = int(item.QTY) if item.QTY else 0
         gap = max(0, qty - packed_qty)
 
-        po_status = (po.Status if po else None) or 'Created'
+        po_header_status = (po.Status if po else None) or 'Created'
+        item_status = item.ItemStatus or po_header_status
         is_delayed = bool(
             po and po.ExpectedDeliveryDate
             and po.ExpectedDeliveryDate < today
-            and po_status not in ('Received', 'Delivered', 'Cancelled', 'Closed')
+            and po_header_status not in ('Received', 'Delivered', 'Cancelled', 'Closed')
         )
 
         items.append({
             "id": item.Id,
+            "po_id": item.POId,
             "po_number": item.PONumber,
             "product_id": product_id,
             "product_name": product_name,
@@ -196,15 +223,18 @@ async def get_blinkit_purchase_orders(
             "order_date": po.PODate.isoformat() if po and po.PODate else None,
             "expected_delivery_date": po.ExpectedDeliveryDate.isoformat() if po and po.ExpectedDeliveryDate else None,
             "quantity": qty,
+            "accepted_qty": item.AcceptedQty,
             "received_quantity": 0,
             "packed_qty": packed_qty,
             "gap": gap,
             "unit_price": float(item.UnitBaseCost) if item.UnitBaseCost else 0.0,
             "total_amount": float(item.TotalAmount) if item.TotalAmount else 0.0,
-            "status": po_status,
+            "status": item_status,
+            "po_status": po_header_status,
             "is_delayed": is_delayed,
             "ship_to_name": po.ShipToName if po else None,
             "ship_to_address": po.ShipToAddress if po else None,
+            "ship_to_gstin": po.ShipToGSTIN if po else None,
         })
 
     return {
@@ -333,7 +363,7 @@ async def get_all_purchase_orders(
                 "channel": "Blinkit",
                 "order_date": po.PODate.isoformat() if po and po.PODate else None,
                 "expected_delivery_date": po.ExpectedDeliveryDate.isoformat() if po and po.ExpectedDeliveryDate else None,
-                "quantity": float(item.QTY) if item.QTY else 0,
+                "quantity": int(item.QTY) if item.QTY else 0,
                 "unit_price": float(item.UnitBaseCost) if item.UnitBaseCost else 0.0,
                 "total_amount": float(item.TotalAmount) if item.TotalAmount else 0.0,
                 "status": po_status,
@@ -344,7 +374,7 @@ async def get_all_purchase_orders(
             })
 
     # Sort by order_date descending and paginate in Python
-    combined.sort(key=lambda x: x.get("order_date") or "", reverse=True)
+    combined.sort(key=lambda x: x.get("order_date") or "0000-01-01", reverse=True)
 
     total = len(combined)
     offset = (page - 1) * page_size
@@ -540,7 +570,7 @@ async def update_amazon_po_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Update Amazon PO status by item ID (updates the parent PO header)."""
+    """Update per-item status for an Amazon PO line (ItemStatus, not the PO header)."""
     if current_user.Role not in ["Admin", "Manager"]:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
@@ -548,18 +578,14 @@ async def update_amazon_po_status(
     if not item:
         raise HTTPException(status_code=404, detail="Amazon PO item not found")
 
-    po = db.query(AmazonPOData).filter(AmazonPOData.PONumber == item.PONumber).first()
-    if not po:
-        raise HTTPException(status_code=404, detail="Amazon PO not found")
-
-    old_status = po.POStatus
-    po.POStatus = status_data.status
-    log_audit(db, current_user.Id, "STATUS_CHANGE", "AmazonPO", str(po.Id),
-              old_values={"status": old_status},
-              new_values={"status": status_data.status})
+    old_status = item.ItemStatus
+    item.ItemStatus = status_data.status
+    log_audit(db, current_user.Id, "STATUS_CHANGE", "AmazonPOItem", str(item.Id),
+              old_values={"itemStatus": old_status},
+              new_values={"itemStatus": status_data.status})
     try:
         db.commit()
-        return {"success": True, "message": f"Amazon PO {po.PONumber} status updated to {status_data.status}"}
+        return {"success": True, "message": f"Amazon PO item {item.Id} status updated to {status_data.status}"}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -572,7 +598,7 @@ async def update_blinkit_po_status(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Update Blinkit PO status by item ID (updates the parent PO header)."""
+    """Update per-item status for a Blinkit PO line (ItemStatus, not the PO header)."""
     if current_user.Role not in ["Admin", "Manager"]:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
@@ -580,7 +606,59 @@ async def update_blinkit_po_status(
     if not item:
         raise HTTPException(status_code=404, detail="Blinkit PO item not found")
 
-    po = db.query(BlinkitPOData).filter(BlinkitPOData.PONumber == item.PONumber).first()
+    old_status = item.ItemStatus
+    item.ItemStatus = status_data.status
+    log_audit(db, current_user.Id, "STATUS_CHANGE", "BlinkitPOItem", str(item.Id),
+              old_values={"itemStatus": old_status},
+              new_values={"itemStatus": status_data.status})
+    try:
+        db.commit()
+        return {"success": True, "message": f"Blinkit PO item {item.Id} status updated to {status_data.status}"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/amazon-po/{po_id}/po-status")
+async def update_amazon_po_header_status(
+    po_id: int,
+    status_data: PurchaseOrderUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Update AmazonPO header status (used by overview/lifecycle pages)."""
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    po = db.query(AmazonPOData).filter(AmazonPOData.Id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Amazon PO not found")
+
+    old_status = po.POStatus
+    po.POStatus = status_data.status
+    log_audit(db, current_user.Id, "STATUS_CHANGE", "AmazonPO", str(po.Id),
+              old_values={"poStatus": old_status},
+              new_values={"poStatus": status_data.status})
+    try:
+        db.commit()
+        return {"success": True, "message": f"Amazon PO {po.PONumber} status updated to {status_data.status}"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/blinkit-po/{po_id}/po-status")
+async def update_blinkit_po_header_status(
+    po_id: int,
+    status_data: PurchaseOrderUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Update BlinkitPO header status (used by overview/lifecycle pages)."""
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    po = db.query(BlinkitPOData).filter(BlinkitPOData.Id == po_id).first()
     if not po:
         raise HTTPException(status_code=404, detail="Blinkit PO not found")
 
@@ -592,6 +670,175 @@ async def update_blinkit_po_status(
     try:
         db.commit()
         return {"success": True, "message": f"Blinkit PO {po.PONumber} status updated to {status_data.status}"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _deduct_inventory_for_product(db: Session, product_id: int, deduct_qty: int) -> dict:
+    """Deduct deduct_qty from PackedQty (then CurrentStock) for a product across all inventory rows.
+    Returns info about how much was deducted and any shortfall."""
+    from sqlalchemy import func as sqlfunc
+    latest_date = db.query(func.max(Inventory.InventoryDate)).scalar()
+    inv_q = db.query(Inventory).filter(
+        Inventory.ProductId == product_id,
+        Inventory.PackedQty > 0
+    )
+    if latest_date:
+        inv_q = inv_q.filter(Inventory.InventoryDate == latest_date)
+    inv_rows = inv_q.order_by(Inventory.InventoryDate.desc()).all()
+
+    total_packed = sum(i.PackedQty for i in inv_rows)
+    remaining = deduct_qty
+
+    for inv in inv_rows:
+        if remaining <= 0:
+            break
+        deduct = min(inv.PackedQty, remaining)
+        inv.PackedQty -= deduct
+        inv.CurrentStock = max(0, inv.CurrentStock - deduct)
+        remaining -= deduct
+
+    return {
+        "deducted": deduct_qty - remaining,
+        "shortfall": max(0, remaining),
+        "was_packed": total_packed,
+    }
+
+
+@router.put("/amazon-item/{item_id}/accepted-qty")
+async def update_amazon_item_accepted_qty(
+    item_id: int,
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Set AcceptedQuantity on an Amazon PO line item and deduct from packed inventory."""
+    item = db.query(AmazonPOItemData).filter(AmazonPOItemData.Id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Amazon PO item not found")
+
+    accepted_qty = body.get("accepted_qty")
+    if accepted_qty is None:
+        raise HTTPException(status_code=422, detail="accepted_qty is required")
+
+    old_val = item.AcceptedQuantity or 0
+    new_val = int(accepted_qty)
+    item.AcceptedQuantity = new_val
+
+    # Deduct the DIFFERENCE from packed inventory
+    deduct_qty = new_val - old_val
+    inventory_result = {}
+    if deduct_qty > 0:
+        # Resolve product: from ProductId link or by ASIN lookup
+        product_id = item.ProductId
+        if not product_id:
+            product = db.query(Product).filter(Product.AmazonId == item.ASIN).first()
+            if product:
+                product_id = product.Id
+        if product_id:
+            inventory_result = _deduct_inventory_for_product(db, product_id, deduct_qty)
+
+    log_audit(db, current_user.Id, "UPDATE", "AmazonPOItem", str(item_id),
+              old_values={"acceptedQuantity": old_val},
+              new_values={"acceptedQuantity": new_val, "inventoryDeducted": inventory_result.get("deducted", 0)})
+    try:
+        db.commit()
+        return {
+            "success": True,
+            "accepted_quantity": item.AcceptedQuantity,
+            "inventory_deducted": inventory_result.get("deducted", 0),
+            "inventory_shortfall": inventory_result.get("shortfall", 0),
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/amazon-item/{item_id}/received-qty")
+async def update_amazon_item_received_qty(
+    item_id: int,
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Set QuantityReceived on an Amazon PO line item."""
+    item = db.query(AmazonPOItemData).filter(AmazonPOItemData.Id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Amazon PO item not found")
+
+    received_qty = body.get("received_qty")
+    if received_qty is None:
+        raise HTTPException(status_code=422, detail="received_qty is required")
+
+    old_val = item.QuantityReceived or 0
+    new_val = int(received_qty)
+    item.QuantityReceived = new_val
+
+    log_audit(db, current_user.Id, "UPDATE", "AmazonPOItem", str(item_id),
+              old_values={"quantityReceived": old_val},
+              new_values={"quantityReceived": new_val})
+    try:
+        db.commit()
+        return {"success": True, "received_quantity": item.QuantityReceived}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/blinkit-item/{item_id}/accepted-qty")
+async def update_blinkit_item_accepted_qty(
+    item_id: int,
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Set AcceptedQty on a Blinkit PO line item and deduct from packed inventory."""
+    item = db.query(BlinkitPOItemData).filter(BlinkitPOItemData.Id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Blinkit PO item not found")
+
+    accepted_qty = body.get("accepted_qty")
+    if accepted_qty is None:
+        raise HTTPException(status_code=422, detail="accepted_qty is required")
+
+    old_val = item.AcceptedQty or 0
+    new_val = int(accepted_qty)
+    item.AcceptedQty = new_val
+
+    # Deduct the DIFFERENCE from packed inventory
+    deduct_qty = new_val - old_val
+    inventory_result = {}
+    if deduct_qty > 0:
+        product_id = item.ProductId
+        if not product_id:
+            # Lookup by EagleCode → BlinkitId, then ItemCode → BlinkitId, then ItemCode → AsgSku
+            if item.EagleCode:
+                p = db.query(Product).filter(Product.BlinkitId == str(item.EagleCode)).first()
+                if p:
+                    product_id = p.Id
+            if not product_id and item.ItemCode:
+                p = db.query(Product).filter(Product.BlinkitId == item.ItemCode).first()
+                if p:
+                    product_id = p.Id
+            if not product_id and item.ItemCode:
+                p = db.query(Product).filter(Product.AsgSku == item.ItemCode).first()
+                if p:
+                    product_id = p.Id
+        if product_id:
+            inventory_result = _deduct_inventory_for_product(db, product_id, deduct_qty)
+
+    log_audit(db, current_user.Id, "UPDATE", "BlinkitPOItem", str(item_id),
+              old_values={"acceptedQty": old_val},
+              new_values={"acceptedQty": new_val, "inventoryDeducted": inventory_result.get("deducted", 0)})
+    try:
+        db.commit()
+        return {
+            "success": True,
+            "accepted_qty": item.AcceptedQty,
+            "inventory_deducted": inventory_result.get("deducted", 0),
+            "inventory_shortfall": inventory_result.get("shortfall", 0),
+        }
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))

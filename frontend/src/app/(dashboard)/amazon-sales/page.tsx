@@ -1,12 +1,14 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { TrendingUp, Package, TrendingDown, BarChart2, Download } from 'lucide-react';
+import { TrendingUp, Package, TrendingDown, BarChart2, Search, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { exportToCSV } from '@/lib/export';
+import { Input } from '@/components/ui/input';
+import { DataGrid, useDataGrid, ViewOptionsButton } from '@/components/ui/data-grid';
 import {
   AreaChart,
   Area,
@@ -18,32 +20,31 @@ import {
 } from 'recharts';
 import api from '@/lib/api';
 
-interface TopProduct {
-  rank: number;
+interface AmazonProduct {
   asin: string;
-  name: string;
-  total_units: number;
-  total_revenue: number;
+  productTitle: string;
+  sku: string;
+  totalUnits: number;
+  totalRevenue: number;
+  firstSale: string | null;
+  lastSale: string | null;
 }
 
-const TREND_OPTIONS = [
-  { label: '1 Month', value: '1month' },
-  { label: '3 Months', value: '3months' },
-  { label: '6 Months', value: '6months' },
-  { label: 'All Time', value: 'all' },
-];
-
-function filterTrend(data: any[], period: string) {
-  if (period === 'all') return data;
-  const months = period === '1month' ? 1 : period === '3months' ? 3 : 6;
-  const cutoff = new Date();
-  cutoff.setMonth(cutoff.getMonth() - months);
-  const cutoffStr = cutoff.toISOString().slice(0, 7);
-  return data.filter((d) => (d.date || '').slice(0, 7) >= cutoffStr);
+function filterTrend(data: any[], mode: string, customStart: string, customEnd: string) {
+  if (mode === 'all') return data;
+  const { start_date, end_date } = computeDateRange(mode as FilterMode, customStart, customEnd);
+  return data.filter((d) => {
+    const date = (d.date || '').slice(0, 10);
+    if (start_date && date < start_date) return false;
+    if (end_date && date > end_date) return false;
+    return true;
+  });
 }
+
+const PAGE_SIZE = 50;
 
 export default function AmazonSalesPage() {
-  const [trendPeriod, setTrendPeriod] = useState('all');
+  const { filterMode, customStart, customEnd } = useFilter();
   const [isLoading, setIsLoading] = useState(true);
   const [stats, setStats] = useState({
     total_units: 0,
@@ -52,20 +53,84 @@ export default function AmazonSalesPage() {
     monthly_growth: 0,
     total_records_all_time: 0,
   });
-  const [topProducts, setTopProducts] = useState<TopProduct[]>([]);
   const [dailyTrend, setDailyTrend] = useState<any[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
+  // Products grid state
+  const [products, setProducts] = useState<AmazonProduct[]>([]);
+  const [productsTotal, setProductsTotal] = useState(0);
+  const [productsTotalPages, setProductsTotalPages] = useState(1);
+  const [productsPage, setProductsPage] = useState(1);
+  const [productsSearch, setProductsSearch] = useState('');
+  const [isProductsLoading, setIsProductsLoading] = useState(false);
+
+  const gridState = useDataGrid<AmazonProduct>([
+    {
+      id: 'productTitle', header: 'Product Name', accessorKey: 'productTitle', sortable: true, width: 300, minWidth: 180,
+      cell: (row) => (
+        <span
+          className="font-medium text-sm leading-snug"
+          style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
+          title={row.productTitle}
+        >
+          {row.productTitle || '—'}
+        </span>
+      ),
+    },
+    {
+      id: 'asin', header: 'ASIN', accessorKey: 'asin', sortable: true, width: 130,
+      cell: (row) => (
+        <code className="text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded border border-blue-200">
+          {row.asin || '—'}
+        </code>
+      ),
+    },
+    {
+      id: 'sku', header: 'SKU', accessorKey: 'sku', sortable: true, sticky: true, width: 150, minWidth: 120,
+      cell: (row) => <span className="text-sm text-gray-600">{row.sku || '—'}</span>,
+    },
+    {
+      id: 'totalUnits', header: 'Total Units', accessorKey: 'totalUnits', sortable: true, width: 120, align: 'right',
+      cell: (row) => <span className="font-mono font-semibold text-blue-600">{row.totalUnits.toLocaleString()}</span>,
+    },
+    {
+      id: 'totalRevenue', header: 'Revenue (₹)', accessorKey: 'totalRevenue', sortable: true, width: 130, align: 'right',
+      cell: (row) => <span className="font-mono text-gray-700">₹{Math.round(row.totalRevenue).toLocaleString()}</span>,
+    },
+    {
+      id: 'firstSale', header: 'First Sale', accessorKey: 'firstSale', sortable: true, width: 110,
+      cell: (row) => <span className="text-sm text-gray-500">{row.firstSale || '—'}</span>,
+    },
+    {
+      id: 'lastSale', header: 'Last Sale', accessorKey: 'lastSale', sortable: true, width: 110,
+      cell: (row) => <span className="text-sm text-gray-500">{row.lastSale || '—'}</span>,
+    },
+  ], 'amazon-sales');
+
+  const fetchProducts = useCallback(async (page = 1, search = '') => {
+    setIsProductsLoading(true);
+    try {
+      const data: any = await (api as any).amazonSalesData.getProducts({
+        page,
+        page_size: PAGE_SIZE,
+        ...(search ? { search } : {}),
+      });
+      setProducts(data.items || []);
+      setProductsTotal(data.total || 0);
+      setProductsTotalPages(data.total_pages || 1);
+    } catch {
+      setProducts([]);
+    } finally {
+      setIsProductsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    const fetchData = async () => {
+    const fetchAnalytics = async () => {
       try {
         setIsLoading(true);
         setFetchError(null);
-        // Always fetch all available data (1825 days = 5 years back).
-        // AmazonSales records have actual report dates (e.g. Nov-Dec 2025),
-        // not upload dates, so a rolling-window filter would hide historical data.
         const analytics = await (api as any).amazonSalesData.getAnalytics({ days: 1825 }) as any;
-
         setStats({
           total_units: analytics.summary?.total_units || 0,
           active_products: analytics.summary?.active_products || 0,
@@ -73,27 +138,21 @@ export default function AmazonSalesPage() {
           monthly_growth: analytics.summary?.monthly_growth || 0,
           total_records_all_time: analytics.summary?.total_records_all_time || 0,
         });
-
-        const products = (analytics.top_products || []).slice(0, 5).map((p: any, index: number) => ({
-          rank: index + 1,
-          asin: p.asin || '',
-          name: p.product_title || p.asin || 'Unknown',
-          total_units: p.total_units || 0,
-          total_revenue: p.total_revenue || 0,
-        }));
-        setTopProducts(products);
-
         setDailyTrend(analytics.daily_trend || []);
       } catch (error: any) {
-        console.error('Error fetching Amazon sales data:', error);
         setFetchError(error?.message || String(error));
       } finally {
         setIsLoading(false);
       }
     };
+    fetchAnalytics();
+    fetchProducts(1, '');
+  }, [fetchProducts]);
 
-    fetchData();
-  }, []);
+  const handleProductSearch = () => {
+    setProductsPage(1);
+    fetchProducts(1, productsSearch);
+  };
 
   const growth = stats.monthly_growth;
 
@@ -113,7 +172,6 @@ export default function AmazonSalesPage() {
   return (
     <ProtectedRoute>
       <div className="p-6 space-y-6">
-        {/* API error banner */}
         {fetchError && (
           <div className="p-4 bg-red-50 border border-red-300 rounded-lg text-sm text-red-800">
             <strong>API Error:</strong> {fetchError}
@@ -122,27 +180,9 @@ export default function AmazonSalesPage() {
 
         {/* KPI Cards */}
         <StatsGrid columns={4}>
-          <StatsCard
-            title="Total Sales"
-            value={stats.total_units.toLocaleString()}
-            icon={Package}
-            description="Ordered units"
-            variant="blue"
-          />
-          <StatsCard
-            title="Active Products"
-            value={stats.active_products.toString()}
-            icon={BarChart2}
-            description="Distinct ASINs"
-            variant="blue"
-          />
-          <StatsCard
-            title="Avg Sales/Product"
-            value={stats.avg_units_per_product.toLocaleString()}
-            icon={TrendingUp}
-            description="Units per product"
-            variant="blue"
-          />
+          <StatsCard title="Total Sales" value={stats.total_units.toLocaleString()} icon={Package} description="Ordered units" variant="blue" />
+          <StatsCard title="Active Products" value={stats.active_products.toString()} icon={BarChart2} description="Distinct ASINs" variant="blue" />
+          <StatsCard title="Avg Sales/Product" value={stats.avg_units_per_product.toLocaleString()} icon={TrendingUp} description="Units per product" variant="blue" />
           <StatsCard
             title="Monthly Growth"
             value={`${growth >= 0 ? '+' : ''}${growth.toFixed(1)}%`}
@@ -156,137 +196,106 @@ export default function AmazonSalesPage() {
         {/* Daily Sales Trend Chart */}
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle>Daily Sales Trend</CardTitle>
-              <select value={trendPeriod} onChange={(e) => setTrendPeriod(e.target.value)} className="h-8 text-xs border border-border rounded-md px-2 py-1 bg-background text-foreground cursor-pointer">
-                {TREND_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
-            </div>
+            <CardTitle>Daily Sales Trend</CardTitle>
           </CardHeader>
           <CardContent>
-            {dailyTrend.length > 0 ? (
-              <ResponsiveContainer width="100%" height={320}>
-                <AreaChart data={filterTrend(dailyTrend, trendPeriod)}>
-                  <defs>
-                    <linearGradient id="colorAmazonSales" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#60a5fa" stopOpacity={0.6}/>
-                      <stop offset="95%" stopColor="#93c5fd" stopOpacity={0.05}/>
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                  <XAxis
-                    dataKey="date"
-                    tick={{ fill: '#6b7280', fontSize: 11 }}
-                    axisLine={{ stroke: '#e5e7eb' }}
-                    interval="preserveStartEnd"
-                  />
-                  <YAxis
-                    tick={{ fill: '#6b7280', fontSize: 12 }}
-                    axisLine={{ stroke: '#e5e7eb' }}
-                  />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: '#fff',
-                      border: '1px solid #e5e7eb',
-                      borderRadius: '8px',
-                      padding: '8px',
-                    }}
-                    formatter={(value: number | undefined) => [Number(value ?? 0).toLocaleString(), 'Units']}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="total_units"
-                    stroke="#60a5fa"
-                    fill="url(#colorAmazonSales)"
-                    strokeWidth={2}
-                    name="Ordered Units"
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="h-80 flex items-center justify-center text-muted-foreground">
-                {stats.total_records_all_time > 0
-                  ? `No data in selected date range (${stats.total_records_all_time.toLocaleString()} records exist in DB)`
-                  : 'No Amazon sales data uploaded yet'}
-              </div>
-            )}
+            {(() => {
+              const filtered = filterMode === 'custom' && (!customStart || !customEnd)
+                ? dailyTrend
+                : filterTrend(dailyTrend, filterMode, customStart, customEnd);
+              return filtered.length > 0 ? (
+                <ResponsiveContainer width="100%" height={280}>
+                  <AreaChart data={filtered}>
+                    <defs>
+                      <linearGradient id="colorAmazonSales" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#60a5fa" stopOpacity={0.6}/>
+                        <stop offset="95%" stopColor="#93c5fd" stopOpacity={0.05}/>
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                    <XAxis dataKey="date" tick={{ fill: '#6b7280', fontSize: 11 }} axisLine={{ stroke: '#e5e7eb' }} interval="preserveStartEnd" />
+                    <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} axisLine={{ stroke: '#e5e7eb' }} />
+                    <Tooltip
+                      contentStyle={{ backgroundColor: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '8px' }}
+                      formatter={(value: number | undefined) => [Number(value ?? 0).toLocaleString(), 'Units']}
+                    />
+                    <Area type="monotone" dataKey="total_units" stroke="#60a5fa" fill="url(#colorAmazonSales)" strokeWidth={2} name="Ordered Units" />
+                  </AreaChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="h-64 flex items-center justify-center text-muted-foreground">
+                  {stats.total_records_all_time > 0
+                    ? `No data in selected date range (${stats.total_records_all_time.toLocaleString()} records exist in DB)`
+                    : 'No Amazon sales data uploaded yet'}
+                </div>
+              );
+            })()}
           </CardContent>
         </Card>
 
-        {/* Top Selling Products Table */}
+        {/* All Products Grid */}
         <Card>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle>Top Selling Products</CardTitle>
-              {topProducts.length > 0 && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8"
-                  onClick={() => exportToCSV(
-                    topProducts.map(p => ({
-                      'Rank': p.rank,
-                      'ASIN': p.asin,
-                      'Product': p.name,
-                      'Total Units': p.total_units,
-                      'Revenue (₹)': Math.round(p.total_revenue),
-                    })),
-                    'amazon_top_products'
-                  )}
-                >
-                  <Download className="h-4 w-4 mr-2" />
-                  Export
+          <CardHeader className="pb-2">
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <CardTitle className="text-base font-medium">
+                All Products ({productsTotal.toLocaleString()})
+              </CardTitle>
+              <div className="flex items-center gap-2">
+                <div className="flex gap-1">
+                  <Input
+                    placeholder="Search by product or ASIN..."
+                    value={productsSearch}
+                    onChange={(e) => setProductsSearch(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleProductSearch()}
+                    className="h-9 w-56 text-sm"
+                  />
+                  <Button variant="outline" size="sm" onClick={handleProductSearch}>
+                    <Search className="h-4 w-4" />
+                  </Button>
+                </div>
+                <Button variant="outline" size="sm" onClick={() => { setProductsPage(1); fetchProducts(1, productsSearch); }}>
+                  <RefreshCw className="h-4 w-4" />
                 </Button>
-              )}
+                <ViewOptionsButton
+                  columns={gridState.columns}
+                  visibleColumns={gridState.visibleColumns}
+                  onToggleColumn={gridState.toggleColumnVisibility}
+                  rowDensity={gridState.rowDensity}
+                  onDensityChange={gridState.setRowDensity}
+                  onSave={gridState.saveCurrentView}
+                  onReset={gridState.resetView}
+                />
+              </div>
             </div>
           </CardHeader>
-          <CardContent>
-            {topProducts.length > 0 ? (
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b border-border">
-                      <th className="text-left px-6 py-3 font-semibold text-xs text-muted-foreground uppercase tracking-wider w-20">Rank</th>
-                      <th className="text-left px-6 py-3 font-semibold text-xs text-muted-foreground uppercase tracking-wider">Product</th>
-                      <th className="text-left px-6 py-3 font-semibold text-xs text-muted-foreground uppercase tracking-wider">ASIN</th>
-                      <th className="text-right px-6 py-3 font-semibold text-xs text-muted-foreground uppercase tracking-wider">Total Units</th>
-                      <th className="text-right px-6 py-3 font-semibold text-xs text-muted-foreground uppercase tracking-wider">Revenue (₹)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {topProducts.map((product) => (
-                      <tr
-                        key={product.rank}
-                        className="border-b border-border/50 hover:bg-muted/50 transition-colors"
-                      >
-                        <td className="px-6 py-4">
-                          <div className="flex items-center justify-center w-8 h-8 rounded-full bg-blue-100 text-blue-700 font-bold text-sm">
-                            {product.rank}
-                          </div>
-                        </td>
-                        <td className="px-6 py-4 font-medium">{product.name}</td>
-                        <td className="px-6 py-4">
-                          <code className="text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded border border-blue-200">
-                            {product.asin}
-                          </code>
-                        </td>
-                        <td className="px-6 py-4 text-right font-semibold text-blue-600">
-                          {product.total_units.toLocaleString()}
-                        </td>
-                        <td className="px-6 py-4 text-right text-muted-foreground">
-                          ₹{Math.round(product.total_revenue).toLocaleString()}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+          <CardContent className="space-y-3">
+            {isProductsLoading ? (
+              <div className="text-center py-10">
+                <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
+                <p className="mt-3 text-sm text-gray-500">Loading products...</p>
+              </div>
+            ) : products.length === 0 ? (
+              <div className="text-center py-10 text-muted-foreground">
+                <Package className="h-10 w-10 mx-auto mb-3 text-gray-300" />
+                <p className="text-sm font-medium">No products found</p>
+                <p className="text-xs mt-1">Upload Amazon sales data to see products here</p>
               </div>
             ) : (
-              <div className="text-center py-12 text-muted-foreground">
-                {stats.total_records_all_time > 0
-                  ? `No product data in selected date range (${stats.total_records_all_time.toLocaleString()} records exist in DB)`
-                  : 'No Amazon sales data uploaded yet'}
-              </div>
+              <>
+                <DataGrid data={products} gridState={gridState} pageSize={PAGE_SIZE} />
+                <div className="flex items-center justify-between pt-2">
+                  <p className="text-sm text-gray-500">{productsTotal.toLocaleString()} products</p>
+                  <div className="flex items-center gap-2">
+                    <Button variant="outline" size="sm" onClick={() => { const p = Math.max(1, productsPage - 1); setProductsPage(p); fetchProducts(p, productsSearch); }} disabled={productsPage === 1}>
+                      Previous
+                    </Button>
+                    <span className="text-sm text-gray-500">Page {productsPage} of {productsTotalPages}</span>
+                    <Button variant="outline" size="sm" onClick={() => { const p = Math.min(productsTotalPages, productsPage + 1); setProductsPage(p); fetchProducts(p, productsSearch); }} disabled={productsPage === productsTotalPages}>
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              </>
             )}
           </CardContent>
         </Card>

@@ -60,7 +60,7 @@ export function FilterBar({
             type="search"
             placeholder={searchPlaceholder}
             value={searchValue}
-            onChange={(e) => onSearchChange(e.target.value)}
+            onChange={(e) => onSearchChange(e.target.value.replace(/^\s+/, ''))}
             className="pl-9 h-9"
           />
         </div>
@@ -126,7 +126,7 @@ export function SearchBar({
         type="search"
         placeholder={placeholder}
         value={value}
-        onChange={(e) => onChange?.(e.target.value)}
+        onChange={(e) => onChange?.(e.target.value.replace(/^\s+/, ''))}
         className="pl-9 h-9"
       />
     </div>

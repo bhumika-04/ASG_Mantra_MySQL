@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -92,9 +93,11 @@ interface SemanticPreview {
     paymentTerms: string;
   }[];
   poItems?: POItem[];
+  duplicatePos?: { poNumber: string; uploadedOn: string }[];
 }
 
 export default function AmazonUploadPage() {
+  const router = useRouter();
   const [isUploading, setIsUploading] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
@@ -108,6 +111,7 @@ export default function AmazonUploadPage() {
   const [isExtracting, setIsExtracting] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
   const [packingAlerts, setPackingAlerts] = useState<{ asin: string; title: string; ordered_qty: number; packed_qty: number; gap: number }[]>([]);
+  const [inventoryWarnings, setInventoryWarnings] = useState<{ asin: string; title: string; ordered_qty: number; packed_qty: number; shortfall: number }[]>([]);
 
   // Hidden file input refs for Sales and Inventory
   const salesFileInputRef = useRef<HTMLInputElement>(null);
@@ -138,6 +142,7 @@ export default function AmazonUploadPage() {
           duplicateDataWarning: result.duplicateDataWarning ?? null,
           poSummary: result.poSummary,
           poItems: result.poItems,
+          duplicatePos: result.duplicatePos ?? [],
         });
         // Pre-fill the date input if detected
         setReportDate(detectedDate ?? '');
@@ -160,6 +165,7 @@ export default function AmazonUploadPage() {
     }
     setIsUploading(true);
     setPackingAlerts([]);
+    setInventoryWarnings([]);
     // Always use the user's date (which may be the detected date or user-edited)
     const dateOverride = semanticPreview.uploadType !== 'amazon/purchase-orders' ? reportDate : undefined;
     try {
@@ -173,6 +179,10 @@ export default function AmazonUploadPage() {
         if (result.data?.packing_alerts?.length > 0) {
           setPackingAlerts(result.data.packing_alerts);
         }
+        if (result.data?.inventory_warnings?.length > 0) {
+          setInventoryWarnings(result.data.inventory_warnings);
+        }
+        router.refresh();
       }
       setUploadResult(result);
       const processed =
@@ -261,6 +271,7 @@ export default function AmazonUploadPage() {
     if (!pdfExtractData) return;
     setIsConfirming(true);
     setPackingAlerts([]);
+    setInventoryWarnings([]);
     try {
       const result: any = await api.upload.amazonPOConfirmPdf({
         header: pdfExtractData.header,
@@ -269,6 +280,9 @@ export default function AmazonUploadPage() {
       if (result.success) {
         if (result.data?.packing_alerts?.length > 0) {
           setPackingAlerts(result.data.packing_alerts);
+        }
+        if (result.data?.inventory_warnings?.length > 0) {
+          setInventoryWarnings(result.data.inventory_warnings);
         }
         toast.success(result.message);
 
@@ -290,6 +304,7 @@ export default function AmazonUploadPage() {
           },
         });
         setPdfExtractData(null);
+        router.refresh();
       } else {
         toast.error(result.message || 'Failed to save PO');
       }
@@ -535,6 +550,18 @@ export default function AmazonUploadPage() {
                 </div>
               )}
 
+              {/* Duplicate PO warning */}
+              {semanticPreview.duplicatePos && semanticPreview.duplicatePos.length > 0 && (
+                <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-300 rounded-lg">
+                  <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                  <div className="text-sm text-red-800">
+                    <span className="font-semibold">Duplicate POs detected:</span>{' '}
+                    {semanticPreview.duplicatePos.map(d => `PO ${d.poNumber} (uploaded ${d.uploadedOn})`).join(', ')}.
+                    {' '}These POs already exist in the database and will be skipped on confirm.
+                  </div>
+                </div>
+              )}
+
               {/* PO Summary header cards */}
               {semanticPreview.poSummary && semanticPreview.poSummary.length > 0 && (
                 <div className="overflow-x-auto bg-white rounded-lg border">
@@ -763,7 +790,7 @@ export default function AmazonUploadPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <Tabs defaultValue="sales" className="w-full" onValueChange={(v) => { setActiveTab(v); setUploadResult(null); setSemanticPreview(null); setReportDate(''); setPackingAlerts([]); }}>
+            <Tabs defaultValue="sales" className="w-full" onValueChange={(v) => { setActiveTab(v); setUploadResult(null); setSemanticPreview(null); setReportDate(''); setPackingAlerts([]); setInventoryWarnings([]); }}>
               <TabsList className="grid w-full grid-cols-3">
                 <TabsTrigger value="sales" className="flex items-center gap-2">
                   <ShoppingCart className="h-4 w-4" />
@@ -826,6 +853,14 @@ export default function AmazonUploadPage() {
                       </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-4">
+                      {/* Duplicate PO warning */}
+                      {pdfExtractData.duplicateWarning && (
+                        <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-300 rounded-lg">
+                          <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                          <div className="text-sm text-red-800 font-medium">{pdfExtractData.duplicateWarning}</div>
+                        </div>
+                      )}
+
                       {/* Warnings */}
                       {pdfExtractData.warnings && pdfExtractData.warnings.length > 0 && (
                         <div className="flex items-start gap-2 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
@@ -953,7 +988,7 @@ export default function AmazonUploadPage() {
                           <Button variant="outline" onClick={handleCancelPdfPreview}>
                             Cancel
                           </Button>
-                          <Button onClick={handleConfirmPdfUpload} disabled={isConfirming}>
+                          <Button onClick={handleConfirmPdfUpload} disabled={isConfirming || !!pdfExtractData.duplicateWarning}>
                             {isConfirming ? (
                               <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Saving...</>
                             ) : (
@@ -1030,6 +1065,43 @@ export default function AmazonUploadPage() {
                       </table>
                     </div>
                     <p className="text-xs text-amber-700">Go to <span className="font-medium">Stock Upload</span> page to update packed quantities.</p>
+                  </div>
+                )}
+
+                {/* Inventory Deduction Warnings */}
+                {inventoryWarnings.length > 0 && activeTab === 'po' && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-4 space-y-3">
+                    <div className="flex items-center gap-2 text-red-800">
+                      <AlertTriangle className="h-4 w-4 shrink-0" />
+                      <p className="font-medium text-sm">
+                        Insufficient packed inventory for {inventoryWarnings.length} item{inventoryWarnings.length > 1 ? 's' : ''} — deducted what was available
+                      </p>
+                    </div>
+                    <div className="overflow-x-auto rounded border border-red-200">
+                      <table className="w-full text-xs">
+                        <thead className="bg-red-100">
+                          <tr>
+                            <th className="text-left p-2 font-medium">ASIN</th>
+                            <th className="text-left p-2 font-medium">Product Title</th>
+                            <th className="text-right p-2 font-medium">Ordered</th>
+                            <th className="text-right p-2 font-medium">Was Packed</th>
+                            <th className="text-right p-2 font-medium text-red-700">Shortfall</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {inventoryWarnings.map((w, i) => (
+                            <tr key={i} className="border-t border-red-200 bg-white">
+                              <td className="p-2 font-mono">{w.asin}</td>
+                              <td className="p-2 max-w-[200px] truncate" title={w.title}>{w.title}</td>
+                              <td className="p-2 text-right">{w.ordered_qty}</td>
+                              <td className="p-2 text-right text-emerald-700">{w.packed_qty}</td>
+                              <td className="p-2 text-right font-semibold text-red-700">{w.shortfall}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="text-xs text-red-700">Packed inventory was automatically deducted. Please replenish stock for the shortfall quantities.</p>
                   </div>
                 )}
               </TabsContent>

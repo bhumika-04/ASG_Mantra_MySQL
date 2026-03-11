@@ -14,7 +14,7 @@ class AmazonInventoryData(Base):
 
     Id = Column(Integer, primary_key=True, autoincrement=True)
     ReportDate = Column(Date, nullable=False)
-    # DistributorId = Column(Integer, ForeignKey('Distributors.Id'), nullable=True)  # TODO: Add this column to DB table first
+
 
     # Product Identification
     ASIN = Column(String(20), nullable=False)

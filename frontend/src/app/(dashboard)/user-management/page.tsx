@@ -180,7 +180,7 @@ export default function UserManagementPage() {
   };
 
   const gridColumns: GridColumn<User>[] = [
-    { id: 'name', header: 'Name', accessorKey: 'name', sortable: true, width: 200, minWidth: 150, cell: (row) => <span className="font-medium">{row.name}</span> },
+    { id: 'name', header: 'Name', accessorKey: 'name', sortable: true, sticky: true, width: 200, minWidth: 150, cell: (row) => <span className="font-medium">{row.name}</span> },
     { id: 'email', header: 'Email', accessorKey: 'email', width: 250, minWidth: 200, cell: (row) => <span className="text-muted-foreground">{row.email}</span> },
     {
       id: 'role',
@@ -233,12 +233,12 @@ export default function UserManagementPage() {
     },
   ];
 
-  const gridState = useDataGrid(gridColumns);
+  const gridState = useDataGrid(gridColumns, 'user-management');
 
   // Filter users by search
   const filteredUsers = users.filter(user =>
-    user.name.toLowerCase().includes(search.toLowerCase()) ||
-    user.email.toLowerCase().includes(search.toLowerCase())
+    (user.name || '').toLowerCase().includes(search.toLowerCase()) ||
+    (user.email || '').toLowerCase().includes(search.toLowerCase())
   );
 
   if (isLoading) {
@@ -270,6 +270,8 @@ export default function UserManagementPage() {
               onToggleColumn={gridState.toggleColumnVisibility}
               rowDensity={gridState.rowDensity}
               onDensityChange={gridState.setRowDensity}
+              onSave={gridState.saveCurrentView}
+              onReset={gridState.resetView}
             />
             <Button onClick={() => setIsDialogOpen(true)}>
               <Plus className="h-4 w-4 mr-2" />

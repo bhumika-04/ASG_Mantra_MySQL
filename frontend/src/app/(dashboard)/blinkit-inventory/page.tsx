@@ -103,7 +103,7 @@ export default function BlinkitInventoryPage() {
       header: 'Item Name',
       accessorKey: 'itemName',
       sortable: true,
-      width: 360,
+      width: 320,
       minWidth: 200,
       cell: (row) => (
         <span
@@ -120,8 +120,9 @@ export default function BlinkitInventoryPage() {
       header: 'Item ID',
       accessorKey: 'itemId',
       sortable: true,
-      width: 120,
-      minWidth: 90,
+      sticky: true,
+      width: 130,
+      minWidth: 100,
       cell: (row) => (
         <code className="text-xs bg-yellow-50 text-yellow-700 px-1.5 py-0.5 rounded border border-yellow-200">
           {row.itemId}
@@ -221,7 +222,7 @@ export default function BlinkitInventoryPage() {
   ];
 
   // Initialize grid state
-  const gridState = useDataGrid(gridColumns);
+  const gridState = useDataGrid(gridColumns, 'blinkit-inventory');
 
   // Build facility filter options
   const facilityOptions = [
@@ -335,6 +336,8 @@ export default function BlinkitInventoryPage() {
               onToggleColumn={gridState.toggleColumnVisibility}
               rowDensity={gridState.rowDensity}
               onDensityChange={gridState.setRowDensity}
+              onSave={gridState.saveCurrentView}
+              onReset={gridState.resetView}
             />
             <Button
               variant="outline"

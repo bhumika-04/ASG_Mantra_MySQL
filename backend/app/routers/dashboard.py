@@ -5,19 +5,15 @@ Sales metrics belong in Sales Overview, not Dashboard
 """
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func, case, and_, or_, literal_column, text
+from sqlalchemy import func, or_, literal_column, text
 from datetime import date, timedelta
 from typing import Optional
 
 from ..database import get_db
-from ..models.sales import Sales
 from ..models.inventory import Inventory
 from ..models.product import Product
-from ..models.purchase_order import PurchaseOrder
 from ..models.alert import LowStockAlert
-from ..models.amazon_sales import AmazonSalesData
 from ..models.amazon_inventory import AmazonInventoryData
-from ..models.blinkit_sales import BlinkitSalesData
 from ..models.blinkit_inventory import BlinkitInventoryData
 from ..utils.dependencies import get_current_active_user
 
@@ -30,315 +26,145 @@ async def get_inventory_stats(
     current_user=Depends(get_current_active_user),
 ):
     """
-    Get inventory-focused dashboard stats (NEW - per Technical Spec v1.1)
-
-    Dashboard is for high-level inventory control:
-    - Total SKUs
-    - Packed/Unpacked inventory
-    - Platform allocation
-    - PO status
-
-    Sales metrics belong in Sales Overview page.
+    Get inventory-focused dashboard stats.
+    Uses a single raw SQL query instead of 14 separate ORM calls to minimise
+    round-trips to the remote DB.
     """
-    # Total active SKUs
-    total_skus = (
-        db.query(func.count(Product.Id))
-        .filter(Product.IsActive == True)
-        .scalar()
-        or 0
-    )
-
-    # Total inventory (all channels)
-    total_inventory = (
-        db.query(func.sum(Inventory.CurrentStock))
-        .scalar()
-        or 0
-    )
-
-    # Packed inventory (ready-to-ship)
-    packed_inventory = (
-        db.query(func.sum(Inventory.PackedQty))
-        .scalar()
-        or 0
-    )
-
-    # Unpacked inventory (raw stock)
-    unpacked_inventory = (
-        db.query(func.sum(Inventory.UnpackedQty))
-        .scalar()
-        or 0
-    )
-
-    # Amazon inventory stats from AmazonInventory table (latest report date)
-    latest_amazon_date = db.query(func.max(AmazonInventoryData.ReportDate)).scalar()
-    if latest_amazon_date:
-        amazon_inv_total = (
-            db.query(func.sum(AmazonInventoryData.SellableOnHandUnits))
-            .filter(AmazonInventoryData.ReportDate == latest_amazon_date)
-            .scalar() or 0
-        )
-    else:
-        amazon_inv_total = 0
-
-    # Blinkit inventory stats from BlinkitInventory table (latest report date)
-    latest_blinkit_date = db.query(func.max(BlinkitInventoryData.ReportDate)).scalar()
-    if latest_blinkit_date:
-        blinkit_inv_total = (
-            db.query(func.sum(BlinkitInventoryData.BackendInvQty))
-            .filter(BlinkitInventoryData.ReportDate == latest_blinkit_date)
-            .scalar() or 0
-        )
-    else:
-        blinkit_inv_total = 0
-
-    # Low inventory count - now based on unresolved alerts (ReorderLevel column deleted)
-    low_inventory_count = (
-        db.query(func.count(LowStockAlert.Id))
-        .filter(LowStockAlert.IsResolved == False)
-        .scalar()
-        or 0
-    )
-
-    # Out of stock count
-    out_of_stock_count = (
-        db.query(func.count(Inventory.Id))
-        .filter(Inventory.CurrentStock == 0)
-        .scalar()
-        or 0
-    )
-
-    # Active (not yet delivered/cancelled) POs — lifecycle: Created → Dispatched → In Transit
-    ACTIVE_STATUSES = ['Created', 'Dispatched', 'In Transit']
-
-    pending_pos = (
-        db.query(func.count(PurchaseOrder.Id))
-        .filter(PurchaseOrder.Status.in_(ACTIVE_STATUSES))
-        .scalar()
-        or 0
-    )
-
-    # Delayed POs count
-    delayed_pos = (
-        db.query(func.count(PurchaseOrder.Id))
-        .filter(PurchaseOrder.Status == 'Delayed')
-        .scalar()
-        or 0
-    )
-
-    # Amazon pending POs
-    amazon_pending_pos = (
-        db.query(func.count(PurchaseOrder.Id))
-        .filter(
-            and_(
-                PurchaseOrder.Channel == 'Amazon',
-                PurchaseOrder.Status.in_(ACTIVE_STATUSES)
-            )
-        )
-        .scalar()
-        or 0
-    )
-
-    # Blinkit pending POs
-    blinkit_pending_pos = (
-        db.query(func.count(PurchaseOrder.Id))
-        .filter(
-            and_(
-                PurchaseOrder.Channel == 'Blinkit',
-                PurchaseOrder.Status.in_(ACTIVE_STATUSES)
-            )
-        )
-        .scalar()
-        or 0
-    )
+    row = db.execute(text("""
+        SELECT
+          (SELECT COUNT(*)
+           FROM Products WHERE IsActive = 1)                                          AS total_skus,
+          (SELECT COALESCE(SUM(CurrentStock), 0)
+           FROM Inventory
+           WHERE InventoryDate = (SELECT MAX(InventoryDate) FROM Inventory))          AS total_inventory,
+          (SELECT COALESCE(SUM(PackedQty), 0)
+           FROM Inventory
+           WHERE InventoryDate = (SELECT MAX(InventoryDate) FROM Inventory))          AS packed,
+          (SELECT COALESCE(SUM(UnpackedQty), 0)
+           FROM Inventory
+           WHERE InventoryDate = (SELECT MAX(InventoryDate) FROM Inventory))          AS unpacked,
+          (SELECT COUNT(*)
+           FROM Inventory
+           WHERE CurrentStock = 0
+             AND InventoryDate = (SELECT MAX(InventoryDate) FROM Inventory))          AS out_of_stock,
+          (SELECT COUNT(*) FROM Alerts WHERE IsResolved = 0)                          AS low_stock,
+          (SELECT COUNT(DISTINCT PONumber) FROM AmazonPO
+           WHERE POStatus IN ('Created','Packed','Dispatched','In Transit'))
+          + (SELECT COUNT(DISTINCT PONumber) FROM BlinkitPO
+             WHERE Status IN ('Created','Packed','Dispatched','In Transit'))          AS pending_pos,
+          (SELECT COUNT(DISTINCT PONumber) FROM AmazonPO WHERE POStatus = 'Delayed')
+          + (SELECT COUNT(DISTINCT PONumber) FROM BlinkitPO WHERE Status = 'Delayed') AS delayed_pos,
+          (SELECT COUNT(DISTINCT PONumber) FROM AmazonPO
+           WHERE POStatus IN ('Created','Packed','Dispatched','In Transit'))          AS amazon_pending,
+          (SELECT COUNT(DISTINCT PONumber) FROM BlinkitPO
+           WHERE Status IN ('Created','Packed','Dispatched','In Transit'))            AS blinkit_pending,
+          (SELECT COALESCE(SUM(SellableOnHandUnits), 0)
+           FROM AmazonInventory
+           WHERE ReportDate = (SELECT MAX(ReportDate) FROM AmazonInventory))          AS amazon_inv,
+          (SELECT COALESCE(SUM(BackendInvQty), 0)
+           FROM BlinkitInventory
+           WHERE ReportDate = (SELECT MAX(ReportDate) FROM BlinkitInventory))         AS blinkit_inv
+    """)).fetchone()
 
     return {
-        "totalSKUs": total_skus,
-        "totalInventory": int(total_inventory or 0),
-        "packedInventory": int(packed_inventory or 0),
-        "unpackedInventory": int(unpacked_inventory or 0),
-        "pendingPOs": pending_pos,
-        "delayedPOs": delayed_pos,
-        "lowInventoryCount": low_inventory_count,
-        "outOfStockCount": out_of_stock_count,
-        "amazonInventory": int(amazon_inv_total),
+        "totalSKUs":        int(row.total_skus    or 0),
+        "totalInventory":   int(row.total_inventory or 0),
+        "packedInventory":  int(row.packed         or 0),
+        "unpackedInventory":int(row.unpacked        or 0),
+        "pendingPOs":       int(row.pending_pos     or 0),
+        "delayedPOs":       int(row.delayed_pos     or 0),
+        "lowInventoryCount":int(row.low_stock       or 0),
+        "outOfStockCount":  int(row.out_of_stock    or 0),
+        "amazonInventory":  int(row.amazon_inv      or 0),
         "amazonPacked": 0,
         "amazonUnpacked": 0,
-        "amazonPendingPOs": amazon_pending_pos,
-        "blinkitInventory": int(blinkit_inv_total),
+        "amazonPendingPOs": int(row.amazon_pending  or 0),
+        "blinkitInventory": int(row.blinkit_inv     or 0),
         "blinkitPacked": 0,
         "blinkitUnpacked": 0,
-        "blinkitPendingPOs": blinkit_pending_pos,
-    }
-
-
-@router.get("/stats")
-async def get_dashboard_stats(
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_active_user),
-):
-    """
-    Get dashboard KPIs
-
-    Returns:
-        - Total Revenue
-        - Total Orders
-        - Amazon Revenue
-        - Blinkit Revenue
-        - Low Stock Count
-    """
-    # Date range: Last 30 days
-    start_date = date.today() - timedelta(days=30)
-    end_date = date.today()
-
-    # Total Revenue
-    total_revenue = (
-        db.query(func.sum(Sales.TotalAmount))
-        .filter(Sales.OrderDate.between(start_date, end_date))
-        .scalar()
-        or 0
-    )
-
-    # Total Orders
-    total_orders = (
-        db.query(func.count(Sales.Id))
-        .filter(Sales.OrderDate.between(start_date, end_date))
-        .scalar()
-        or 0
-    )
-
-    # Amazon Revenue
-    amazon_revenue = (
-        db.query(func.sum(Sales.TotalAmount))
-        .filter(
-            Sales.Channel == "Amazon", Sales.OrderDate.between(start_date, end_date)
-        )
-        .scalar()
-        or 0
-    )
-
-    # Blinkit Revenue
-    blinkit_revenue = (
-        db.query(func.sum(Sales.TotalAmount))
-        .filter(
-            Sales.Channel == "Blinkit", Sales.OrderDate.between(start_date, end_date)
-        )
-        .scalar()
-        or 0
-    )
-
-    # Low Stock Count
-    low_stock_count = (
-        db.query(func.count(LowStockAlert.Id))
-        .filter(LowStockAlert.IsResolved == False)
-        .scalar()
-        or 0
-    )
-
-    return {
-        "total_revenue": float(total_revenue),
-        "total_orders": total_orders,
-        "amazon_revenue": float(amazon_revenue),
-        "blinkit_revenue": float(blinkit_revenue),
-        "low_stock_count": low_stock_count,
+        "blinkitPendingPOs":int(row.blinkit_pending or 0),
     }
 
 
 @router.get("/charts")
 async def get_dashboard_charts(
+    start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
     """
-    Get dashboard chart data from dedicated AmazonSales and BlinkitSales tables.
-
-    Returns:
-        - Monthly revenue trend (Amazon OrderedRevenue + Blinkit MRP)
-        - Top Amazon products (by OrderedRevenue)
-        - Top Blinkit products (by MRP revenue)
+    Get dashboard chart data with optional date range filter.
+    Granularity: weekly if range <= 31 days, monthly otherwise.
+    Returns is_weekly flag so frontend knows which label format to use.
     """
-    # NO DATE FILTER - Show all historical sales data
-    # This ensures charts display all available data regardless of dates
+    from datetime import date as date_type
+
     try:
-        # Use raw T-SQL for all chart queries to guarantee MSSQL/pyodbc compatibility.
+        s_date = date_type.fromisoformat(start_date) if start_date else None
+        e_date = date_type.fromisoformat(end_date) if end_date else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
 
-        # Find the latest date in each table
-        latest_amz = db.execute(text("SELECT MAX(ReportDate) FROM AmazonSales WHERE ReportDate IS NOT NULL")).scalar()
-        latest_blinkit = db.execute(text("SELECT MAX(SaleDate) FROM BlinkitSales WHERE SaleDate IS NOT NULL")).scalar()
+    # Determine granularity: weekly if range <= 31 days, monthly otherwise
+    use_weekly = bool(s_date and e_date and (e_date - s_date).days <= 31)
 
-        from datetime import date as date_type, timedelta
-        today = date_type.today()
-        ref_date = latest_amz or latest_blinkit or today
-
-        # If latest data is within last 60 days → show WEEKLY breakdown for that month
-        # Otherwise → show MONTHLY data for last 6 months from latest date
-        use_weekly = (today - ref_date).days <= 60 if ref_date else False
-
+    try:
         if use_weekly:
-            # Weekly view: group into W1-W4 within the latest month
-            amz_weekly_rows = db.execute(text("""
-                WITH WeekData AS (
-                    SELECT
-                        DATEDIFF(week, DATEADD(month, DATEDIFF(month, 0, :ref), 0), ReportDate) + 1 AS wnum,
-                        OrderedRevenue
-                    FROM AmazonSales
-                    WHERE YEAR(ReportDate) = YEAR(:ref)
-                      AND MONTH(ReportDate) = MONTH(:ref)
-                      AND ReportDate IS NOT NULL
-                )
-                SELECT 'W' + CAST(wnum AS VARCHAR) AS week_label, SUM(OrderedRevenue) AS revenue
-                FROM WeekData
-                WHERE wnum BETWEEN 1 AND 5
-                GROUP BY wnum
-                ORDER BY wnum
-            """), {"ref": ref_date}).fetchall()
-            amazon_by_period = {row[0]: float(row[1] or 0) for row in amz_weekly_rows}
-
-            blinkit_weekly_rows = db.execute(text("""
-                WITH WeekData AS (
-                    SELECT
-                        DATEDIFF(week, DATEADD(month, DATEDIFF(month, 0, :ref), 0), SaleDate) + 1 AS wnum,
-                        MRP
-                    FROM BlinkitSales
-                    WHERE YEAR(SaleDate) = YEAR(:ref)
-                      AND MONTH(SaleDate) = MONTH(:ref)
-                      AND SaleDate IS NOT NULL
-                )
-                SELECT 'W' + CAST(wnum AS VARCHAR) AS week_label, SUM(MRP) AS revenue
-                FROM WeekData
-                WHERE wnum BETWEEN 1 AND 5
-                GROUP BY wnum
-                ORDER BY wnum
-            """), {"ref": ref_date}).fetchall()
-            blinkit_by_period = {row[0]: float(row[1] or 0) for row in blinkit_weekly_rows}
-
-            all_periods = sorted(
-                set(amazon_by_period.keys()) | set(blinkit_by_period.keys()),
-                key=lambda x: int(x[1:])
-            )
-        else:
-            # Monthly view: last 6 months from latest date
-            amz_monthly_rows = db.execute(text("""
-                SELECT CONVERT(varchar(7), ReportDate, 120) AS month, SUM(OrderedRevenue) AS revenue
+            # Weekly grouping: group by Monday of each week, label as YYYY-MM-DD
+            amz_rows = db.execute(text("""
+                SELECT
+                    CONVERT(varchar(10),
+                        DATEADD(dd, -((DATEPART(weekday, ReportDate) - 2 + 7) % 7), ReportDate),
+                        120) AS period,
+                    SUM(OrderedRevenue) AS revenue
                 FROM AmazonSales
-                WHERE ReportDate >= DATEADD(month, -6, :ref)
-                  AND ReportDate IS NOT NULL
-                GROUP BY CONVERT(varchar(7), ReportDate, 120)
-                ORDER BY CONVERT(varchar(7), ReportDate, 120)
-            """), {"ref": ref_date}).fetchall()
-            amazon_by_period = {row[0]: float(row[1] or 0) for row in amz_monthly_rows}
+                WHERE ReportDate IS NOT NULL
+                  AND ReportDate BETWEEN :start AND :end
+                GROUP BY DATEADD(dd, -((DATEPART(weekday, ReportDate) - 2 + 7) % 7), ReportDate)
+                ORDER BY period
+            """), {"start": s_date, "end": e_date}).fetchall()
+            amazon_by_period = {row[0]: float(row[1] or 0) for row in amz_rows}
 
-            blinkit_monthly_rows = db.execute(text("""
-                SELECT CONVERT(varchar(7), SaleDate, 120) AS month, SUM(MRP) AS revenue
+            blk_rows = db.execute(text("""
+                SELECT
+                    CONVERT(varchar(10),
+                        DATEADD(dd, -((DATEPART(weekday, SaleDate) - 2 + 7) % 7), SaleDate),
+                        120) AS period,
+                    SUM(MRP) AS revenue
                 FROM BlinkitSales
-                WHERE SaleDate >= DATEADD(month, -6, :ref)
-                  AND SaleDate IS NOT NULL
+                WHERE SaleDate IS NOT NULL
+                  AND SaleDate BETWEEN :start AND :end
+                GROUP BY DATEADD(dd, -((DATEPART(weekday, SaleDate) - 2 + 7) % 7), SaleDate)
+                ORDER BY period
+            """), {"start": s_date, "end": e_date}).fetchall()
+            blinkit_by_period = {row[0]: float(row[1] or 0) for row in blk_rows}
+
+        else:
+            # Monthly grouping: YYYY-MM labels, optional date range filter
+            amz_rows = db.execute(text("""
+                SELECT CONVERT(varchar(7), ReportDate, 120) AS period, SUM(OrderedRevenue) AS revenue
+                FROM AmazonSales
+                WHERE ReportDate IS NOT NULL
+                  AND (:start IS NULL OR ReportDate >= :start)
+                  AND (:end IS NULL OR ReportDate <= :end)
+                GROUP BY CONVERT(varchar(7), ReportDate, 120)
+                ORDER BY period
+            """), {"start": s_date, "end": e_date}).fetchall()
+            amazon_by_period = {row[0]: float(row[1] or 0) for row in amz_rows}
+
+            blk_rows = db.execute(text("""
+                SELECT CONVERT(varchar(7), SaleDate, 120) AS period, SUM(MRP) AS revenue
+                FROM BlinkitSales
+                WHERE SaleDate IS NOT NULL
+                  AND (:start IS NULL OR SaleDate >= :start)
+                  AND (:end IS NULL OR SaleDate <= :end)
                 GROUP BY CONVERT(varchar(7), SaleDate, 120)
-                ORDER BY CONVERT(varchar(7), SaleDate, 120)
-            """), {"ref": ref_date}).fetchall()
-            blinkit_by_period = {row[0]: float(row[1] or 0) for row in blinkit_monthly_rows}
+                ORDER BY period
+            """), {"start": s_date, "end": e_date}).fetchall()
+            blinkit_by_period = {row[0]: float(row[1] or 0) for row in blk_rows}
 
-            all_periods = sorted(set(amazon_by_period.keys()) | set(blinkit_by_period.keys()))
-
+        all_periods = sorted(set(amazon_by_period.keys()) | set(blinkit_by_period.keys()))
         monthly_data = [
             {
                 'month':   p,
@@ -348,18 +174,19 @@ async def get_dashboard_charts(
             for p in all_periods
         ]
 
-        # 3. Top 5 Amazon Products (ALL TIME)
+        # Top 5 Amazon Products — filtered by date range if provided
         amz_top_rows = db.execute(text("""
             SELECT TOP 5
-                MAX(ProductTitle)                       AS name,
-                SUM(OrderedRevenue)                     AS revenue,
-                SUM(ISNULL(OrderedUnits, 0))            AS quantity
+                MAX(ProductTitle)            AS name,
+                SUM(OrderedRevenue)          AS revenue,
+                SUM(ISNULL(OrderedUnits, 0)) AS quantity
             FROM AmazonSales
             WHERE ReportDate IS NOT NULL AND SourceFile = 'VendorCSV'
+              AND (:start IS NULL OR ReportDate >= :start)
+              AND (:end IS NULL OR ReportDate <= :end)
             GROUP BY ASIN
             ORDER BY SUM(OrderedRevenue) DESC
-        """)).fetchall()
-
+        """), {"start": s_date, "end": e_date}).fetchall()
         amazon_product_data = [
             {
                 'name':     (row[0] or 'Unknown')[:25] + ('...' if row[0] and len(row[0]) > 25 else ''),
@@ -369,18 +196,19 @@ async def get_dashboard_charts(
             for row in amz_top_rows
         ]
 
-        # 4. Top 5 Blinkit Products (ALL TIME)
+        # Top 5 Blinkit Products — filtered by date range if provided
         blinkit_top_rows = db.execute(text("""
             SELECT TOP 5
-                MAX(ItemName)   AS name,
-                SUM(MRP)        AS revenue,
-                SUM(QtySold)    AS quantity
+                MAX(ItemName) AS name,
+                SUM(MRP)      AS revenue,
+                SUM(QtySold)  AS quantity
             FROM BlinkitSales
             WHERE SaleDate IS NOT NULL
+              AND (:start IS NULL OR SaleDate >= :start)
+              AND (:end IS NULL OR SaleDate <= :end)
             GROUP BY ItemId
             ORDER BY SUM(MRP) DESC
-        """)).fetchall()
-
+        """), {"start": s_date, "end": e_date}).fetchall()
         blinkit_product_data = [
             {
                 'name':     (row[0] or 'Unknown')[:25] + ('...' if row[0] and len(row[0]) > 25 else ''),
@@ -407,6 +235,7 @@ async def get_dashboard_charts(
         "amazon_products":  amazon_product_data,
         "blinkit_products": blinkit_product_data,
         "top_products":     overall_product_data,
+        "is_weekly":        use_weekly,
     }
 
 
@@ -469,16 +298,16 @@ async def get_product_overview(
             .subquery()
         )
 
-    # Packed / Unpacked totals from Inventory table (ASG stock only)
-    packed_sub = (
-        db.query(
-            Inventory.ProductId,
-            func.sum(Inventory.PackedQty).label("total_packed"),
-            func.sum(Inventory.UnpackedQty).label("total_unpacked"),
-        )
-        .group_by(Inventory.ProductId)
-        .subquery()
-    )
+    # Packed / Unpacked totals from Inventory table (ASG stock only, latest date)
+    latest_inv = db.query(func.max(Inventory.InventoryDate)).scalar()
+    packed_sub_q = db.query(
+        Inventory.ProductId,
+        func.sum(Inventory.PackedQty).label("total_packed"),
+        func.sum(Inventory.UnpackedQty).label("total_unpacked"),
+    ).group_by(Inventory.ProductId)
+    if latest_inv:
+        packed_sub_q = packed_sub_q.filter(Inventory.InventoryDate == latest_inv)
+    packed_sub = packed_sub_q.subquery()
 
     # Main query: active products LEFT JOIN each channel
     query = (

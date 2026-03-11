@@ -12,7 +12,6 @@ import {
   PackageOpen,
   Boxes,
   Download,
-  CalendarDays,
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
@@ -30,7 +29,6 @@ interface InventoryItem {
   amazonStock: number;
   blinkitStock: number;
   totalStock: number;
-  reorderLevel: number | null;
   status: string;
 }
 
@@ -76,7 +74,6 @@ export default function DispatchInventoryPage() {
           amazonStock: row.amazonStock || 0,
           blinkitStock: row.blinkitStock || 0,
           totalStock: row.totalStock || 0,
-          reorderLevel: row.reorderLevel || null,
           status: row.status || 'Healthy',
         })));
       } catch (error) {
@@ -104,19 +101,23 @@ export default function DispatchInventoryPage() {
       const q = search.toLowerCase();
       filtered = filtered.filter(
         (item) =>
-          item.productName.toLowerCase().includes(q) ||
-          item.asgSku.toLowerCase().includes(q) ||
-          (item.amazonId && item.amazonId.toLowerCase().includes(q)) ||
-          (item.blinkitId && item.blinkitId.toLowerCase().includes(q)) ||
-          (item.gs1 && item.gs1.toLowerCase().includes(q))
+          (item.productName || '').toLowerCase().includes(q) ||
+          (item.asgSku || '').toLowerCase().includes(q) ||
+          (item.amazonId || '').toLowerCase().includes(q) ||
+          (item.blinkitId || '').toLowerCase().includes(q) ||
+          (item.gs1 || '').toLowerCase().includes(q)
       );
     }
 
     if (filters.status !== 'all') {
       filtered = filtered.filter((item) => {
-        const stock = filters.channel === 'amazon' ? item.amazonStock : filters.channel === 'blinkit' ? item.blinkitStock : item.totalStock;
+        const stock = filters.channel === 'amazon'
+          ? item.amazonStock
+          : filters.channel === 'blinkit'
+          ? item.blinkitStock
+          : item.packedQty + item.unpackedQty; // ASG total (matches Total Stock column)
         if (filters.status === 'out-of-stock') return stock === 0;
-        if (filters.status === 'low-stock') return stock > 0 && item.reorderLevel !== null && stock < item.reorderLevel;
+        if (filters.status === 'low-stock') return stock > 0 && stock <= 10;
         if (filters.status === 'in-stock') return stock > 0;
         return true;
       });
@@ -134,19 +135,11 @@ export default function DispatchInventoryPage() {
 
   const gridColumns: GridColumn<InventoryItem>[] = [
     {
-      id: 'rowNumber',
-      header: '#',
-      width: 55,
-      minWidth: 45,
-      align: 'center',
-      cell: (row) => <span className="text-muted-foreground font-medium">{filteredItemsRef.current.indexOf(row) + 1}</span>,
-    },
-    {
       id: 'productName',
       header: 'Product Name',
       accessorKey: 'productName',
       sortable: true,
-      width: 360,
+      width: 320,
       minWidth: 200,
       cell: (row) => (
         <span
@@ -163,8 +156,9 @@ export default function DispatchInventoryPage() {
       header: 'ASG-SKU-ID',
       accessorKey: 'asgSku',
       sortable: true,
-      width: 175,
-      minWidth: 130,
+      sticky: true,
+      width: 180,
+      minWidth: 150,
       cell: (row) => (
         <code className="text-xs bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded border border-gray-200 whitespace-nowrap">
           {row.asgSku}
@@ -176,8 +170,8 @@ export default function DispatchInventoryPage() {
       header: 'ASN (Amazon-ID)',
       accessorKey: 'amazonId',
       sortable: true,
-      width: 150,
-      minWidth: 120,
+      width: 175,
+      minWidth: 155,
       cell: (row) =>
         row.amazonId ? (
           <code className="text-xs bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200">
@@ -192,8 +186,8 @@ export default function DispatchInventoryPage() {
       header: 'Blinkit-ID',
       accessorKey: 'blinkitId',
       sortable: true,
-      width: 135,
-      minWidth: 110,
+      width: 140,
+      minWidth: 120,
       cell: (row) =>
         row.blinkitId ? (
           <code className="text-xs bg-yellow-50 text-yellow-700 px-1.5 py-0.5 rounded border border-yellow-200">
@@ -208,8 +202,8 @@ export default function DispatchInventoryPage() {
       header: 'GS-1',
       accessorKey: 'gs1',
       sortable: true,
-      width: 145,
-      minWidth: 110,
+      width: 150,
+      minWidth: 120,
       cell: (row) =>
         row.gs1 ? (
           <span className="text-xs text-muted-foreground font-mono">{row.gs1}</span>
@@ -222,8 +216,8 @@ export default function DispatchInventoryPage() {
       header: 'Packed Qty',
       accessorKey: 'packedQty',
       sortable: true,
-      width: 115,
-      minWidth: 95,
+      width: 125,
+      minWidth: 110,
       align: 'center',
       cell: (row) => (
         <span className={`px-2 py-0.5 rounded text-xs font-semibold border ${
@@ -240,8 +234,8 @@ export default function DispatchInventoryPage() {
       header: 'Unpacked Qty',
       accessorKey: 'unpackedQty',
       sortable: true,
-      width: 120,
-      minWidth: 100,
+      width: 135,
+      minWidth: 115,
       align: 'center',
       cell: (row) => (
         <span className={`px-2 py-0.5 rounded text-xs font-semibold border ${
@@ -254,12 +248,33 @@ export default function DispatchInventoryPage() {
       ),
     },
     {
+      id: 'totalStock',
+      header: 'Total InHouse Stock',
+      accessorKey: 'totalStock',
+      sortable: true,
+      width: 155,
+      minWidth: 130,
+      align: 'right',
+      cell: (row) => {
+        const asgTotal = row.packedQty + row.unpackedQty;
+        return (
+          <span className={`px-2 py-0.5 rounded text-xs font-bold border ${
+            asgTotal > 0
+              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+              : 'bg-red-50 text-red-600 border-red-200'
+          }`}>
+            {asgTotal.toLocaleString()}
+          </span>
+        );
+      },
+    },
+    {
       id: 'amazonStock',
       header: 'Amazon Inv',
       accessorKey: 'amazonStock',
       sortable: true,
-      width: 115,
-      minWidth: 95,
+      width: 125,
+      minWidth: 110,
       align: 'right',
       cell: (row) => (
         <span className={row.amazonStock > 0 ? 'text-blue-600 font-bold text-sm' : 'text-muted-foreground text-sm'}>
@@ -272,8 +287,8 @@ export default function DispatchInventoryPage() {
       header: 'Blinkit Inv',
       accessorKey: 'blinkitStock',
       sortable: true,
-      width: 115,
-      minWidth: 95,
+      width: 125,
+      minWidth: 110,
       align: 'right',
       cell: (row) => (
         <span className={row.blinkitStock > 0 ? 'text-yellow-600 font-bold text-sm' : 'text-muted-foreground text-sm'}>
@@ -281,27 +296,30 @@ export default function DispatchInventoryPage() {
         </span>
       ),
     },
-    {
-      id: 'totalStock',
-      header: 'Total Stock',
-      accessorKey: 'totalStock',
-      sortable: true,
-      width: 120,
-      minWidth: 100,
-      align: 'right',
-      cell: (row) => (
-        <span className={`px-2 py-0.5 rounded text-xs font-bold border ${
-          row.totalStock > 0
-            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-            : 'bg-red-50 text-red-600 border-red-200'
-        }`}>
-          {row.totalStock.toLocaleString()}
-        </span>
-      ),
-    },
   ];
 
-  const gridState = useDataGrid(gridColumns);
+  const gridState = useDataGrid(gridColumns, 'asg-inventory');
+
+  // Auto-hide platform columns based on channel filter
+  useEffect(() => {
+    if (filters.channel === 'amazon') {
+      gridState.setColumnVisible('blinkitId', false);
+      gridState.setColumnVisible('blinkitStock', false);
+      gridState.setColumnVisible('amazonId', true);
+      gridState.setColumnVisible('amazonStock', true);
+    } else if (filters.channel === 'blinkit') {
+      gridState.setColumnVisible('amazonId', false);
+      gridState.setColumnVisible('amazonStock', false);
+      gridState.setColumnVisible('blinkitId', true);
+      gridState.setColumnVisible('blinkitStock', true);
+    } else {
+      gridState.setColumnVisible('amazonId', true);
+      gridState.setColumnVisible('amazonStock', true);
+      gridState.setColumnVisible('blinkitId', true);
+      gridState.setColumnVisible('blinkitStock', true);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters.channel]);
 
   const statusOptions = [
     { label: 'All Products', value: 'all' },
@@ -372,28 +390,16 @@ export default function DispatchInventoryPage() {
           onSearchChange={setSearch}
         >
           <div className="flex items-center gap-2 ml-auto">
-            {availableDates.length > 1 && (
-              <div className="flex items-center gap-1.5 border rounded-md px-2 h-9 bg-white text-sm text-muted-foreground">
-                <CalendarDays className="h-4 w-4 shrink-0" />
-                <select
-                  className="border-none outline-none bg-transparent text-sm text-foreground cursor-pointer"
-                  value={selectedDate || inventoryDate || ''}
-                  onChange={e => setSelectedDate(e.target.value)}
-                  title="Select ASG inventory date"
-                >
-                  {availableDates.map(d => (
-                    <option key={d} value={d}>{d}</option>
-                  ))}
-                </select>
-              </div>
-            )}
             <FilterPanel
               values={filters}
               onChange={handleFilterChange}
-              onClear={() => { setFilters(DEFAULT_FILTER_VALUES); setSearch(''); }}
+              onClear={() => { setFilters(DEFAULT_FILTER_VALUES); setSearch(''); setSelectedDate(''); }}
               showChannel
               showStatus
               statusOptions={statusOptions}
+              inventoryDates={availableDates.length > 1 ? availableDates : undefined}
+              selectedInventoryDate={selectedDate || inventoryDate || availableDates[0] || ''}
+              onInventoryDateChange={setSelectedDate}
             />
             <ViewOptionsButton
               columns={gridColumns}
@@ -401,6 +407,8 @@ export default function DispatchInventoryPage() {
               onToggleColumn={gridState.toggleColumnVisibility}
               rowDensity={gridState.rowDensity}
               onDensityChange={gridState.setRowDensity}
+              onSave={gridState.saveCurrentView}
+              onReset={gridState.resetView}
             />
             <Button
               variant="outline"
@@ -417,8 +425,7 @@ export default function DispatchInventoryPage() {
                   'Unpacked Qty': i.unpackedQty,
                   'Amazon Stock': i.amazonStock,
                   'Blinkit Stock': i.blinkitStock,
-                  'Total Stock': i.totalStock,
-                  'Reorder Level': i.reorderLevel ?? '',
+                  'Total Stock (ASG)': i.packedQty + i.unpackedQty,
                   'Status': i.status,
                 })),
                 'inventory'

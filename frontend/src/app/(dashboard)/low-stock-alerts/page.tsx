@@ -5,7 +5,7 @@ import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { AlertTriangle, AlertCircle, Bell, CheckCircle, ChevronLeft, ChevronRight, Download } from 'lucide-react';
+import { AlertTriangle, AlertCircle, Bell, ChevronLeft, ChevronRight, Download, PackageX } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
 import { exportToCSV } from '@/lib/export';
@@ -31,12 +31,11 @@ export default function LowStockAlertsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [totalAlerts, setTotalAlerts] = useState(0);
-  const [resolving, setResolving] = useState<number | null>(null);
+  const [showOosOnly, setShowOosOnly] = useState(false);
 
   const fetchAlerts = async (doSync = false) => {
     try {
       setIsLoading(true);
-      // Auto-generate alerts from inventory data on first load
       if (doSync) {
         await api.alerts.sync().catch(() => {});
       }
@@ -69,24 +68,10 @@ export default function LowStockAlertsPage() {
     fetchAlerts(page === 1);
   }, [page]);
 
-  const handleResolve = async (alertId: number) => {
-    try {
-      setResolving(alertId);
-      await api.alerts.resolve(alertId);
-      await fetchAlerts();
-    } catch (error) {
-      console.error('Error resolving alert:', error);
-    } finally {
-      setResolving(null);
-    }
-  };
-
-  // Filter alerts by channel, severity, and date range
+  // Filter alerts by severity and OOS toggle only (no channel/date filters)
   const filteredAlerts = alerts.filter(a => {
-    if (filters.channel !== 'all' && a.channel.toLowerCase() !== filters.channel) return false;
-    if (filters.status !== 'all' && a.severity.toLowerCase() !== filters.status) return false;
-    if (filters.dateFrom && a.createdAt && a.createdAt.slice(0, 10) < filters.dateFrom) return false;
-    if (filters.dateTo && a.createdAt && a.createdAt.slice(0, 10) > filters.dateTo) return false;
+    if (showOosOnly && a.alertType !== 'Out of Stock') return false;
+    if (filters.status !== 'all' && (a.severity || '').toLowerCase() !== filters.status) return false;
     return true;
   });
 
@@ -128,12 +113,20 @@ export default function LowStockAlertsPage() {
             <div className="flex items-center justify-between">
               <CardTitle className="text-base font-medium">Inventory Alerts</CardTitle>
               <div className="flex items-center gap-2">
+                <Button
+                  variant={showOosOnly ? 'default' : 'outline'}
+                  size="sm"
+                  className={`h-8 gap-1.5 ${showOosOnly ? 'bg-red-600 hover:bg-red-700 text-white' : ''}`}
+                  onClick={() => setShowOosOnly((v) => !v)}
+                >
+                  <PackageX className="h-3.5 w-3.5" />
+                  Out of Stock Only
+                </Button>
                 <FilterPanel
                   values={filters}
                   onChange={(key, value) => setFilters(prev => ({ ...prev, [key]: value }))}
                   onClear={() => setFilters(DEFAULT_FILTER_VALUES)}
-                  showChannel
-                  showDateRange
+                  showChannel={false}
                   showStatus
                   statusOptions={[
                     { label: 'All', value: 'all' },
@@ -179,14 +172,14 @@ export default function LowStockAlertsPage() {
                       className="flex items-center justify-between p-4 rounded-lg border hover:bg-muted/50 transition-colors"
                     >
                       <div className="flex items-center gap-3">
-                        <div className={`h-2 w-2 rounded-full ${level === 'critical' ? 'bg-red-500' : 'bg-amber-500'}`} />
+                        <div className={`h-2 w-2 rounded-full flex-shrink-0 ${level === 'critical' ? 'bg-red-500' : 'bg-amber-500'}`} />
                         <div>
                           <p className="font-medium">{alert.productName}</p>
                           <code className="text-xs text-muted-foreground">{alert.asgSku}</code>
                           <p className="text-sm text-muted-foreground mt-1">{alert.message}</p>
                         </div>
                       </div>
-                      <div className="flex items-center gap-4">
+                      <div className="flex items-center gap-3 flex-shrink-0">
                         <Badge variant="outline" className="text-xs">
                           {alert.channel}
                         </Badge>
@@ -201,16 +194,6 @@ export default function LowStockAlertsPage() {
                         >
                           {alert.severity}
                         </Badge>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 text-xs"
-                          disabled={resolving === alert.id}
-                          onClick={() => handleResolve(alert.id)}
-                        >
-                          <CheckCircle className="h-3.5 w-3.5 mr-1" />
-                          {resolving === alert.id ? 'Resolving...' : 'Resolve'}
-                        </Button>
                       </div>
                     </div>
                   );

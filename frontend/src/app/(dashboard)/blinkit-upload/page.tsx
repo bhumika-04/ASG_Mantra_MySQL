@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef } from 'react';
+import { useRouter } from 'next/navigation';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -43,6 +44,7 @@ interface PdfExtractData {
   warnings: string[];
   page_count: number;
   item_count: number;
+  duplicate_warning?: string;
 }
 
 interface PackingAlert {
@@ -113,9 +115,11 @@ interface SemanticPreview {
   detectedDate?: string | null;
   previewRows?: PreviewRow[];
   duplicateDataWarning?: string | null;
+  duplicatePos?: { poNumber: string; uploadedOn: string }[];
 }
 
 export default function BlinkitUploadPage() {
+  const router = useRouter();
   const [isUploading, setIsUploading] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
@@ -126,6 +130,7 @@ export default function BlinkitUploadPage() {
   const [isConfirming, setIsConfirming] = useState(false);
   const [reportDate, setReportDate] = useState('');
   const [packingAlerts, setPackingAlerts] = useState<PackingAlert[]>([]);
+  const [inventoryWarnings, setInventoryWarnings] = useState<{ item_code: string; item_name: string; ordered_qty: number; packed_qty: number; shortfall: number }[]>([]);
 
   const salesFileInputRef = useRef<HTMLInputElement>(null);
   const inventoryFileInputRef = useRef<HTMLInputElement>(null);
@@ -151,6 +156,7 @@ export default function BlinkitUploadPage() {
         detectedDate: result.detectedDate,
         previewRows: result.previewRows ?? [],
         duplicateDataWarning: result.duplicateDataWarning,
+        duplicatePos: result.duplicatePos ?? [],
       });
       // Set report date from preview
       setReportDate(result.detectedDate || '');
@@ -167,6 +173,7 @@ export default function BlinkitUploadPage() {
     if (!semanticPreview) return;
     setIsUploading(true);
     setPackingAlerts([]);
+    setInventoryWarnings([]);
     try {
       let result: any;
 
@@ -179,6 +186,10 @@ export default function BlinkitUploadPage() {
         if (result.data?.packing_alerts?.length > 0) {
           setPackingAlerts(result.data.packing_alerts);
         }
+        if (result.data?.inventory_warnings?.length > 0) {
+          setInventoryWarnings(result.data.inventory_warnings);
+        }
+        router.refresh();
       }
 
       setUploadResult(result);
@@ -241,6 +252,7 @@ export default function BlinkitUploadPage() {
           warnings: result.warnings || [],
           page_count: result.page_count,
           item_count: result.item_count,
+          duplicate_warning: result.duplicate_warning,
         });
         if (result.warnings?.length > 0) {
           toast.warning(`Extracted with ${result.warnings.length} warning(s). Please review.`);
@@ -261,6 +273,7 @@ export default function BlinkitUploadPage() {
     if (!pdfExtractData) return;
     setIsConfirming(true);
     setPackingAlerts([]);
+    setInventoryWarnings([]);
     try {
       const result = await api.upload.blinkitPOConfirmPdf({
         header: pdfExtractData.header,
@@ -270,6 +283,9 @@ export default function BlinkitUploadPage() {
       if (result.data?.packing_alerts?.length > 0) {
         setPackingAlerts(result.data.packing_alerts);
       }
+      if (result.data?.inventory_warnings?.length > 0) {
+        setInventoryWarnings(result.data.inventory_warnings);
+      }
       setUploadResult({
         success: true,
         message: result.message,
@@ -277,6 +293,7 @@ export default function BlinkitUploadPage() {
       });
       setPdfExtractData(null);
       toast.success(result.message);
+      router.refresh();
 
       // Notify about auto-created products and warehouses
       if (result.data?.products_created?.length > 0) {
@@ -511,6 +528,18 @@ export default function BlinkitUploadPage() {
                 </div>
               ) : null}
 
+              {/* Duplicate PO warning */}
+              {semanticPreview.duplicatePos && semanticPreview.duplicatePos.length > 0 && (
+                <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-300 rounded-lg">
+                  <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                  <div className="text-sm text-red-800">
+                    <span className="font-semibold">Duplicate POs detected:</span>{' '}
+                    {semanticPreview.duplicatePos.map(d => `PO ${d.poNumber} (uploaded ${d.uploadedOn})`).join(', ')}.
+                    {' '}These POs already exist in the database and will be skipped on confirm.
+                  </div>
+                </div>
+              )}
+
               {/* PO Summary */}
               {semanticPreview.poSummary && semanticPreview.poSummary.length > 0 && (
                 <div className="border rounded-lg">
@@ -691,6 +720,7 @@ export default function BlinkitUploadPage() {
               setPdfExtractData(null);
               setSemanticPreview(null);
               setPackingAlerts([]);
+              setInventoryWarnings([]);
             }}>
               <TabsList className="grid w-full grid-cols-3">
                 <TabsTrigger value="sales" className="flex items-center gap-2"><Zap className="h-4 w-4" />Sales Data</TabsTrigger>
@@ -738,6 +768,15 @@ export default function BlinkitUploadPage() {
                       </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-6">
+                      {pdfExtractData.duplicate_warning && (
+                        <div className="p-3 bg-red-50 border border-red-400 rounded-lg flex items-start gap-2">
+                          <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                          <div>
+                            <p className="font-semibold text-red-800 text-sm">Duplicate PO — Cannot Save</p>
+                            <p className="text-sm text-red-700 mt-0.5">{pdfExtractData.duplicate_warning}</p>
+                          </div>
+                        </div>
+                      )}
                       {pdfExtractData.warnings.length > 0 && (
                         <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
                           <div className="flex items-center gap-2 mb-1">
@@ -798,10 +837,12 @@ export default function BlinkitUploadPage() {
                         </div>
                       </div>
                       <div className="flex items-center justify-between pt-2 border-t">
-                        <p className="text-sm text-muted-foreground">{pdfExtractData.item_count} item(s) will be saved</p>
+                        <p className="text-sm text-muted-foreground">
+                          {pdfExtractData.duplicate_warning ? 'This PO already exists — saving blocked.' : `${pdfExtractData.item_count} item(s) will be saved`}
+                        </p>
                         <div className="flex gap-2">
                           <Button variant="outline" onClick={handleCancelPdfPreview} disabled={isConfirming}>Cancel</Button>
-                          <Button onClick={handleConfirmPdfUpload} disabled={isConfirming}>
+                          <Button onClick={handleConfirmPdfUpload} disabled={isConfirming || !!pdfExtractData.duplicate_warning}>
                             {isConfirming ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving...</> : <><CheckCircle2 className="h-4 w-4 mr-2" />Confirm &amp; Save to Database</>}
                           </Button>
                         </div>
@@ -867,6 +908,43 @@ export default function BlinkitUploadPage() {
                       </table>
                     </div>
                     <p className="text-xs text-amber-700">Go to <span className="font-medium">Stock Upload</span> page to update packed quantities.</p>
+                  </div>
+                )}
+
+                {/* Inventory Deduction Warnings */}
+                {inventoryWarnings.length > 0 && activeTab === 'po' && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-4 space-y-3">
+                    <div className="flex items-center gap-2 text-red-800">
+                      <AlertTriangle className="h-4 w-4 shrink-0" />
+                      <p className="font-medium text-sm">
+                        Insufficient packed inventory for {inventoryWarnings.length} item{inventoryWarnings.length > 1 ? 's' : ''} — deducted what was available
+                      </p>
+                    </div>
+                    <div className="overflow-x-auto rounded border border-red-200">
+                      <table className="w-full text-xs">
+                        <thead className="bg-red-100">
+                          <tr>
+                            <th className="text-left p-2 font-medium">Item Code</th>
+                            <th className="text-left p-2 font-medium">Item Name</th>
+                            <th className="text-right p-2 font-medium">Ordered</th>
+                            <th className="text-right p-2 font-medium">Was Packed</th>
+                            <th className="text-right p-2 font-medium text-red-700">Shortfall</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {inventoryWarnings.map((w, i) => (
+                            <tr key={i} className="border-t border-red-200 bg-white">
+                              <td className="p-2 font-mono">{w.item_code}</td>
+                              <td className="p-2 max-w-[200px] truncate" title={w.item_name}>{w.item_name}</td>
+                              <td className="p-2 text-right">{w.ordered_qty}</td>
+                              <td className="p-2 text-right text-emerald-700">{w.packed_qty}</td>
+                              <td className="p-2 text-right font-semibold text-red-700">{w.shortfall}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="text-xs text-red-700">Packed inventory was automatically deducted. Please replenish stock for the shortfall quantities.</p>
                   </div>
                 )}
               </TabsContent>

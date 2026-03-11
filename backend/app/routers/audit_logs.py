@@ -36,7 +36,7 @@ async def get_audit_logs(
     if current_user.Role not in ["Admin", "Manager"]:
         raise HTTPException(status_code=403, detail="Insufficient permissions. Admin or Manager role required.")
 
-    query = db.query(AuditLog, User.FullName, User.Email).outerjoin(
+    query = db.query(AuditLog, User.Name, User.Email).outerjoin(
         User, AuditLog.UserId == User.Id
     )
 
