@@ -508,7 +508,7 @@ export default function BlinkitUploadPage() {
                   <div className="flex items-center gap-2 mb-2">
                     <Building2 className="h-4 w-4 text-orange-600" />
                     <p className="font-medium text-orange-800 text-sm">
-                      {semanticPreview.newFacilities.length} new Blinkit facility/facilities will be created in Distributor Facilities
+                      {semanticPreview.newFacilities.length} new {semanticPreview.uploadType === 'blinkit/inventory' ? 'Blinkit BE Warehouse(s) will be created' : 'Distributor Facility/Facilities will be created for Eagle Network'}
                     </p>
                   </div>
                   <div className="space-y-1 max-h-40 overflow-y-auto">
@@ -650,7 +650,7 @@ export default function BlinkitUploadPage() {
 
               <div className="flex items-center justify-between pt-2 border-t">
                 <p className="text-sm text-muted-foreground">
-                  {semanticPreview.validRows} row(s) • {semanticPreview.newProducts.length} new product(s) • {semanticPreview.newFacilities.length} new facility/facilities
+                  {semanticPreview.validRows} row(s) • {semanticPreview.newProducts.length} new product(s) • {semanticPreview.newFacilities.length} {semanticPreview.uploadType === 'blinkit/inventory' ? 'new BE warehouse(s)' : 'new distributor facility/facilities'}
                 </p>
                 <div className="flex gap-2">
                   <Button variant="outline" onClick={handleCancelSemanticPreview} disabled={isUploading}>Cancel</Button>

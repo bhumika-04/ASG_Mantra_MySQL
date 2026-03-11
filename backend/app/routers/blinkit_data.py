@@ -289,6 +289,30 @@ def _ensure_product_blinkit(db: Session, item_id: int, item_name: str, category:
     return True
 
 
+def _ensure_distributor_facility(db: Session, facility_name: str, seen: set) -> bool:
+    """Auto-create a DistributorFacility for Eagle Network from Blinkit PO ShipToName.
+    Returns True if a new facility was created, False if it already existed.
+    """
+    key = (facility_name or '').strip().lower()
+    if not key or key in seen:
+        return False
+    seen.add(key)
+
+    exists = db.query(DistributorFacility).filter(
+        DistributorFacility.FacilityName == facility_name
+    ).first()
+    if exists:
+        return False
+
+    db.add(DistributorFacility(
+        DistributorId=2,  # Eagle Network
+        FacilityName=facility_name,
+        FacilityType="Backend",
+        Active=True,
+    ))
+    return True
+
+
 def _ensure_blinkit_facility(db: Session, facility_id: int, facility_name: str, seen: set) -> bool:
     """Auto-create a Warehouse record (Channel=Blinkit) for a new Blinkit backend facility.
     Blinkit FE/BE warehouses come from Sales/Inventory uploads → stored in Warehouses table.
@@ -1022,6 +1046,7 @@ async def upload_blinkit_po(
     packing_items = []  # (item_code, item_name, ordered_qty) for packing check
     products_created = []
     warehouses_created = []
+    seen_facility_names: set = set()
 
     for idx, row in df.iterrows():
         try:
@@ -1068,14 +1093,9 @@ async def upload_blinkit_po(
                 db.flush()
                 po_created += 1
 
-                # Auto-create warehouse from ShipToName
+                # Auto-create DistributorFacility from ShipToName (Eagle Network receiving point)
                 if ship_to_name:
-                    wh_id, wh_created = find_or_create_warehouse(
-                        db, ship_to_name, channel="Blinkit",
-                        warehouse_type="Frontend"
-                    )
-                    if wh_created:
-                        warehouses_created.append({"name": ship_to_name, "code": ship_to_name.upper().replace(' ', '-')[:50]})
+                    _ensure_distributor_facility(db, ship_to_name, seen_facility_names)
 
             # Auto-create product from item data if not found
             item_code = safe_str(row.get('ItemCode') or row.get('Item Code'), 100)
@@ -1325,14 +1345,10 @@ async def confirm_blinkit_po_pdf(
         db.add(po)
         db.flush()
 
-        # Auto-create warehouse from ShipToName
+        # Auto-create DistributorFacility from ShipToName (Eagle Network receiving point)
         ship_to_name = safe_str(header.ship_to_name, 200)
         if ship_to_name:
-            wh_id, wh_created = find_or_create_warehouse(
-                db, name=ship_to_name, channel="Blinkit", warehouse_type="Frontend"
-            )
-            if wh_created:
-                warehouses_created.append({"name": ship_to_name, "code": ship_to_name.upper().replace(' ', '-')[:50]})
+            _ensure_distributor_facility(db, ship_to_name, set())
 
         items_created = 0
         for item_data in items:
