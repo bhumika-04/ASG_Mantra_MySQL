@@ -697,7 +697,7 @@ export default function BlinkitUploadPage() {
           </Card>
         )}
 
-        <Card>
+        {!semanticPreview && <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -714,7 +714,7 @@ export default function BlinkitUploadPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <Tabs defaultValue="sales" className="w-full" onValueChange={(v) => {
+            <Tabs value={activeTab} className="w-full" onValueChange={(v) => {
               setActiveTab(v);
               setUploadResult(null);
               setPdfExtractData(null);
@@ -757,17 +757,17 @@ export default function BlinkitUploadPage() {
               {/* PO Tab */}
               <TabsContent value="po" className="space-y-4 mt-6">
                 {pdfExtractData ? (
-                  <Card className="border-blue-200">
-                    <CardHeader>
+                  <Card className="border-green-200">
+                    <CardHeader className="bg-green-50/50 rounded-t-lg border-b border-green-100">
                       <CardTitle className="flex items-center gap-2">
-                        <FileText className="h-5 w-5 text-blue-600" />
+                        <FileText className="h-5 w-5 text-green-600" />
                         Extracted PO: {pdfExtractData.header?.po_number || '(PO Number not found)'}
                       </CardTitle>
                       <CardDescription>
                         {pdfExtractData.page_count} page(s), {pdfExtractData.item_count} line item(s). Review and confirm to save.
                       </CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-6">
+                    <CardContent className="space-y-6 pt-5">
                       {pdfExtractData.duplicate_warning && (
                         <div className="p-3 bg-red-50 border border-red-400 rounded-lg flex items-start gap-2">
                           <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
@@ -788,61 +788,104 @@ export default function BlinkitUploadPage() {
                           </ul>
                         </div>
                       )}
-                      <div>
-                        <h4 className="font-medium text-sm mb-3">PO Header</h4>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-                          {([
-                            ['PO Number', pdfExtractData.header?.po_number],
-                            ['PO Date', pdfExtractData.header?.po_date],
-                            ['Expected Delivery', pdfExtractData.header?.expected_delivery_date],
-                            ['Payment Terms', pdfExtractData.header?.payment_terms],
-                            ['Vendor Name', pdfExtractData.header?.vendor_name],
-                            ['Vendor GSTIN', pdfExtractData.header?.vendor_gstin],
-                            ['Ship To', pdfExtractData.header?.ship_to_name],
-                            ['Grand Total', formatINR(pdfExtractData.header?.grand_total)],
-                          ] as [string, any][]).map(([label, value], idx) => (
-                            <div key={idx} className="bg-gray-50 rounded px-3 py-2">
-                              <span className="text-muted-foreground text-xs">{label}</span>
-                              <p className="font-medium truncate">{value || '-'}</p>
-                            </div>
-                          ))}
+
+                      {/* Summary stats bar */}
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                        <div className="p-3 bg-blue-50 rounded-lg border border-blue-100">
+                          <span className="text-blue-600 block text-xs font-medium">PO Number</span>
+                          <span className="font-semibold text-blue-900">{pdfExtractData.header?.po_number || '—'}</span>
+                        </div>
+                        <div className="p-3 bg-green-50 rounded-lg border border-green-100">
+                          <span className="text-green-600 block text-xs font-medium">Grand Total</span>
+                          <span className="font-semibold text-green-900">{formatINR(pdfExtractData.header?.grand_total)}</span>
+                        </div>
+                        <div className="p-3 bg-purple-50 rounded-lg border border-purple-100">
+                          <span className="text-purple-600 block text-xs font-medium">Items</span>
+                          <span className="font-semibold text-purple-900">{pdfExtractData.item_count} line item(s)</span>
+                        </div>
+                        <div className="p-3 bg-orange-50 rounded-lg border border-orange-100">
+                          <span className="text-orange-600 block text-xs font-medium">Expected Delivery</span>
+                          <span className="font-semibold text-orange-900">{pdfExtractData.header?.expected_delivery_date || '—'}</span>
                         </div>
                       </div>
+
+                      {/* PO Header details */}
                       <div>
-                        <h4 className="font-medium text-sm mb-3">Line Items ({pdfExtractData.items.length})</h4>
-                        <div className="overflow-x-auto bg-white rounded-lg border max-h-80 overflow-y-auto">
+                        <h4 className="font-medium text-sm mb-3 text-gray-700">PO Header</h4>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                          {/* PO Info — blue */}
+                          {([
+                            ['PO Date', pdfExtractData.header?.po_date],
+                            ['Payment Terms', pdfExtractData.header?.payment_terms],
+                          ] as [string, any][]).map(([label, value]) => (
+                            <div key={label} className="bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
+                              <span className="text-blue-500 text-xs">{label}</span>
+                              <p className="font-medium truncate text-blue-900">{value || '—'}</p>
+                            </div>
+                          ))}
+                          {/* Vendor Info — purple */}
+                          {([
+                            ['Vendor Name', pdfExtractData.header?.vendor_name],
+                            ['Vendor GSTIN', pdfExtractData.header?.vendor_gstin],
+                          ] as [string, any][]).map(([label, value]) => (
+                            <div key={label} className="bg-purple-50 border border-purple-100 rounded-lg px-3 py-2">
+                              <span className="text-purple-500 text-xs">{label}</span>
+                              <p className="font-medium truncate text-purple-900">{value || '—'}</p>
+                            </div>
+                          ))}
+                          {/* Ship To — green/teal */}
+                          <div className="bg-teal-50 border border-teal-100 rounded-lg px-3 py-2">
+                            <span className="text-teal-500 text-xs">Ship To (Name)</span>
+                            <p className="font-medium truncate text-teal-900">{pdfExtractData.header?.ship_to_name || '—'}</p>
+                          </div>
+                          <div className="bg-teal-50 border border-teal-100 rounded-lg px-3 py-2 md:col-span-2">
+                            <span className="text-teal-500 text-xs">Ship To (Address)</span>
+                            <p className="font-medium break-words text-xs text-teal-900">{pdfExtractData.header?.ship_to_address || '—'}</p>
+                          </div>
+                          <div className="bg-teal-50 border border-teal-100 rounded-lg px-3 py-2">
+                            <span className="text-teal-500 text-xs">Ship To GSTIN</span>
+                            <p className="font-medium truncate text-teal-900">{pdfExtractData.header?.ship_to_gstin || '—'}</p>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Line Items */}
+                      <div>
+                        <h4 className="font-medium text-sm mb-3 text-gray-700">Line Items ({pdfExtractData.items.length})</h4>
+                        <div className="overflow-x-auto bg-white rounded-lg border border-green-100 max-h-80 overflow-y-auto">
                           <table className="w-full text-xs">
-                            <thead className="bg-gray-50 border-b sticky top-0">
+                            <thead className="bg-green-50 border-b border-green-100 sticky top-0">
                               <tr>
                                 {['S.No', 'Item Code', 'Item Name', 'MRP', 'Qty', 'Unit Cost', 'Taxable Value', 'Total'].map(h => (
-                                  <th key={h} className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">{h}</th>
+                                  <th key={h} className="px-3 py-2 text-left font-medium text-green-800 whitespace-nowrap">{h}</th>
                                 ))}
                               </tr>
                             </thead>
                             <tbody>
                               {pdfExtractData.items.map((item, idx) => (
-                                <tr key={idx} className="border-b hover:bg-gray-50">
-                                  <td className="px-3 py-2">{item.sno ?? '-'}</td>
-                                  <td className="px-3 py-2 font-mono">{item.item_code ?? '-'}</td>
+                                <tr key={idx} className={`border-b ${idx % 2 === 0 ? 'bg-white' : 'bg-green-50/30'} hover:bg-green-50`}>
+                                  <td className="px-3 py-2 text-gray-500">{item.sno ?? '-'}</td>
+                                  <td className="px-3 py-2 font-mono text-blue-700">{item.item_code ?? '-'}</td>
                                   <td className="px-3 py-2 max-w-[200px] truncate" title={item.item_name}>{item.item_name ?? '-'}</td>
                                   <td className="px-3 py-2">{item.mrp ?? '-'}</td>
-                                  <td className="px-3 py-2 font-semibold">{item.qty ?? '-'}</td>
+                                  <td className="px-3 py-2 font-semibold text-green-700">{item.qty ?? '-'}</td>
                                   <td className="px-3 py-2">{item.unit_base_cost ?? '-'}</td>
                                   <td className="px-3 py-2">{item.taxable_value?.toLocaleString('en-IN') ?? '-'}</td>
-                                  <td className="px-3 py-2 font-semibold">{item.total_amount?.toLocaleString('en-IN') ?? '-'}</td>
+                                  <td className="px-3 py-2 font-semibold text-green-800">{item.total_amount?.toLocaleString('en-IN') ?? '-'}</td>
                                 </tr>
                               ))}
                             </tbody>
                           </table>
                         </div>
                       </div>
-                      <div className="flex items-center justify-between pt-2 border-t">
+
+                      <div className="flex items-center justify-between pt-2 border-t border-green-100">
                         <p className="text-sm text-muted-foreground">
                           {pdfExtractData.duplicate_warning ? 'This PO already exists — saving blocked.' : `${pdfExtractData.item_count} item(s) will be saved`}
                         </p>
                         <div className="flex gap-2">
                           <Button variant="outline" onClick={handleCancelPdfPreview} disabled={isConfirming}>Cancel</Button>
-                          <Button onClick={handleConfirmPdfUpload} disabled={isConfirming || !!pdfExtractData.duplicate_warning}>
+                          <Button className="bg-green-600 hover:bg-green-700" onClick={handleConfirmPdfUpload} disabled={isConfirming || !!pdfExtractData.duplicate_warning}>
                             {isConfirming ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving...</> : <><CheckCircle2 className="h-4 w-4 mr-2" />Confirm &amp; Save to Database</>}
                           </Button>
                         </div>
@@ -977,7 +1020,7 @@ export default function BlinkitUploadPage() {
               </TabsContent>
             </Tabs>
           </CardContent>
-        </Card>
+        </Card>}
       </div>
     </ProtectedRoute>
   );

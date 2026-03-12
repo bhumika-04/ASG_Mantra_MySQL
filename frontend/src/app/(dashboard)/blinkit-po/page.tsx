@@ -283,6 +283,7 @@ function BlinkitPOPageContent() {
       sortable: true,
       width: 300,
       minWidth: 200,
+      wrap: true,
       cell: (row) => (
         <span
           className="font-medium text-sm leading-snug"
@@ -508,13 +509,17 @@ function BlinkitPOPageContent() {
 
   const totalPOs = new Set(poData.map(po => po.po_number)).size;
   const totalUnits = poData.reduce((sum, po) => sum + po.ordered_qty, 0);
-  const stats = useMemo(() => ({
-    created:    poData.filter(po => po.status === 'Created').length,
-    dispatched: poData.filter(po => po.status === 'Dispatched').length,
-    inTransit:  poData.filter(po => po.status === 'In Transit').length,
-    delivered:  poData.filter(po => po.status === 'Delivered').length,
-    delayed:    poData.filter(po => po.status === 'Delayed').length,
-  }), [poData]);
+  const stats = useMemo(() => {
+    const uniqueByStatus = (status: string) =>
+      new Set(poData.filter(po => po.status === status).map(po => po.po_number)).size;
+    return {
+      created:    uniqueByStatus('Created'),
+      dispatched: uniqueByStatus('Dispatched'),
+      inTransit:  uniqueByStatus('In Transit'),
+      delivered:  uniqueByStatus('Delivered'),
+      delayed:    uniqueByStatus('Delayed'),
+    };
+  }, [poData]);
 
   const kpiCards = [
     { label: 'Created',    count: stats.created,    status: 'Created' },

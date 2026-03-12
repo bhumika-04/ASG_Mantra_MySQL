@@ -266,6 +266,7 @@ function AmazonPOPageContent() {
       sortable: true,
       width: 300,
       minWidth: 200,
+      wrap: true,
       cell: (row) => (
         <span
           className="font-medium text-sm leading-snug"

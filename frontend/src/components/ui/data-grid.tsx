@@ -37,6 +37,8 @@ export interface GridColumn<T> {
   minWidth?: number;
   align?: 'left' | 'center' | 'right';
   sticky?: boolean;
+  /** Allow cell content to wrap (e.g. multi-line product names). Default: false = single-line truncate */
+  wrap?: boolean;
 }
 
 interface DataGridProps<T> {
@@ -536,6 +538,7 @@ export function DataGrid<T extends Record<string, any>>({
                     )}
                     style={{
                       minWidth: `${column.minWidth || columnWidths[column.id] || 100}px`,
+                      maxWidth: `${columnWidths[column.id] || column.width || 300}px`,
                       overflow: 'hidden',
                       backgroundColor: '#ffffff',
                       ...(column.sticky ? {
@@ -548,11 +551,13 @@ export function DataGrid<T extends Record<string, any>>({
                       } : {}),
                     }}
                   >
-                    {column.cell
-                      ? column.cell(row)
-                      : column.accessorKey
-                      ? (row[column.accessorKey] as React.ReactNode)
-                      : null}
+                    <div className={column.wrap ? 'overflow-hidden' : 'truncate'}>
+                      {column.cell
+                        ? column.cell(row)
+                        : column.accessorKey
+                        ? (row[column.accessorKey] as React.ReactNode)
+                        : null}
+                    </div>
                   </td>
                 ))}
               </tr>

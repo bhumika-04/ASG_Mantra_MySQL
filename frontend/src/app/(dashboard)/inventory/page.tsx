@@ -141,6 +141,7 @@ export default function DispatchInventoryPage() {
       sortable: true,
       width: 320,
       minWidth: 200,
+      wrap: true,
       cell: (row) => (
         <span
           className="font-medium text-sm leading-snug"

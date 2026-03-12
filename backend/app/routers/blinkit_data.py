@@ -25,7 +25,7 @@ from app.models.inventory import Inventory
 from app.utils.dependencies import get_current_user
 from app.schemas.blinkit_po import POConfirmRequest
 from app.routers.uploads import find_or_create_product, find_or_create_warehouse
-from app.utils.audit import log_audit, log_upload
+from app.utils.audit import log_audit, log_upload, notify
 from app.services.eagle_pdf_parser import extract_po_from_pdf
 
 
@@ -289,7 +289,62 @@ def _ensure_product_blinkit(db: Session, item_id: int, item_name: str, category:
     return True
 
 
-def _ensure_distributor_facility(db: Session, facility_name: str, seen: set) -> bool:
+_INDIAN_STATES = [
+    'Andaman & Nicobar', 'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar',
+    'Chandigarh', 'Chhattisgarh', 'Dadra and Nagar Haveli', 'Daman & Diu', 'Delhi',
+    'Goa', 'Gujarat', 'Haryana', 'Himachal Pradesh', 'Jammu & Kashmir', 'Jharkhand',
+    'Karnataka', 'Kerala', 'Lakshadweep', 'Madhya Pradesh', 'Maharashtra', 'Manipur',
+    'Meghalaya', 'Mizoram', 'Nagaland', 'Odisha', 'Puducherry', 'Punjab', 'Rajasthan',
+    'Sikkim', 'Tamil Nadu', 'Telangana', 'Tripura', 'Uttar Pradesh', 'Uttarakhand',
+    'West Bengal',
+]
+
+_GSTIN_STATE = {
+    '01': 'Jammu & Kashmir', '02': 'Himachal Pradesh', '03': 'Punjab',
+    '04': 'Chandigarh', '05': 'Uttarakhand', '06': 'Haryana',
+    '07': 'Delhi', '08': 'Rajasthan', '09': 'Uttar Pradesh',
+    '10': 'Bihar', '19': 'West Bengal', '20': 'Jharkhand', '21': 'Odisha',
+    '22': 'Chhattisgarh', '23': 'Madhya Pradesh', '24': 'Gujarat',
+    '27': 'Maharashtra', '29': 'Karnataka', '32': 'Kerala',
+    '33': 'Tamil Nadu', '36': 'Telangana',
+}
+
+
+def _extract_city_state(address: str, gstin: str = None):
+    """Extract city and state from address text.
+    Address is the primary source; GSTIN is only a fallback for state when address parsing fails.
+    Indian addresses typically end with: ..., City, State - PINCODE
+    """
+    state = None
+    city = None
+
+    if address:
+        # Remove PIN code (6 digits) and trailing punctuation
+        clean = re.sub(r'[-\s]*\d{6}\s*$', '', address.strip()).strip(' ,')
+        parts = [p.strip() for p in clean.split(',') if p.strip()]
+        # Scan from the end — state is usually the last meaningful segment
+        for i in range(len(parts) - 1, -1, -1):
+            for s in _INDIAN_STATES:
+                if s.lower() in parts[i].lower():
+                    state = s
+                    # City is the part immediately before state
+                    if i > 0:
+                        city = parts[i - 1].strip()
+                    break
+            if state:
+                break
+
+    # Fallback: derive state from GSTIN prefix if address parsing didn't find it
+    if not state and gstin and len(gstin) >= 2:
+        state = _GSTIN_STATE.get(gstin[:2].zfill(2))
+
+    return city, state
+
+
+def _ensure_distributor_facility(
+    db: Session, facility_name: str, seen: set,
+    ship_to_address: str = None, ship_to_gstin: str = None
+) -> bool:
     """Auto-create a DistributorFacility for Eagle Network from Blinkit PO ShipToName.
     Returns True if a new facility was created, False if it already existed.
     """
@@ -302,12 +357,22 @@ def _ensure_distributor_facility(db: Session, facility_name: str, seen: set) -> 
         DistributorFacility.FacilityName == facility_name
     ).first()
     if exists:
+        # Update city/state if missing
+        if (ship_to_address or ship_to_gstin) and (not exists.City or not exists.State):
+            city, state = _extract_city_state(ship_to_address or '', ship_to_gstin or '')
+            if city and not exists.City:
+                exists.City = city
+            if state and not exists.State:
+                exists.State = state
         return False
 
+    city, state = _extract_city_state(ship_to_address or '', ship_to_gstin or '')
     db.add(DistributorFacility(
         DistributorId=2,  # Eagle Network
         FacilityName=facility_name,
         FacilityType="Backend",
+        City=city,
+        State=state,
         Active=True,
     ))
     return True
@@ -578,6 +643,9 @@ async def upload_blinkit_sales(
                total_rows=len(df), success_rows=rows_processed, error_rows=rows_skipped, status="Success")
     log_audit(db, current_user.Id, "UPLOAD", "BlinkitSales", None,
               new_values={"type": "BlinkitSales", "file": file.filename, "rows": rows_processed})
+    notify(db, current_user.Id, "Blinkit Sales Uploaded",
+           f"{rows_processed} rows processed from {file.filename}" + (f", {rows_skipped} skipped" if rows_skipped else ""),
+           "upload")
     db.commit()
     msg = f"Blinkit sales uploaded: {rows_processed} rows processed, {rows_skipped} skipped"
     if auto_created_products:
@@ -865,6 +933,9 @@ async def upload_blinkit_inventory(
                total_rows=len(df), success_rows=rows_processed, error_rows=rows_skipped, status="Success")
     log_audit(db, current_user.Id, "UPLOAD", "BlinkitInventory", None,
               new_values={"type": "BlinkitInventory", "file": file.filename, "rows": rows_processed})
+    notify(db, current_user.Id, "Blinkit Inventory Uploaded",
+           f"{rows_processed} rows processed from {file.filename}" + (f", {rows_skipped} skipped" if rows_skipped else ""),
+           "upload")
     db.commit()
     msg = f"Blinkit inventory uploaded: {rows_processed} rows processed, {rows_skipped} skipped"
     extras = []
@@ -1095,7 +1166,9 @@ async def upload_blinkit_po(
 
                 # Auto-create DistributorFacility from ShipToName (Eagle Network receiving point)
                 if ship_to_name:
-                    _ensure_distributor_facility(db, ship_to_name, seen_facility_names)
+                    ship_to_gstin_val = safe_str(row.get('ShipToGSTIN') or row.get('Ship To GSTIN'), 20)
+                    _ensure_distributor_facility(db, ship_to_name, seen_facility_names,
+                                                 ship_to_address=ship_to_address, ship_to_gstin=ship_to_gstin_val)
 
             # Auto-create product from item data if not found
             item_code = safe_str(row.get('ItemCode') or row.get('Item Code'), 100)
@@ -1166,6 +1239,8 @@ async def upload_blinkit_po(
                total_rows=len(df), success_rows=rows_processed, error_rows=rows_skipped, status="Success")
     log_audit(db, current_user.Id, "UPLOAD", "BlinkitPO", None,
               new_values={"type": "BlinkitPO", "file": file.filename, "rows": rows_processed, "pos": po_created})
+    notify(db, current_user.Id, "Blinkit PO Uploaded",
+           f"{po_created} POs with {rows_processed} line items from {file.filename}", "upload")
     db.commit()
     # Notify about low/insufficient packed inventory (no auto-deduction — manual via AcceptedQty)
     packing_alerts = _get_packing_alerts_blinkit(db, packing_items)
@@ -1219,6 +1294,8 @@ async def update_blinkit_po_status(
     log_audit(db, current_user.Id, "STATUS_CHANGE", "BlinkitPO", str(po.Id),
               old_values={"status": old_status},
               new_values={"status": status})
+    notify(db, current_user.Id, "Blinkit PO Status Updated",
+           f"PO {po.PONumber}: {old_status} → {status}", "po_status")
     db.commit()
 
     return {
@@ -1348,7 +1425,9 @@ async def confirm_blinkit_po_pdf(
         # Auto-create DistributorFacility from ShipToName (Eagle Network receiving point)
         ship_to_name = safe_str(header.ship_to_name, 200)
         if ship_to_name:
-            _ensure_distributor_facility(db, ship_to_name, set())
+            _ensure_distributor_facility(db, ship_to_name, set(),
+                                         ship_to_address=safe_str(header.ship_to_address, 500),
+                                         ship_to_gstin=safe_str(header.ship_to_gstin, 20))
 
         items_created = 0
         for item_data in items:
@@ -1405,6 +1484,8 @@ async def confirm_blinkit_po_pdf(
                    total_rows=len(items), success_rows=items_created, error_rows=0, status="Success")
         log_audit(db, current_user.Id, "UPLOAD", "BlinkitPO", str(po.Id),
                   new_values={"type": "BlinkitPO_PDF", "po_number": header.po_number, "items": items_created})
+        notify(db, current_user.Id, "Blinkit PO PDF Uploaded",
+               f"PO {header.po_number} saved with {items_created} line items", "upload")
         db.commit()
 
         # Check packing gaps and deduct from inventory

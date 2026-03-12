@@ -66,7 +66,7 @@ export default function AmazonSalesPage() {
 
   const gridState = useDataGrid<AmazonProduct>([
     {
-      id: 'productTitle', header: 'Product Name', accessorKey: 'productTitle', sortable: true, width: 300, minWidth: 180,
+      id: 'productTitle', header: 'Product Name', accessorKey: 'productTitle', sortable: true, width: 300, minWidth: 180, wrap: true,
       cell: (row) => (
         <span
           className="font-medium text-sm leading-snug"

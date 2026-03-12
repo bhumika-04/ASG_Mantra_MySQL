@@ -65,7 +65,7 @@ export default function BlinkitSalesPage() {
 
   const gridState = useDataGrid<BlinkitProduct>([
     {
-      id: 'itemName', header: 'Product Name', accessorKey: 'itemName', sortable: true, width: 300, minWidth: 180,
+      id: 'itemName', header: 'Product Name', accessorKey: 'itemName', sortable: true, width: 300, minWidth: 180, wrap: true,
       cell: (row) => (
         <span
           className="font-medium text-sm leading-snug"

@@ -19,7 +19,7 @@ from app.models.product import Product
 from app.models.warehouse import Warehouse
 from app.models.asg_warehouse import AsgWarehouse
 from app.utils.dependencies import get_current_user
-from app.utils.audit import log_audit, log_upload
+from app.utils.audit import log_audit, log_upload, notify
 
 router = APIRouter()
 
@@ -642,6 +642,9 @@ async def upload_inventory_data(
                    total_rows=len(df), success_rows=rows_processed + rows_updated, error_rows=rows_skipped, status="Success")
         log_audit(db, current_user.Id, "UPLOAD", "Inventory", None,
                   new_values={"type": "ASGInventory", "file": file.filename, "created": rows_processed, "updated": rows_updated})
+        notify(db, current_user.Id, "ASG Stock Uploaded",
+               f"{rows_processed} rows created, {rows_updated} updated from {file.filename}" + (f", {rows_skipped} skipped" if rows_skipped else ""),
+               "upload")
         db.commit()
 
         return {

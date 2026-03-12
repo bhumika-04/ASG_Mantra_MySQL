@@ -765,7 +765,7 @@ export default function AmazonUploadPage() {
           </Card>
         )}
 
-        <Card>
+        {!semanticPreview && <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -790,7 +790,7 @@ export default function AmazonUploadPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <Tabs defaultValue="sales" className="w-full" onValueChange={(v) => { setActiveTab(v); setUploadResult(null); setSemanticPreview(null); setReportDate(''); setPackingAlerts([]); setInventoryWarnings([]); }}>
+            <Tabs value={activeTab} className="w-full" onValueChange={(v) => { setActiveTab(v); setUploadResult(null); setSemanticPreview(null); setReportDate(''); setPackingAlerts([]); setInventoryWarnings([]); }}>
               <TabsList className="grid w-full grid-cols-3">
                 <TabsTrigger value="sales" className="flex items-center gap-2">
                   <ShoppingCart className="h-4 w-4" />
@@ -1135,7 +1135,7 @@ export default function AmazonUploadPage() {
               </TabsContent>
             </Tabs>
           </CardContent>
-        </Card>
+        </Card>}
       </div>
     </ProtectedRoute>
   );

@@ -175,7 +175,7 @@ export default function SalesOverviewPage() {
     : 0;
 
   const gridColumns: GridColumn<TopProduct>[] = [
-    { id: 'name', header: 'Product Name', accessorKey: 'name', sortable: true, width: 320, minWidth: 200, cell: (row) => (
+    { id: 'name', header: 'Product Name', accessorKey: 'name', sortable: true, width: 320, minWidth: 200, wrap: true, cell: (row) => (
       <span
         className="font-medium text-sm leading-snug"
         style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}

@@ -3,7 +3,6 @@
 import { SidebarProvider } from '@/components/ui/sidebar';
 import { AppSidebar } from '@/components/AppSidebar';
 import { Header } from '@/components/Header';
-import { RoleSwitcher } from '@/components/RoleSwitcher';
 import { FilterProvider } from '@/contexts/FilterContext';
 import { Toaster } from 'sonner';
 
@@ -24,8 +23,6 @@ export default function DashboardLayout({
             </main>
           </div>
           <Toaster position="top-right" richColors />
-          {/* Development only - Role switcher */}
-          {process.env.NODE_ENV === 'development' && <RoleSwitcher />}
         </div>
       </FilterProvider>
     </SidebarProvider>

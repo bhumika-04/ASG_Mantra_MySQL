@@ -20,7 +20,7 @@ from app.models.blinkit_po_item import BlinkitPOItemData
 from app.schemas.purchase_order import PurchaseOrderCreate, PurchaseOrderUpdate
 from app.schemas.common import PaginatedResponse
 from app.utils.dependencies import get_current_user
-from app.utils.audit import log_audit
+from app.utils.audit import log_audit, notify
 
 router = APIRouter()
 
@@ -542,6 +542,8 @@ async def update_purchase_order_status(
     log_audit(db, current_user.Id, "STATUS_CHANGE", "PurchaseOrders", str(po.Id),
               old_values={"status": old_status},
               new_values={"status": status_data.status})
+    notify(db, current_user.Id, "PO Status Updated",
+           f"PO {po.PoNumber}: {old_status} → {status_data.status}", "po_status")
 
     try:
         db.commit()
@@ -639,6 +641,8 @@ async def update_amazon_po_header_status(
     log_audit(db, current_user.Id, "STATUS_CHANGE", "AmazonPO", str(po.Id),
               old_values={"poStatus": old_status},
               new_values={"poStatus": status_data.status})
+    notify(db, current_user.Id, "Amazon PO Status Updated",
+           f"PO {po.PONumber}: {old_status} → {status_data.status}", "po_status")
     try:
         db.commit()
         return {"success": True, "message": f"Amazon PO {po.PONumber} status updated to {status_data.status}"}
@@ -667,6 +671,8 @@ async def update_blinkit_po_header_status(
     log_audit(db, current_user.Id, "STATUS_CHANGE", "BlinkitPO", str(po.Id),
               old_values={"status": old_status},
               new_values={"status": status_data.status})
+    notify(db, current_user.Id, "Blinkit PO Status Updated",
+           f"PO {po.PONumber}: {old_status} → {status_data.status}", "po_status")
     try:
         db.commit()
         return {"success": True, "message": f"Blinkit PO {po.PONumber} status updated to {status_data.status}"}

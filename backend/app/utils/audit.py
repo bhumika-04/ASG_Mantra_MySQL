@@ -10,6 +10,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from app.models.audit_log import AuditLog
 from app.models.upload_log import UploadLog
+from app.models.notification import Notification
 
 logger = logging.getLogger(__name__)
 
@@ -70,3 +71,32 @@ def log_upload(
         db.add(entry)
     except Exception:
         logger.exception("Failed to write upload log")
+
+
+def notify(
+    db: Session,
+    user_id,
+    title: str,
+    message: str,
+    notif_type: str = "info",
+):
+    """Write a notification for a user. Never raises.
+    notif_type is mapped to DB-allowed values: info, success, warning, error.
+    Semantic aliases: upload→success, po_status→info, low_stock→warning.
+    """
+    _type_map = {"upload": "success", "po_status": "info", "low_stock": "warning"}
+    db_type = _type_map.get(notif_type, notif_type)
+    if db_type not in ("info", "success", "warning", "error"):
+        db_type = "info"
+    try:
+        entry = Notification(
+            UserId=user_id,
+            Title=title,
+            Message=message,
+            Type=db_type,
+            IsRead=False,
+            CreatedAt=datetime.now(),
+        )
+        db.add(entry)
+    except Exception:
+        logger.exception("Failed to write notification")

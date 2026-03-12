@@ -69,6 +69,8 @@ class BlinkitPOData(Base):
             "poExpiryDate": self.POExpiryDate.isoformat() if self.POExpiryDate else None,
             "vendorName": self.VendorName,
             "shipToName": self.ShipToName,
+            "shipToAddress": self.ShipToAddress,
+            "shipToGstin": self.ShipToGSTIN,
             "grandTotal": float(self.GrandTotal) if self.GrandTotal else None,
             "status": self.Status,
             "createdAt": self.CreatedAt.isoformat() if self.CreatedAt else None,

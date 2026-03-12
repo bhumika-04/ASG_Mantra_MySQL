@@ -23,7 +23,7 @@ from app.models.inventory import Inventory
 from app.utils.dependencies import get_current_user
 from app.schemas.amazon_po import AmazonPOConfirmRequest
 from app.routers.uploads import find_or_create_product, find_or_create_warehouse
-from app.utils.audit import log_audit, log_upload
+from app.utils.audit import log_audit, log_upload, notify
 from app.services.amazon_pdf_parser import extract_amazon_po_from_pdf
 
 
@@ -590,6 +590,9 @@ def _upload_vendor_csv(df: pd.DataFrame, report_date: date, db: Session, filenam
                    total_rows=len(df), success_rows=rows_processed, error_rows=rows_skipped, status="Success")
         log_audit(db, user_id, "UPLOAD", "AmazonSales", None,
                   new_values={"type": "VendorCSV", "file": filename, "rows": rows_processed})
+        notify(db, user_id, "Amazon Sales Uploaded",
+               f"{rows_processed} rows processed from {filename}" + (f", {rows_skipped} skipped" if rows_skipped else ""),
+               "upload")
         db.commit()
         logger.info(f"[VendorCSV] db.commit() SUCCESS — {rows_processed} rows saved to AmazonSales")
     except Exception as commit_err:
@@ -658,6 +661,9 @@ async def _upload_rk_excel(contents: bytes, filename: str, db: Session, user_id:
                    total_rows=total_processed + total_skipped, success_rows=total_processed, error_rows=total_skipped, status="Success")
         log_audit(db, user_id, "UPLOAD", "AmazonSales", None,
                   new_values={"type": "RKExcel", "file": filename, "rows": total_processed, "sheets": sheets_processed})
+        notify(db, user_id, "Amazon Sales Uploaded",
+               f"{total_processed} rows processed across {sheets_processed} sheets from {filename}",
+               "upload")
         db.commit()
         logger.info(f"[RKExcel] db.commit() SUCCESS — {total_processed} rows saved to AmazonSales")
     except Exception as commit_err:
@@ -1069,6 +1075,9 @@ async def upload_amazon_inventory(
                total_rows=len(df), success_rows=rows_processed, error_rows=rows_skipped, status="Success")
     log_audit(db, current_user.Id, "UPLOAD", "AmazonInventory", None,
               new_values={"type": "AmazonInventory", "file": file.filename, "rows": rows_processed})
+    notify(db, current_user.Id, "Amazon Inventory Uploaded",
+           f"{rows_processed} rows processed from {file.filename}" + (f", {rows_skipped} skipped" if rows_skipped else ""),
+           "upload")
     db.commit()
     msg = f"Amazon inventory uploaded: {rows_processed} rows processed, {rows_skipped} skipped"
     if auto_created_products:
@@ -1315,6 +1324,9 @@ async def upload_amazon_po(
                total_rows=len(df), success_rows=rows_processed, error_rows=rows_skipped, status="Success")
     log_audit(db, current_user.Id, "UPLOAD", "AmazonPO", None,
               new_values={"type": "AmazonPO", "file": file.filename, "rows": rows_processed, "pos": po_created})
+    notify(db, current_user.Id, "Amazon PO Uploaded",
+           f"{po_created} POs with {rows_processed} line items from {file.filename}",
+           "upload")
     db.commit()
     # Notify about low/insufficient packed inventory (no auto-deduction — manual via AcceptedQty)
     packing_alerts = _get_packing_alerts_amazon(db, packing_items)
@@ -1617,6 +1629,8 @@ async def update_amazon_po_status(
     log_audit(db, current_user.Id, "STATUS_CHANGE", "AmazonPO", str(po.Id),
               old_values={"status": old_status},
               new_values={"status": status})
+    notify(db, current_user.Id, "Amazon PO Status Updated",
+           f"PO {po.PONumber}: {old_status} → {status}", "po_status")
     db.commit()
 
     return {
@@ -1794,6 +1808,8 @@ async def confirm_amazon_po_pdf(
                total_rows=len(items), success_rows=items_created, error_rows=0, status="Success")
     log_audit(db, current_user.Id, "UPLOAD", "AmazonPO", str(po.Id),
               new_values={"type": "AmazonPO_PDF", "po_number": header.po_number, "items": items_created})
+    notify(db, current_user.Id, "Amazon PO PDF Uploaded",
+           f"PO {header.po_number} saved with {items_created} line items", "upload")
     db.commit()
 
     # Notify about low/insufficient packed inventory (no auto-deduction — manual via AcceptedQty)

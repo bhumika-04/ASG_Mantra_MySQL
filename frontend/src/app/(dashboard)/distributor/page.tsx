@@ -83,7 +83,7 @@ export default function DistributorPage() {
     { id: 'sku', header: 'SKU', accessorKey: 'sku', sortable: true, sticky: true, width: 220, minWidth: 160, cell: (row) => (
       <span className="text-xs font-mono text-gray-700 font-medium">{row.sku || '—'}</span>
     ) },
-    { id: 'itemName', header: 'Item Name', accessorKey: 'itemName', sortable: true, width: 300, minWidth: 200, cell: (row) => (
+    { id: 'itemName', header: 'Item Name', accessorKey: 'itemName', sortable: true, width: 300, minWidth: 200, wrap: true, cell: (row) => (
       <span
         className="text-sm leading-snug"
         style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
