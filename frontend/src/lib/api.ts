@@ -3,7 +3,7 @@
  * Handles all API requests with authentication
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 interface ApiOptions extends RequestInit {
   requireAuth?: boolean;

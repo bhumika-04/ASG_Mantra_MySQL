@@ -13,7 +13,7 @@ import {
   FileText, Upload, Eye, XCircle, AlertTriangle, Calendar, ChevronDown,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import api from '@/lib/api';
+import api, { API_BASE_URL } from '@/lib/api';
 
 interface Product {
   id: number;
@@ -125,7 +125,7 @@ export default function InventoryUploadPage() {
         const token = localStorage.getItem('token');
         const [productsData, warehousesData, inventoryData] = await Promise.all([
           api.products.getAll(),
-          fetch('http://localhost:8000/api/distributors/asg-warehouses?active_only=true', {
+          fetch(`${API_BASE_URL}/api/distributors/asg-warehouses?active_only=true`, {
             headers: { 'Authorization': `Bearer ${token}` }
           }).then(r => r.json()),
           api.inventory.getDispatchOverview({ page_size: 1000 }),
@@ -315,7 +315,7 @@ export default function InventoryUploadPage() {
       const formData = new FormData();
       formData.append('file', file);
 
-      const url = new URL('http://localhost:8000/api/upload/inventory');
+      const url = new URL(`${API_BASE_URL}/api/upload/inventory`);
       url.searchParams.set('inventory_date', inventoryDate);
       const response = await fetch(url.toString(), {
         method: 'POST',
