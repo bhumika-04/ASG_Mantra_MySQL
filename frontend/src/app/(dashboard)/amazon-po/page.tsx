@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo, useCallback, useRef, Suspense } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import React from 'react';
 import { FilterBar } from '@/components/ui/filter-bar';
@@ -84,7 +84,6 @@ interface POItem {
 }
 
 function AmazonPOPageContent() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const [search, setSearch] = useState(searchParams.get('search') || '');
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
@@ -186,7 +185,6 @@ function AmazonPOPageContent() {
       setPoData(prev => prev.map(p => p.id === actionRow.id ? { ...p, status: statusInput } : p));
       toast.success(`Status updated to ${statusInput}`);
       closeDialog();
-      router.refresh();
     } catch {
       toast.error('Failed to update status');
     } finally {

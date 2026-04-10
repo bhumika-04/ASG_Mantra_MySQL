@@ -42,39 +42,6 @@ interface PurchaseOrder {
   status: string;
 }
 
-const GSTIN_STATE_MAP: Record<string, string> = {
-  '01': 'Jammu & Kashmir', '02': 'Himachal Pradesh', '03': 'Punjab',
-  '04': 'Chandigarh', '05': 'Uttarakhand', '06': 'Haryana',
-  '07': 'Delhi', '08': 'Rajasthan', '09': 'Uttar Pradesh',
-  '10': 'Bihar', '11': 'Sikkim', '18': 'Assam', '19': 'West Bengal',
-  '20': 'Jharkhand', '21': 'Odisha', '22': 'Chhattisgarh',
-  '23': 'Madhya Pradesh', '24': 'Gujarat', '26': 'Goa',
-  '27': 'Maharashtra', '29': 'Karnataka', '30': 'Kerala',
-  '33': 'Tamil Nadu', '36': 'Telangana', '37': 'Andhra Pradesh',
-};
-
-const CITY_KEYWORDS = [
-  'Mumbai', 'Delhi', 'Bangalore', 'Bengaluru', 'Hyderabad', 'Chennai', 'Kolkata',
-  'Pune', 'Ahmedabad', 'Jaipur', 'Lucknow', 'Surat', 'Nagpur', 'Indore', 'Thane',
-  'Gurgaon', 'Gurugram', 'Noida', 'Chandigarh', 'Coimbatore', 'Kochi', 'Mysuru',
-  'Vadodara', 'Bhopal', 'Visakhapatnam', 'Patna', 'Nashik', 'Rajkot', 'Varanasi',
-];
-
-function extractStateFromGstin(gstin?: string | null): string {
-  if (gstin && gstin.length >= 2) {
-    const code = gstin.substring(0, 2);
-    if (GSTIN_STATE_MAP[code]) return GSTIN_STATE_MAP[code];
-  }
-  return '-';
-}
-
-function extractCityFromText(text?: string | null): string {
-  if (!text) return '-';
-  for (const city of CITY_KEYWORDS) {
-    if (text.toLowerCase().includes(city.toLowerCase())) return city;
-  }
-  return '-';
-}
 
 export default function POLifecyclePage() {
   const router = useRouter();
@@ -95,13 +62,8 @@ export default function POLifecyclePage() {
 
         const toRow = (po: any, channel: string) => {
           const rawStatus = po.status || 'Created';
-          const isBlinkit = channel === 'Blinkit';
-          const state = isBlinkit
-            ? extractStateFromGstin(po.ship_to_gstin)
-            : (po.ship_to_state || '-');
-          const city = isBlinkit
-            ? extractCityFromText((po.ship_to_address || '') + ' ' + (po.ship_to_name || ''))
-            : (po.ship_to_city || '-');
+          const state = po.ship_to_state || '-';
+          const city = po.ship_to_city || '-';
           return {
             id: po.id,
             po_id: po.po_id,

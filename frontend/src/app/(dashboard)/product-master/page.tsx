@@ -52,6 +52,11 @@ export default function ProductMasterPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [products, setProducts] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [listSearch, setListSearch] = useState('');
+  const [listPage, setListPage] = useState(1);
+  const [listTotal, setListTotal] = useState(0);
+  const [listTotalPages, setListTotalPages] = useState(1);
+  const LIST_PAGE_SIZE = 50;
   const [formData, setFormData] = useState({
     productName: '',
     asgSku: '',
@@ -275,12 +280,16 @@ export default function ProductMasterPage() {
     }
   };
 
-  const fetchProducts = async () => {
+  const fetchProducts = async (search = '', page = 1) => {
     try {
       setIsLoading(true);
-      const response: any = await api.products.getAll({ page: 1, page_size: 1000 });
+      const params: any = { page, page_size: LIST_PAGE_SIZE };
+      if (search.trim()) params.search = search.trim();
+      const response: any = await api.products.getAll(params);
       const arr = Array.isArray(response) ? response : (response?.items || response?.data || []);
       setProducts(arr);
+      setListTotal(response?.total || arr.length);
+      setListTotalPages(response?.total_pages || 1);
     } catch (error) {
       console.error('Error fetching products:', error);
     } finally {
@@ -288,7 +297,7 @@ export default function ProductMasterPage() {
     }
   };
 
-  useEffect(() => { fetchProducts(); }, []);
+  useEffect(() => { fetchProducts(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const statusBadge = (status: PreviewRow['status']) => {
     if (status === 'valid') return <Badge className="bg-green-100 text-green-700 border-green-200">Valid</Badge>;
@@ -921,13 +930,32 @@ export default function ProductMasterPage() {
                   {/* Product list */}
                   <Card>
                     <CardHeader>
-                      <CardTitle className="flex items-center gap-2 text-lg">
-                        <FileText className="h-5 w-5 text-blue-500" />
-                        All Products ({products.length})
-                      </CardTitle>
-                      <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1">
-                        <Pencil className="h-3 w-3" /> Click any product to edit it
-                      </p>
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <div>
+                          <CardTitle className="flex items-center gap-2 text-lg">
+                            <FileText className="h-5 w-5 text-blue-500" />
+                            All Products ({listTotal})
+                          </CardTitle>
+                          <p className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1">
+                            <Pencil className="h-3 w-3" /> Click any product to edit it
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Input
+                            placeholder="Search products..."
+                            value={listSearch}
+                            onChange={(e) => {
+                              setListSearch(e.target.value);
+                              setListPage(1);
+                              fetchProducts(e.target.value, 1);
+                            }}
+                            className="h-8 w-48 text-sm"
+                          />
+                          <Button variant="ghost" size="sm" onClick={() => { setListSearch(''); setListPage(1); fetchProducts('', 1); }} className="h-8 px-2 text-xs text-muted-foreground">
+                            <RefreshCw className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                      </div>
                     </CardHeader>
                     <CardContent className="p-0">
                       <div className="overflow-y-auto max-h-[560px]">
@@ -1039,6 +1067,23 @@ export default function ProductMasterPage() {
                           </div>
                         )}
                       </div>
+                      {listTotalPages > 1 && (
+                        <div className="flex items-center justify-between px-4 py-3 border-t">
+                          <p className="text-xs text-muted-foreground">
+                            {listTotal} products · Page {listPage} of {listTotalPages}
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <Button variant="outline" size="sm" className="h-7 text-xs" disabled={listPage === 1 || isLoading}
+                              onClick={() => { const p = listPage - 1; setListPage(p); fetchProducts(listSearch, p); }}>
+                              Previous
+                            </Button>
+                            <Button variant="outline" size="sm" className="h-7 text-xs" disabled={listPage === listTotalPages || isLoading}
+                              onClick={() => { const p = listPage + 1; setListPage(p); fetchProducts(listSearch, p); }}>
+                              Next
+                            </Button>
+                          </div>
+                        </div>
+                      )}
                     </CardContent>
                   </Card>
                 </div>
