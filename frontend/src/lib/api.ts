@@ -146,7 +146,7 @@ export const api = {
       const query = new URLSearchParams(p as any).toString();
       return apiFetch(`/api/upload/amazon-data/analytics${query ? `?${query}` : ''}`);
     },
-    getProducts: (params?: { search?: string; page?: number; page_size?: number }) => {
+    getProducts: (params?: { search?: string; page?: number; page_size?: number; start_date?: string; end_date?: string }) => {
       const p = Object.fromEntries(Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== ''));
       const query = new URLSearchParams(p as any).toString();
       return apiFetch(`/api/upload/amazon-data/products${query ? `?${query}` : ''}`);
@@ -160,7 +160,7 @@ export const api = {
       const query = new URLSearchParams(p as any).toString();
       return apiFetch(`/api/upload/blinkit-data/analytics${query ? `?${query}` : ''}`);
     },
-    getProducts: (params?: { search?: string; page?: number; page_size?: number }) => {
+    getProducts: (params?: { search?: string; page?: number; page_size?: number; start_date?: string; end_date?: string }) => {
       const p = Object.fromEntries(Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== ''));
       const query = new URLSearchParams(p as any).toString();
       return apiFetch(`/api/upload/blinkit-data/products${query ? `?${query}` : ''}`);

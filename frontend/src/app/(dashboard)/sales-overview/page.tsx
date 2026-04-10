@@ -306,17 +306,28 @@ export default function SalesOverviewPage() {
                   { name: 'Amazon', value: distTotal > 0 ? Math.round((distAmz / distTotal) * 100) : 0, color: '#60a5fa' },
                   { name: 'Blinkit', value: distTotal > 0 ? Math.round((distBlk / distTotal) * 100) : 0, color: '#fbbf24' },
                 ];
+                const renderLabel = ({ cx, cy, midAngle, outerRadius, name, value }: any) => {
+                  const RADIAN = Math.PI / 180;
+                  const radius = outerRadius + 28;
+                  const x = cx + radius * Math.cos(-midAngle * RADIAN);
+                  const y = cy + radius * Math.sin(-midAngle * RADIAN);
+                  return (
+                    <text x={x} y={y} fill={name === 'Amazon' ? '#3b82f6' : '#f59e0b'}
+                      textAnchor={x > cx ? 'start' : 'end'} dominantBaseline="central" fontSize={13} fontWeight={500}>
+                      {`${name}: ${value}%`}
+                    </text>
+                  );
+                };
                 return (
                   <ResponsiveContainer width="100%" height={320}>
-                    <PieChart>
+                    <PieChart margin={{ top: 20, right: 40, bottom: 20, left: 40 }}>
                       <Pie
                         data={distChannelData}
                         cx="50%"
-                        cy="50%"
+                        cy="55%"
                         labelLine={false}
-                        label={({ name, value }) => `${name}: ${value}%`}
-                        outerRadius={100}
-                        fill="#8884d8"
+                        label={renderLabel}
+                        outerRadius={95}
                         dataKey="value"
                       >
                         {distChannelData.map((entry, index) => (

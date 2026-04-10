@@ -1525,23 +1525,27 @@ async def list_amazon_sales_products(
     search: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
+    start_date: Optional[str] = Query(None, description="Filter from date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="Filter to date YYYY-MM-DD"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """List all products from AmazonSales aggregated by ASIN, with pagination and search."""
+    """List all products from AmazonSales aggregated by ASIN, with pagination, search, and date range."""
     try:
-        search_clause = ""
+        clauses = ["s.ASIN IS NOT NULL"]
         params: dict = {"offset": (page - 1) * page_size, "page_size": page_size}
         if search:
-            search_clause = "AND (ProductTitle LIKE :search OR ASIN LIKE :search OR SKU LIKE :search)"
+            clauses.append("(s.ProductTitle LIKE :search OR s.ASIN LIKE :search OR s.SKU LIKE :search)")
             params["search"] = f"%{search}%"
+        if start_date:
+            clauses.append("s.ReportDate >= :start_date")
+            params["start_date"] = start_date
+        if end_date:
+            clauses.append("s.ReportDate <= :end_date")
+            params["end_date"] = end_date
+        where = "WHERE " + " AND ".join(clauses)
 
-        count_sql = f"""
-            SELECT COUNT(DISTINCT ASIN)
-            FROM AmazonSales
-            WHERE ASIN IS NOT NULL {search_clause}
-        """
-        total = int(db.execute(text(count_sql), params).scalar() or 0)
+        total = int(db.execute(text(f"SELECT COUNT(DISTINCT s.ASIN) FROM AmazonSales s {where}"), params).scalar() or 0)
 
         rows = db.execute(text(f"""
             SELECT
@@ -1554,7 +1558,7 @@ async def list_amazon_sales_products(
                 MAX(s.ReportDate)                            AS last_sale
             FROM AmazonSales s
             LEFT JOIN Products p ON p.AmazonId = s.ASIN
-            WHERE s.ASIN IS NOT NULL {search_clause}
+            {where}
             GROUP BY s.ASIN, p.ProductName
             ORDER BY SUM(ISNULL(s.OrderedUnits, 0)) DESC
             OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY

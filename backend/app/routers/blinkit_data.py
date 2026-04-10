@@ -1682,23 +1682,27 @@ async def list_blinkit_sales_products(
     search: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
+    start_date: Optional[str] = Query(None, description="Filter from date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="Filter to date YYYY-MM-DD"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """List all products from BlinkitSales aggregated by ItemId, with pagination and search."""
+    """List all products from BlinkitSales aggregated by ItemId, with pagination, search, and date range."""
     try:
-        search_clause = ""
+        clauses = ["ItemId IS NOT NULL"]
         params: dict = {"offset": (page - 1) * page_size, "page_size": page_size}
         if search:
-            search_clause = "AND (ItemName LIKE :search OR CAST(ItemId AS NVARCHAR) LIKE :search)"
+            clauses.append("(ItemName LIKE :search OR CAST(ItemId AS NVARCHAR) LIKE :search)")
             params["search"] = f"%{search}%"
+        if start_date:
+            clauses.append("SaleDate >= :start_date")
+            params["start_date"] = start_date
+        if end_date:
+            clauses.append("SaleDate <= :end_date")
+            params["end_date"] = end_date
+        where = "WHERE " + " AND ".join(clauses)
 
-        count_sql = f"""
-            SELECT COUNT(DISTINCT ItemId)
-            FROM BlinkitSales
-            WHERE ItemId IS NOT NULL {search_clause}
-        """
-        total = int(db.execute(text(count_sql), params).scalar() or 0)
+        total = int(db.execute(text(f"SELECT COUNT(DISTINCT ItemId) FROM BlinkitSales {where}"), params).scalar() or 0)
 
         rows = db.execute(text(f"""
             SELECT
@@ -1709,7 +1713,7 @@ async def list_blinkit_sales_products(
                 MIN(SaleDate)    AS first_sale,
                 MAX(SaleDate)    AS last_sale
             FROM BlinkitSales
-            WHERE ItemId IS NOT NULL {search_clause}
+            {where}
             GROUP BY ItemId
             ORDER BY SUM(QtySold) DESC
             OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY

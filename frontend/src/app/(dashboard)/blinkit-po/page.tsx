@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo, Suspense } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { FilterBar } from '@/components/ui/filter-bar';
@@ -211,43 +211,58 @@ function BlinkitPOPageContent() {
     }
   };
 
-  useEffect(() => {
-    const fetchBlinkitPOs = async () => {
-      try {
-        setIsLoading(true);
+  const fetchBlinkitPOs = useCallback(async (statusFilter = 'all', searchQuery = '') => {
+    try {
+      setIsLoading(true);
+      const params: Record<string, any> = { page_size: 500 };
+      if (statusFilter !== 'all') params.status = statusFilter;
+      if (searchQuery.trim()) params.search = searchQuery.trim();
 
-        const response = await api.purchaseOrders.getBlinkit({ page_size: 1000 }) as any;
+      const response = await api.purchaseOrders.getBlinkit(params) as any;
 
-        const transformedPOs = (response.items || []).map((po: any) => ({
-          id: po.id,
-          po_number: po.po_number,
-          po_date: po.order_date ? new Date(po.order_date).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' }) : '-',
-          orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
-          blinkitSku: po.blinkit_id || po.blinkitId || '',
-          product_name: po.product_name || po.productName || '',
-          ordered_qty: po.quantity,
-          accepted_qty: po.accepted_qty ?? null,
-          mapped_sku: po.asg_sku || po.asgSku || '',
-          pending_qty: Math.max(0, (po.quantity || 0) - (po.received_quantity || 0)),
-          unit_cost: po.unit_price ?? null,
-          total_cost: po.total_amount ?? null,
-          city: extractCity(po.ship_to_address, po.ship_to_name),
-          state: extractState(po.ship_to_address, po.ship_to_name, po.ship_to_gstin),
-          shipTo: po.ship_to_name || '—',
-          delivery: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-US', { day: 'numeric', month: 'short' }) : '-',
-          status: po.status || 'Created',
-        }));
+      const transformedPOs = (response.items || []).map((po: any) => ({
+        id: po.id,
+        po_number: po.po_number,
+        po_date: po.order_date ? new Date(po.order_date).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' }) : '-',
+        orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
+        blinkitSku: po.blinkit_id || po.blinkitId || '',
+        product_name: po.product_name || po.productName || '',
+        ordered_qty: po.quantity,
+        accepted_qty: po.accepted_qty ?? null,
+        mapped_sku: po.asg_sku || po.asgSku || '',
+        pending_qty: Math.max(0, (po.quantity || 0) - (po.received_quantity || 0)),
+        unit_cost: po.unit_price ?? null,
+        total_cost: po.total_amount ?? null,
+        city: extractCity(po.ship_to_address, po.ship_to_name),
+        state: extractState(po.ship_to_address, po.ship_to_name, po.ship_to_gstin),
+        shipTo: po.ship_to_name || '—',
+        delivery: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-US', { day: 'numeric', month: 'short' }) : '-',
+        status: po.status || 'Created',
+      }));
 
-        setPoData(transformedPOs);
-      } catch (error) {
-        console.error('Error fetching Blinkit purchase orders:', error);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    fetchBlinkitPOs();
+      setPoData(transformedPOs);
+    } catch (error) {
+      console.error('Error fetching Blinkit purchase orders:', error);
+    } finally {
+      setIsLoading(false);
+    }
   }, []);
+
+  // Initial load
+  useEffect(() => { fetchBlinkitPOs(); }, [fetchBlinkitPOs]);
+
+  // Re-fetch when status or search filter changes (server-side filtering reduces payload)
+  const prevStatusRef = useRef(filters.status);
+  const prevSearchRef = useRef(search);
+  useEffect(() => {
+    const statusChanged = prevStatusRef.current !== filters.status;
+    const searchChanged = prevSearchRef.current !== search;
+    if (statusChanged || searchChanged) {
+      prevStatusRef.current = filters.status;
+      prevSearchRef.current = search;
+      fetchBlinkitPOs(filters.status, search);
+    }
+  }, [filters.status, search, fetchBlinkitPOs]);
 
   const gridColumns: GridColumn<POItem>[] = [
     {

@@ -107,6 +107,12 @@ export default function AmazonSalesPage() {
     },
   ], 'amazon-sales');
 
+  const getDateParams = useCallback(() => {
+    if (filterMode === 'all') return {};
+    const { start_date, end_date } = computeDateRange(filterMode as FilterMode, customStart, customEnd);
+    return { ...(start_date ? { start_date } : {}), ...(end_date ? { end_date } : {}) };
+  }, [filterMode, customStart, customEnd]);
+
   const fetchProducts = useCallback(async (page = 1, search = '') => {
     setIsProductsLoading(true);
     try {
@@ -114,6 +120,7 @@ export default function AmazonSalesPage() {
         page,
         page_size: PAGE_SIZE,
         ...(search ? { search } : {}),
+        ...getDateParams(),
       });
       setProducts(data.items || []);
       setProductsTotal(data.total || 0);
@@ -123,14 +130,17 @@ export default function AmazonSalesPage() {
     } finally {
       setIsProductsLoading(false);
     }
-  }, []);
+  }, [getDateParams]);
 
   useEffect(() => {
     const fetchAnalytics = async () => {
       try {
         setIsLoading(true);
         setFetchError(null);
-        const analytics = await (api as any).amazonSalesData.getAnalytics({ days: 1825 }) as any;
+        const dateParams = getDateParams();
+        const analytics = await (api as any).amazonSalesData.getAnalytics(
+          Object.keys(dateParams).length ? dateParams : { days: 1825 }
+        ) as any;
         setStats({
           total_units: analytics.summary?.total_units || 0,
           active_products: analytics.summary?.active_products || 0,
@@ -146,8 +156,8 @@ export default function AmazonSalesPage() {
       }
     };
     fetchAnalytics();
-    fetchProducts(1, '');
-  }, [fetchProducts]);
+    fetchProducts(1, productsSearch);
+  }, [fetchProducts, getDateParams]);
 
   const handleProductSearch = () => {
     setProductsPage(1);
