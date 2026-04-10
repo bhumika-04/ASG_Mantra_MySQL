@@ -19,6 +19,7 @@ import {
   Loader2,
   Calendar,
   X,
+  Download,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
@@ -173,6 +174,22 @@ export default function DistributorPage() {
     return () => clearTimeout(timer);
   }, [search]);
 
+  const handleDownloadTemplate = () => {
+    const headers = ['SKU', 'ITEM', 'Total Stock', 'DL', 'MH', 'KT', 'WB'];
+    const sample = [
+      ['ASG-OM-EPSOM-SALT-1KG', 'ORGANIX MANTRA EPSOM SALT', '3040', '60', '640', '1530', '810'],
+      ['ASG-OM-ROSEMARY-ESSENTIAL-OIL-15ML', 'ORGANIX MANTRA ROSEMARY ESSENTIAL OIL FOR HAIR', '642', '322', '', '320', ''],
+    ];
+    const rows = [headers, ...sample].map(r => r.join(',')).join('\n');
+    const blob = new Blob([rows], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'Eagle_Stock_Template.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const handleFileSelected = async (files: File[]) => {
     if (!files.length) return;
     const file = files[0];
@@ -285,10 +302,16 @@ export default function DistributorPage() {
             {/* File Upload or Preview */}
             {previewRows === null ? (
               <div className="border border-dashed border-gray-200 rounded-lg p-4">
-                <div className="flex items-center gap-2 mb-2">
-                  <Upload className="h-4 w-4 text-gray-400" />
-                  <p className="text-sm font-medium text-gray-700">Upload Weekly Report (Excel/CSV)</p>
-                  {isPreviewing && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <Upload className="h-4 w-4 text-gray-400" />
+                    <p className="text-sm font-medium text-gray-700">Upload Weekly Report (Excel/CSV)</p>
+                    {isPreviewing && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
+                  </div>
+                  <Button variant="outline" size="sm" onClick={handleDownloadTemplate} className="h-7 text-xs gap-1">
+                    <Download className="h-3.5 w-3.5" />
+                    Download Template
+                  </Button>
                 </div>
                 <FileUpload
                   accept=".xlsx,.xls,.csv"
