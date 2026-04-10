@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import desc, func
 from typing import Optional
 from datetime import datetime, date
+import re
 
 from app.database import get_db
 from app.models.user import User
@@ -23,6 +24,79 @@ from app.utils.dependencies import get_current_user
 from app.utils.audit import log_audit, notify
 
 router = APIRouter()
+
+# --- City/State helpers for Blinkit PO responses ---
+
+_GSTIN_STATE = {
+    '01': 'Jammu & Kashmir', '02': 'Himachal Pradesh', '03': 'Punjab',
+    '04': 'Chandigarh', '05': 'Uttarakhand', '06': 'Haryana',
+    '07': 'Delhi', '08': 'Rajasthan', '09': 'Uttar Pradesh',
+    '10': 'Bihar', '19': 'West Bengal', '20': 'Jharkhand', '21': 'Odisha',
+    '22': 'Chhattisgarh', '23': 'Madhya Pradesh', '24': 'Gujarat',
+    '27': 'Maharashtra', '29': 'Karnataka', '32': 'Kerala',
+    '33': 'Tamil Nadu', '36': 'Telangana',
+}
+
+_INDIAN_STATES = [
+    'Andhra Pradesh', 'Arunachal Pradesh', 'Assam', 'Bihar', 'Chhattisgarh',
+    'Delhi', 'Goa', 'Gujarat', 'Haryana', 'Himachal Pradesh',
+    'Jammu & Kashmir', 'Jharkhand', 'Karnataka', 'Kerala', 'Lakshadweep',
+    'Madhya Pradesh', 'Maharashtra', 'Manipur', 'Meghalaya', 'Mizoram',
+    'Nagaland', 'Odisha', 'Puducherry', 'Punjab', 'Rajasthan', 'Sikkim',
+    'Tamil Nadu', 'Telangana', 'Tripura', 'Uttar Pradesh', 'Uttarakhand',
+    'West Bengal',
+]
+
+_CITY_KEYWORDS = [
+    'Mumbai', 'Delhi', 'Bangalore', 'Bengaluru', 'Hyderabad', 'Chennai', 'Kolkata',
+    'Pune', 'Ahmedabad', 'Jaipur', 'Lucknow', 'Surat', 'Kanpur', 'Nagpur', 'Indore',
+    'Thane', 'Bhopal', 'Visakhapatnam', 'Patna', 'Vadodara', 'Ghaziabad', 'Ludhiana',
+    'Agra', 'Nashik', 'Faridabad', 'Meerut', 'Rajkot', 'Varanasi', 'Srinagar',
+    'Aurangabad', 'Dhanbad', 'Amritsar', 'Allahabad', 'Ranchi', 'Howrah', 'Jabalpur',
+    'Gurgaon', 'Gurugram', 'Noida', 'Chandigarh', 'Coimbatore', 'Kochi', 'Mysuru',
+]
+
+
+def _blk_city_state(address: Optional[str], ship_to_name: Optional[str], gstin: Optional[str]):
+    """Derive city and state for a Blinkit PO row.
+    Priority: (1) parse full address, (2) GSTIN prefix for state, (3) keyword scan of name/address.
+    """
+    city = None
+    state = None
+
+    # 1. Parse structured address (City, State - PINCODE)
+    if address:
+        clean = re.sub(r'[-\s]*\d{6}\s*$', '', address.strip()).strip(' ,')
+        parts = [p.strip() for p in clean.split(',') if p.strip()]
+        for i in range(len(parts) - 1, -1, -1):
+            for s in _INDIAN_STATES:
+                if s.lower() in parts[i].lower():
+                    state = s
+                    if i > 0:
+                        city = parts[i - 1].strip()
+                    break
+            if state:
+                break
+
+    # 2. GSTIN prefix → state (most reliable for state when address is missing/ambiguous)
+    if not state and gstin and len(gstin) >= 2:
+        state = _GSTIN_STATE.get(gstin[:2].zfill(2))
+
+    # 3. Keyword scan across address + ship_to_name for city and state
+    combined = ' '.join(filter(None, [address, ship_to_name]))
+    if combined:
+        if not city:
+            for kw in _CITY_KEYWORDS:
+                if kw.lower() in combined.lower():
+                    city = kw
+                    break
+        if not state:
+            for s in _INDIAN_STATES:
+                if s.lower() in combined.lower():
+                    state = s
+                    break
+
+    return city, state
 
 
 @router.get("/amazon/stats")
@@ -270,6 +344,11 @@ async def get_blinkit_purchase_orders(
             and po_header_status not in ('Received', 'Delivered', 'Cancelled', 'Closed')
         )
 
+        ship_to_name = po.ShipToName if po else None
+        ship_to_address = po.ShipToAddress if po else None
+        ship_to_gstin = po.ShipToGSTIN if po else None
+        city, state = _blk_city_state(ship_to_address, ship_to_name, ship_to_gstin)
+
         items.append({
             "id": item.Id,
             "po_id": item.POId,
@@ -290,9 +369,11 @@ async def get_blinkit_purchase_orders(
             "status": item_status,
             "po_status": po_header_status,
             "is_delayed": is_delayed,
-            "ship_to_name": po.ShipToName if po else None,
-            "ship_to_address": po.ShipToAddress if po else None,
-            "ship_to_gstin": po.ShipToGSTIN if po else None,
+            "ship_to_name": ship_to_name,
+            "ship_to_address": ship_to_address,
+            "ship_to_gstin": ship_to_gstin,
+            "ship_to_city": city,
+            "ship_to_state": state,
         })
 
     return {

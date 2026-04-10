@@ -81,58 +81,6 @@ interface POItem {
   status: string;
 }
 
-// GSTIN prefix → State name (Indian state codes)
-const GSTIN_STATE_MAP: Record<string, string> = {
-  '01': 'Jammu & Kashmir', '02': 'Himachal Pradesh', '03': 'Punjab',
-  '04': 'Chandigarh', '05': 'Uttarakhand', '06': 'Haryana',
-  '07': 'Delhi', '08': 'Rajasthan', '09': 'Uttar Pradesh',
-  '10': 'Bihar', '11': 'Sikkim', '12': 'Arunachal Pradesh',
-  '13': 'Nagaland', '14': 'Manipur', '15': 'Mizoram',
-  '16': 'Tripura', '17': 'Meghalaya', '18': 'Assam',
-  '19': 'West Bengal', '20': 'Jharkhand', '21': 'Odisha',
-  '22': 'Chhattisgarh', '23': 'Madhya Pradesh', '24': 'Gujarat',
-  '26': 'Goa', '27': 'Maharashtra', '28': 'Andhra Pradesh',
-  '29': 'Karnataka', '30': 'Kerala', '31': 'Lakshadweep',
-  '32': 'Kerala', '33': 'Tamil Nadu', '34': 'Puducherry',
-  '35': 'Andaman & Nicobar', '36': 'Telangana', '37': 'Andhra Pradesh',
-};
-
-function extractState(address: string | null, shipToName: string | null, gstin?: string | null): string {
-  if (gstin && gstin.length >= 2) {
-    const code = gstin.substring(0, 2);
-    if (GSTIN_STATE_MAP[code]) return GSTIN_STATE_MAP[code];
-  }
-  if (!address && !shipToName) return '—';
-  const text = (address || '') + ' ' + (shipToName || '');
-  const states = [
-    'Delhi', 'Maharashtra', 'Karnataka', 'Tamil Nadu', 'Telangana',
-    'Gujarat', 'Rajasthan', 'Uttar Pradesh', 'West Bengal', 'Madhya Pradesh',
-    'Haryana', 'Punjab', 'Kerala', 'Andhra Pradesh', 'Bihar',
-    'Odisha', 'Jharkhand', 'Assam', 'Chhattisgarh', 'Goa',
-  ];
-  for (const state of states) {
-    if (text.toLowerCase().includes(state.toLowerCase())) return state;
-  }
-  return '—';
-}
-
-const CITY_KEYWORDS = [
-  'Mumbai', 'Delhi', 'Bangalore', 'Bengaluru', 'Hyderabad', 'Chennai', 'Kolkata',
-  'Pune', 'Ahmedabad', 'Jaipur', 'Lucknow', 'Surat', 'Kanpur', 'Nagpur', 'Indore',
-  'Thane', 'Bhopal', 'Visakhapatnam', 'Patna', 'Vadodara', 'Ghaziabad', 'Ludhiana',
-  'Agra', 'Nashik', 'Faridabad', 'Meerut', 'Rajkot', 'Varanasi', 'Srinagar',
-  'Aurangabad', 'Dhanbad', 'Amritsar', 'Allahabad', 'Ranchi', 'Howrah', 'Jabalpur',
-  'Gurgaon', 'Gurugram', 'Noida', 'Chandigarh', 'Coimbatore', 'Kochi', 'Mysuru',
-];
-
-function extractCity(address: string | null, shipToName: string | null): string {
-  const text = (address || '') + ' ' + (shipToName || '');
-  if (!text.trim()) return '—';
-  for (const city of CITY_KEYWORDS) {
-    if (text.toLowerCase().includes(city.toLowerCase())) return city;
-  }
-  return '—';
-}
 
 function BlinkitPOPageContent() {
   const router = useRouter();
@@ -238,8 +186,8 @@ function BlinkitPOPageContent() {
         pending_qty: Math.max(0, (po.quantity || 0) - (po.received_quantity || 0)),
         unit_cost: po.unit_price ?? null,
         total_cost: po.total_amount ?? null,
-        city: extractCity(po.ship_to_address, po.ship_to_name),
-        state: extractState(po.ship_to_address, po.ship_to_name, po.ship_to_gstin),
+        city: po.ship_to_city || '—',
+        state: po.ship_to_state || '—',
         shipTo: po.ship_to_name || '—',
         delivery: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-US', { day: 'numeric', month: 'short' }) : '-',
         status: po.status || 'Created',
