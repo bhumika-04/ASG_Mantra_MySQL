@@ -223,10 +223,12 @@ export const api = {
       const query = new URLSearchParams(params).toString();
       return apiFetch(`/api/purchase-orders/amazon${query ? `?${query}` : ''}`);
     },
+    getAmazonStats: () => apiFetch('/api/purchase-orders/amazon/stats'),
     getBlinkit: (params?: any) => {
       const query = new URLSearchParams(params).toString();
       return apiFetch(`/api/purchase-orders/blinkit${query ? `?${query}` : ''}`);
     },
+    getBlinkitStats: () => apiFetch('/api/purchase-orders/blinkit/stats'),
   },
 
   // Blinkit facility-level inventory

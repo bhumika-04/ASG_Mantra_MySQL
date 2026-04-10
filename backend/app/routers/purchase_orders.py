@@ -25,10 +25,28 @@ from app.utils.audit import log_audit, notify
 router = APIRouter()
 
 
+@router.get("/amazon/stats")
+async def get_amazon_po_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Return per-status counts and totals for Amazon POs (unfiltered, for KPI cards)."""
+    rows = db.query(AmazonPOData.POStatus, func.count(AmazonPOData.Id)).group_by(AmazonPOData.POStatus).all()
+    status_counts = {(r[0] or 'Created'): r[1] for r in rows}
+    total_units = db.query(func.sum(AmazonPOItemData.QuantityRequested)).scalar() or 0
+    return {
+        "status_counts": status_counts,
+        "total_pos": sum(status_counts.values()),
+        "total_units": int(total_units),
+    }
+
+
 @router.get("/amazon", response_model=PaginatedResponse)
 async def get_amazon_purchase_orders(
     search: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=1000),
     db: Session = Depends(get_db),
@@ -47,6 +65,17 @@ async def get_amazon_purchase_orders(
 
     if status:
         query = query.filter(AmazonPOData.POStatus == status)
+
+    if start_date:
+        try:
+            query = query.filter(AmazonPOData.OrderedOnDate >= datetime.strptime(start_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+    if end_date:
+        try:
+            query = query.filter(AmazonPOData.OrderedOnDate <= datetime.strptime(end_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
 
     total = query.count()
     offset = (page - 1) * page_size
@@ -128,10 +157,28 @@ async def get_amazon_purchase_orders(
     }
 
 
+@router.get("/blinkit/stats")
+async def get_blinkit_po_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Return per-status counts and totals for Blinkit POs (unfiltered, for KPI cards)."""
+    rows = db.query(BlinkitPOData.Status, func.count(BlinkitPOData.Id)).group_by(BlinkitPOData.Status).all()
+    status_counts = {(r[0] or 'Created'): r[1] for r in rows}
+    total_units = db.query(func.sum(BlinkitPOItemData.QTY)).scalar() or 0
+    return {
+        "status_counts": status_counts,
+        "total_pos": sum(status_counts.values()),
+        "total_units": int(total_units),
+    }
+
+
 @router.get("/blinkit", response_model=PaginatedResponse)
 async def get_blinkit_purchase_orders(
     search: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=1000),
     db: Session = Depends(get_db),
@@ -149,6 +196,17 @@ async def get_blinkit_purchase_orders(
 
     if status:
         query = query.filter(BlinkitPOData.Status == status)
+
+    if start_date:
+        try:
+            query = query.filter(BlinkitPOData.PODate >= datetime.strptime(start_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+    if end_date:
+        try:
+            query = query.filter(BlinkitPOData.PODate <= datetime.strptime(end_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
 
     total = query.count()
     offset = (page - 1) * page_size

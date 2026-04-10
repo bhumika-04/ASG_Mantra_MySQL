@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo, Suspense } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import React from 'react';
@@ -90,6 +90,10 @@ function AmazonPOPageContent() {
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
   const [poData, setPoData] = useState<POItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [statsData, setStatsData] = useState<{ status_counts: Record<string, number>; total_pos: number; total_units: number } | null>(null);
 
   // Action state
   const [actionRow, setActionRow] = useState<POItem | null>(null);
@@ -190,43 +194,70 @@ function AmazonPOPageContent() {
     }
   };
 
-  useEffect(() => {
-    const fetchAmazonPOs = async () => {
-      try {
-        setIsLoading(true);
+  const fetchAmazonPOs = useCallback(async (p: number, statusFilter: string, searchQuery: string, dateFrom: string, dateTo: string) => {
+    try {
+      setIsLoading(true);
+      const params: Record<string, any> = { page: p, page_size: 50 };
+      if (statusFilter !== 'all') params.status = statusFilter;
+      if (searchQuery.trim()) params.search = searchQuery.trim();
+      if (dateFrom) params.start_date = dateFrom;
+      if (dateTo) params.end_date = dateTo;
 
-        const response = await api.purchaseOrders.getAmazon({ page_size: 1000 }) as any;
-
-        const transformedPOs = (response.items || []).map((po: any) => ({
-          id: po.id,
-          po_number: po.po_number,
-          po_date: po.order_date ? new Date(po.order_date).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' }) : '-',
-          orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
-          asin: po.amazon_id || '',
-          product_name: po.product_name || po.productName || '',
-          ordered_qty: po.quantity,
-          accepted_qty: po.accepted_quantity ?? null,
-          mapped_sku: po.asg_sku || po.asgSku || '',
-          received_qty: po.received_quantity || 0,
-          pending_qty: Math.max(0, (po.quantity || 0) - (po.received_quantity || 0)),
-          unit_cost: po.unit_price ?? null,
-          total_cost: po.total_amount ?? null,
-          po_expiry: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-US', { day: 'numeric', month: 'short' }) : '-',
-          status: po.status || 'Created',
-          city: po.ship_to_city || '—',
-          state: po.ship_to_state || '—',
-        }));
-
-        setPoData(transformedPOs);
-      } catch (error) {
-        console.error('Error fetching Amazon purchase orders:', error);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    fetchAmazonPOs();
+      const response = await api.purchaseOrders.getAmazon(params) as any;
+      const transformedPOs = (response.items || []).map((po: any) => ({
+        id: po.id,
+        po_number: po.po_number,
+        po_date: po.order_date ? new Date(po.order_date).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' }) : '-',
+        orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
+        asin: po.amazon_id || '',
+        product_name: po.product_name || po.productName || '',
+        ordered_qty: po.quantity,
+        accepted_qty: po.accepted_quantity ?? null,
+        mapped_sku: po.asg_sku || po.asgSku || '',
+        received_qty: po.received_quantity || 0,
+        pending_qty: Math.max(0, (po.quantity || 0) - (po.received_quantity || 0)),
+        unit_cost: po.unit_price ?? null,
+        total_cost: po.total_amount ?? null,
+        po_expiry: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-US', { day: 'numeric', month: 'short' }) : '-',
+        status: po.status || 'Created',
+        city: po.ship_to_city || '—',
+        state: po.ship_to_state || '—',
+      }));
+      setPoData(transformedPOs);
+      setTotal(response.total || 0);
+      setTotalPages(response.total_pages || 1);
+    } catch (error) {
+      console.error('Error fetching Amazon purchase orders:', error);
+    } finally {
+      setIsLoading(false);
+    }
   }, []);
+
+  // Fetch unfiltered stats once for KPI cards
+  useEffect(() => {
+    (api.purchaseOrders as any).getAmazonStats().then((s: any) => setStatsData(s)).catch(() => {});
+  }, []);
+
+  // Initial load
+  useEffect(() => {
+    fetchAmazonPOs(1, filters.status, search, filters.dateFrom, filters.dateTo);
+  }, [fetchAmazonPOs]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Re-fetch when filters change — reset to page 1
+  const prevFiltersRef = useRef({ status: filters.status, search, dateFrom: filters.dateFrom, dateTo: filters.dateTo });
+  useEffect(() => {
+    const prev = prevFiltersRef.current;
+    const changed =
+      prev.status !== filters.status ||
+      prev.search !== search ||
+      prev.dateFrom !== filters.dateFrom ||
+      prev.dateTo !== filters.dateTo;
+    if (changed) {
+      prevFiltersRef.current = { status: filters.status, search, dateFrom: filters.dateFrom, dateTo: filters.dateTo };
+      setPage(1);
+      fetchAmazonPOs(1, filters.status, search, filters.dateFrom, filters.dateTo);
+    }
+  }, [filters.status, search, filters.dateFrom, filters.dateTo, fetchAmazonPOs]);
 
   const getStatusBadge = (status: string) => {
     return BADGE_STYLES[status] || 'bg-gray-50 text-gray-700 border-gray-200';
@@ -458,54 +489,28 @@ function AmazonPOPageContent() {
     { label: 'Cancelled',  value: 'Cancelled' },
   ];
 
+  // Search, status, and date are server-side. State is client-side (derived from address text).
   const filteredPoData = useMemo(() => {
-    let filtered = [...poData];
-
-    if (search) {
-      const searchLower = search.trim().toLowerCase();
-      if (searchLower) {
-        filtered = filtered.filter(
-          (po) =>
-            (po.po_number || '').toLowerCase().includes(searchLower) ||
-            (po.product_name || '').toLowerCase().includes(searchLower) ||
-            (po.asin || '').toLowerCase().includes(searchLower) ||
-            (po.mapped_sku || '').toLowerCase().includes(searchLower)
-        );
-      }
-    }
-
-    if (filters.dateFrom && filtered.length > 0) {
-      filtered = filtered.filter((po) => po.orderDateRaw && po.orderDateRaw >= filters.dateFrom);
-    }
-    if (filters.dateTo && filtered.length > 0) {
-      filtered = filtered.filter((po) => po.orderDateRaw && po.orderDateRaw <= filters.dateTo);
-    }
-
-    if (filters.status !== 'all') {
-      filtered = filtered.filter((po) => po.status === filters.status);
-    }
-
     if (filters.state !== 'all') {
-      filtered = filtered.filter((po) => po.state === filters.state);
+      return poData.filter((po) => po.state === filters.state);
     }
-
-    return filtered;
-  }, [poData, search, filters.dateFrom, filters.dateTo, filters.status, filters.state]);
+    return poData;
+  }, [poData, filters.state]);
 
   const stateOptions = useMemo(() => {
     const states = [...new Set(poData.map(p => p.state).filter(s => s && s !== '—'))].sort();
     return [{ label: 'All', value: 'all' }, ...states.map(s => ({ label: s, value: s }))];
   }, [poData]);
 
-  const totalPOs = new Set(poData.map(po => po.po_number)).size;
-  const totalUnits = poData.reduce((sum, po) => sum + po.ordered_qty, 0);
+  const totalPOs = statsData?.total_pos ?? new Set(poData.map(po => po.po_number)).size;
+  const totalUnits = statsData?.total_units ?? poData.reduce((sum, po) => sum + po.ordered_qty, 0);
   const stats = useMemo(() => ({
-    created:    poData.filter(po => po.status === 'Created').length,
-    dispatched: poData.filter(po => po.status === 'Dispatched').length,
-    inTransit:  poData.filter(po => po.status === 'In Transit').length,
-    delivered:  poData.filter(po => po.status === 'Delivered').length,
-    delayed:    poData.filter(po => po.status === 'Delayed').length,
-  }), [poData]);
+    created:    statsData?.status_counts?.['Created'] ?? 0,
+    dispatched: statsData?.status_counts?.['Dispatched'] ?? 0,
+    inTransit:  statsData?.status_counts?.['In Transit'] ?? 0,
+    delivered:  statsData?.status_counts?.['Delivered'] ?? 0,
+    delayed:    statsData?.status_counts?.['Delayed'] ?? 0,
+  }), [statsData]);
 
   const kpiCards = [
     { label: 'Created',    count: stats.created,    status: 'Created' },
@@ -629,10 +634,21 @@ function AmazonPOPageContent() {
 
         {/* Data Grid */}
         {filteredPoData.length > 0 ? (
-          <DataGrid
-            data={filteredPoData}
-            gridState={gridState}
-          />
+          <>
+            <DataGrid data={filteredPoData} gridState={gridState} />
+            <div className="flex items-center justify-between pt-1">
+              <p className="text-sm text-muted-foreground">{total.toLocaleString()} line items</p>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => { const p = Math.max(1, page - 1); setPage(p); fetchAmazonPOs(p, filters.status, search, filters.dateFrom, filters.dateTo); }} disabled={page === 1 || isLoading}>
+                  Previous
+                </Button>
+                <span className="text-sm text-muted-foreground">Page {page} of {totalPages}</span>
+                <Button variant="outline" size="sm" onClick={() => { const p = Math.min(totalPages, page + 1); setPage(p); fetchAmazonPOs(p, filters.status, search, filters.dateFrom, filters.dateTo); }} disabled={page === totalPages || isLoading}>
+                  Next
+                </Button>
+              </div>
+            </div>
+          </>
         ) : (
           <div className="text-center py-12 text-muted-foreground border-2 border-dashed rounded-lg">
             <ShoppingCart className="h-12 w-12 mx-auto mb-4 opacity-50" />
