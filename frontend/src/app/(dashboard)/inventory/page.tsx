@@ -12,6 +12,7 @@ import {
   PackageOpen,
   Boxes,
   Download,
+  CalendarDays,
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
@@ -384,6 +385,42 @@ export default function DispatchInventoryPage() {
           />
         </StatsGrid>
 
+        {/* ASG Snapshot Date Selector */}
+        {availableDates.length > 0 && (
+          <div className="flex items-center gap-3 px-1">
+            <div className="flex items-center gap-1.5 text-sm text-muted-foreground shrink-0">
+              <CalendarDays className="h-4 w-4" />
+              <span className="font-medium text-foreground">ASG Snapshot Date:</span>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {availableDates.map((d) => {
+                const active = (selectedDate || availableDates[0]) === d;
+                return (
+                  <button
+                    key={d}
+                    onClick={() => setSelectedDate(d)}
+                    className={`px-3 py-1 text-xs rounded-full border font-medium transition-colors ${
+                      active
+                        ? 'bg-blue-600 text-white border-blue-600'
+                        : 'bg-muted/50 text-muted-foreground border-border hover:bg-muted hover:text-foreground'
+                    }`}
+                  >
+                    {d}
+                  </button>
+                );
+              })}
+            </div>
+            {selectedDate && selectedDate !== availableDates[0] && (
+              <button
+                onClick={() => setSelectedDate('')}
+                className="text-xs text-muted-foreground hover:text-foreground underline shrink-0"
+              >
+                Reset to latest
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Filters */}
         <FilterBar
           searchPlaceholder="Search by name, SKU, ASIN, Blinkit ID or GS-1..."
@@ -398,9 +435,6 @@ export default function DispatchInventoryPage() {
               showChannel
               showStatus
               statusOptions={statusOptions}
-              inventoryDates={availableDates.length > 1 ? availableDates : undefined}
-              selectedInventoryDate={selectedDate || inventoryDate || availableDates[0] || ''}
-              onInventoryDateChange={setSelectedDate}
             />
             <ViewOptionsButton
               columns={gridColumns}
