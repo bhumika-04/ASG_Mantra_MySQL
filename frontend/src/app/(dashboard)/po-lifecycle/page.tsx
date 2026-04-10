@@ -54,49 +54,36 @@ export default function POLifecyclePage() {
       try {
         setIsLoading(true);
 
-        // Fetch from both Amazon and Blinkit PO tables (the real data sources)
         const [amazonRes, blinkitRes] = await Promise.all([
-          api.purchaseOrders.getAmazon({ page_size: 1000 }) as any,
-          api.purchaseOrders.getBlinkit({ page_size: 1000 }) as any,
+          (api.purchaseOrders as any).getAmazonOverview({ page_size: 200 }) as any,
+          (api.purchaseOrders as any).getBlinkitOverview({ page_size: 200 }) as any,
         ]);
 
-        const toRow = (po: any, channel: string) => {
-          const rawStatus = po.status || 'Created';
-          const state = po.ship_to_state || '-';
-          const city = po.ship_to_city || '-';
-          return {
-            id: po.id,
-            po_id: po.po_id,
-            po_number: po.po_number,
-            channel,
-            quantity: po.quantity || 0,
-            dispatchDate: po.order_date ? new Date(po.order_date).toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }) : '-',
-            expectedDate: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }) : '-',
-            expectedDateRaw: po.expected_delivery_date || null,
-            orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
-            state,
-            city,
-            hub: po.ship_to_location_code || po.ship_to_name || '-',
-            courier: po.courier || '-',
-            tat: '-',
-            status: rawStatus,
-          };
-        };
-
-        // Deduplicate by po_number — one row per PO, summing quantities
-        const poMap = new Map<string, PurchaseOrder>();
-        (amazonRes.items || []).forEach((po: any) => {
-          const key = po.po_number;
-          if (!poMap.has(key)) poMap.set(key, toRow(po, 'Amazon'));
-          else poMap.get(key)!.quantity += po.quantity || 0;
-        });
-        (blinkitRes.items || []).forEach((po: any) => {
-          const key = po.po_number;
-          if (!poMap.has(key)) poMap.set(key, toRow(po, 'Blinkit'));
-          else poMap.get(key)!.quantity += po.quantity || 0;
+        const toRow = (po: any, channel: string): PurchaseOrder => ({
+          id: po.po_id,
+          po_id: po.po_id,
+          po_number: po.po_number,
+          channel,
+          quantity: po.total_qty || 0,
+          dispatchDate: po.order_date ? new Date(po.order_date).toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }) : '-',
+          expectedDate: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-US', { year: 'numeric', month: '2-digit', day: '2-digit' }) : '-',
+          expectedDateRaw: po.expected_delivery_date || null,
+          orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
+          state: po.ship_to_state || '-',
+          city: po.ship_to_city || '-',
+          hub: po.ship_to_location_code || po.ship_to_name || '-',
+          courier: '-',
+          tat: '-',
+          status: po.status || 'Created',
         });
 
-        setAllOrders(Array.from(poMap.values()));
+        const rows: PurchaseOrder[] = [
+          ...(amazonRes.items || []).map((po: any) => toRow(po, 'Amazon')),
+          ...(blinkitRes.items || []).map((po: any) => toRow(po, 'Blinkit')),
+        ];
+        // Sort combined by order date desc
+        rows.sort((a, b) => (b.orderDateRaw || '').localeCompare(a.orderDateRaw || ''));
+        setAllOrders(rows);
       } catch (error) {
         console.error('Error fetching purchase orders:', error);
       } finally {

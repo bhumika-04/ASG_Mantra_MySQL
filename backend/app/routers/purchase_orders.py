@@ -99,6 +99,78 @@ def _blk_city_state(address: Optional[str], ship_to_name: Optional[str], gstin: 
     return city, state
 
 
+@router.get("/amazon/overview")
+async def get_amazon_po_overview(
+    search: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """One row per PO number with aggregated item count and qty — for the overview table."""
+    query = db.query(
+        AmazonPOData.Id.label('po_id'),
+        AmazonPOData.PONumber.label('po_number'),
+        AmazonPOData.OrderedOnDate.label('order_date'),
+        AmazonPOData.POStatus.label('status'),
+        AmazonPOData.ShipToCity.label('ship_to_city'),
+        AmazonPOData.ShipToState.label('ship_to_state'),
+        AmazonPOData.ShipToLocationCode.label('ship_to_location_code'),
+        func.count(AmazonPOItemData.Id).label('item_count'),
+        func.sum(AmazonPOItemData.QuantityRequested).label('total_qty'),
+        func.min(AmazonPOItemData.ExpectedDate).label('expected_delivery_date'),
+    ).join(AmazonPOItemData, AmazonPOItemData.POId == AmazonPOData.Id)
+
+    if search:
+        query = query.filter(AmazonPOData.PONumber.ilike(f"%{search}%"))
+    if status:
+        query = query.filter(AmazonPOData.POStatus == status)
+    if start_date:
+        try:
+            query = query.filter(AmazonPOData.OrderedOnDate >= datetime.strptime(start_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+    if end_date:
+        try:
+            query = query.filter(AmazonPOData.OrderedOnDate <= datetime.strptime(end_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+
+    query = query.group_by(
+        AmazonPOData.Id, AmazonPOData.PONumber, AmazonPOData.OrderedOnDate,
+        AmazonPOData.POStatus, AmazonPOData.ShipToCity, AmazonPOData.ShipToState,
+        AmazonPOData.ShipToLocationCode,
+    )
+
+    total = query.count()
+    offset = (page - 1) * page_size
+    rows = query.order_by(AmazonPOData.OrderedOnDate.desc()).offset(offset).limit(page_size).all()
+
+    items = []
+    for r in rows:
+        location_parts = [r.ship_to_location_code, r.ship_to_city, r.ship_to_state]
+        location = ', '.join(p for p in location_parts if p) or '—'
+        items.append({
+            "po_id": r.po_id,
+            "po_number": r.po_number,
+            "order_date": r.order_date.isoformat() if r.order_date else None,
+            "expected_delivery_date": r.expected_delivery_date.isoformat() if r.expected_delivery_date else None,
+            "status": r.status or 'Created',
+            "ship_to_city": r.ship_to_city,
+            "ship_to_state": r.ship_to_state,
+            "ship_to_location_code": r.ship_to_location_code,
+            "location": location,
+            "item_count": int(r.item_count or 0),
+            "total_qty": int(r.total_qty or 0),
+        })
+
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size}
+
+
 @router.get("/amazon/stats")
 async def get_amazon_po_stats(
     db: Session = Depends(get_db),
@@ -229,6 +301,76 @@ async def get_amazon_purchase_orders(
         "page_size": page_size,
         "total_pages": (total + page_size - 1) // page_size
     }
+
+
+@router.get("/blinkit/overview")
+async def get_blinkit_po_overview(
+    search: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """One row per PO number with aggregated item count and qty — for the overview table."""
+    query = db.query(
+        BlinkitPOData.Id.label('po_id'),
+        BlinkitPOData.PONumber.label('po_number'),
+        BlinkitPOData.PODate.label('order_date'),
+        BlinkitPOData.Status.label('status'),
+        BlinkitPOData.ShipToName.label('ship_to_name'),
+        BlinkitPOData.ShipToAddress.label('ship_to_address'),
+        BlinkitPOData.ShipToGSTIN.label('ship_to_gstin'),
+        BlinkitPOData.ExpectedDeliveryDate.label('expected_delivery_date'),
+        func.count(BlinkitPOItemData.Id).label('item_count'),
+        func.sum(BlinkitPOItemData.QTY).label('total_qty'),
+    ).join(BlinkitPOItemData, BlinkitPOItemData.POId == BlinkitPOData.Id)
+
+    if search:
+        query = query.filter(BlinkitPOData.PONumber.ilike(f"%{search}%"))
+    if status:
+        query = query.filter(BlinkitPOData.Status == status)
+    if start_date:
+        try:
+            query = query.filter(BlinkitPOData.PODate >= datetime.strptime(start_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+    if end_date:
+        try:
+            query = query.filter(BlinkitPOData.PODate <= datetime.strptime(end_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+
+    query = query.group_by(
+        BlinkitPOData.Id, BlinkitPOData.PONumber, BlinkitPOData.PODate,
+        BlinkitPOData.Status, BlinkitPOData.ShipToName, BlinkitPOData.ShipToAddress,
+        BlinkitPOData.ShipToGSTIN, BlinkitPOData.ExpectedDeliveryDate,
+    )
+
+    total = query.count()
+    offset = (page - 1) * page_size
+    rows = query.order_by(BlinkitPOData.PODate.desc()).offset(offset).limit(page_size).all()
+
+    items = []
+    for r in rows:
+        city, state = _blk_city_state(r.ship_to_address, r.ship_to_name, r.ship_to_gstin)
+        items.append({
+            "po_id": r.po_id,
+            "po_number": r.po_number,
+            "order_date": r.order_date.isoformat() if r.order_date else None,
+            "expected_delivery_date": r.expected_delivery_date.isoformat() if r.expected_delivery_date else None,
+            "status": r.status or 'Created',
+            "ship_to_name": r.ship_to_name,
+            "ship_to_city": city,
+            "ship_to_state": state,
+            "item_count": int(r.item_count or 0),
+            "total_qty": int(r.total_qty or 0),
+        })
+
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size}
 
 
 @router.get("/blinkit/stats")

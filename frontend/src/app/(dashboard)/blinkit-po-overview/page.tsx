@@ -54,40 +54,6 @@ const BADGE_STYLES: Record<string, string> = {
   'Closed':     'bg-slate-50 text-slate-600 border-slate-200',
 };
 
-// GST state code → state name (India)
-const GSTIN_STATE_MAP: Record<string, string> = {
-  '01': 'Jammu & Kashmir', '02': 'Himachal Pradesh', '03': 'Punjab',
-  '04': 'Chandigarh', '05': 'Uttarakhand', '06': 'Haryana',
-  '07': 'Delhi', '08': 'Rajasthan', '09': 'Uttar Pradesh',
-  '10': 'Bihar', '11': 'Sikkim', '12': 'Arunachal Pradesh',
-  '13': 'Nagaland', '14': 'Manipur', '15': 'Mizoram',
-  '16': 'Tripura', '17': 'Meghalaya', '18': 'Assam',
-  '19': 'West Bengal', '20': 'Jharkhand', '21': 'Odisha',
-  '22': 'Chhattisgarh', '23': 'Madhya Pradesh', '24': 'Gujarat',
-  '27': 'Maharashtra', '29': 'Karnataka', '30': 'Goa',
-  '32': 'Kerala', '33': 'Tamil Nadu', '36': 'Telangana',
-  '37': 'Andhra Pradesh',
-};
-
-// Extract state — GSTIN prefix is most reliable, fall back to address text
-function extractState(address: string | null, shipToName: string | null, gstin?: string | null): string {
-  if (gstin && gstin.length >= 2) {
-    const code = gstin.substring(0, 2);
-    if (GSTIN_STATE_MAP[code]) return GSTIN_STATE_MAP[code];
-  }
-  if (!address && !shipToName) return '—';
-  const text = (address || '') + ' ' + (shipToName || '');
-  const states = [
-    'Delhi', 'Maharashtra', 'Karnataka', 'Tamil Nadu', 'Telangana',
-    'Gujarat', 'Rajasthan', 'Uttar Pradesh', 'West Bengal', 'Madhya Pradesh',
-    'Haryana', 'Punjab', 'Kerala', 'Andhra Pradesh', 'Bihar',
-    'Odisha', 'Jharkhand', 'Assam', 'Chhattisgarh', 'Goa',
-  ];
-  for (const state of states) {
-    if (text.toLowerCase().includes(state.toLowerCase())) return state;
-  }
-  return '—';
-}
 
 export default function BlinkitPOOverviewPage() {
   const router = useRouter();
@@ -99,43 +65,20 @@ export default function BlinkitPOOverviewPage() {
     const fetchPOData = async () => {
       try {
         setIsLoading(true);
-        const response = await api.purchaseOrders.getBlinkit({ page_size: 1000 }) as any;
-
-        // Group by PO number for overview
-        const grouped = new Map<string, any>();
-
-        (response.items || []).forEach((po: any) => {
-          const poNum = po.po_number;
-          const rawStatus = po.status || 'Created';
-          const shipToName = po.ship_to_name || '';
-          const shipToAddress = po.ship_to_address || '';
-          const state = extractState(shipToAddress, shipToName, po.ship_to_gstin);
-
-          if (!grouped.has(poNum)) {
-            grouped.set(poNum, {
-              id: po.id,
-              po_id: po.po_id,
-              po_number: poNum,
-              po_date: po.order_date ? new Date(po.order_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A',
-              orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
-              deliveryDate: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A',
-              shipTo: shipToName || '—',
-              state,
-              items: 1,
-              totalQty: po.quantity || 0,
-              rawStatus,
-            });
-          } else {
-            const existing = grouped.get(poNum);
-            existing.items += 1;
-            existing.totalQty += po.quantity || 0;
-          }
-        });
-
-        // Use raw DB status directly
-        const data = Array.from(grouped.values()).map((po: any) => {
-          return { ...po, status: po.rawStatus || 'Created' };
-        });
+        const response = await (api.purchaseOrders as any).getBlinkitOverview({ page_size: 200 }) as any;
+        const data = (response.items || []).map((po: any) => ({
+          id: po.po_id,
+          po_id: po.po_id,
+          po_number: po.po_number,
+          po_date: po.order_date ? new Date(po.order_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A',
+          orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
+          deliveryDate: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A',
+          shipTo: po.ship_to_name || '—',
+          state: po.ship_to_state || '—',
+          items: po.item_count,
+          totalQty: po.total_qty,
+          status: po.status || 'Created',
+        }));
         setPoData(data);
       } catch (error) {
         console.error('Error fetching Blinkit PO data:', error);

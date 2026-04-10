@@ -68,45 +68,20 @@ export default function AmazonPOOverviewPage() {
     const fetchPOData = async () => {
       try {
         setIsLoading(true);
-        const response = await api.purchaseOrders.getAmazon({ page_size: 1000 }) as any;
-
-        // Group POs by PO number
-        const grouped = new Map<string, any>();
-
-        response.items?.forEach((po: any) => {
-          const poNum = po.po_number;
-          if (!grouped.has(poNum)) {
-            const locationParts = [po.ship_to_location_code, po.ship_to_city, po.ship_to_state].filter(Boolean);
-            grouped.set(poNum, {
-              id: po.id,
-              ids: [po.id],
-              po_id: po.po_id,
-              po_number: poNum,
-              po_date: po.order_date ? new Date(po.order_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A',
-              orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
-              po_expiry: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A',
-              products: 1,
-              totalQty: po.quantity || 0,
-              packed_qty: po.packed_qty ?? 0,
-              gap: po.gap ?? 0,
-              status: po.status || 'Created',
-              location: locationParts.join(', ') || '—',
-              state: po.ship_to_state || '—',
-            });
-          } else {
-            const existing = grouped.get(poNum);
-            existing.ids.push(po.id);
-            existing.products += 1;
-            existing.totalQty += po.quantity || 0;
-            existing.packed_qty += po.packed_qty ?? 0;
-            existing.gap += po.gap ?? 0;
-          }
-        });
-
-        // Use raw DB status directly
-        const data = Array.from(grouped.values()).map((po: any) => {
-          return { ...po, status: po.status || 'Created' };
-        });
+        const response = await (api.purchaseOrders as any).getAmazonOverview({ page_size: 200 }) as any;
+        const data = (response.items || []).map((po: any) => ({
+          id: po.po_id,
+          po_id: po.po_id,
+          po_number: po.po_number,
+          po_date: po.order_date ? new Date(po.order_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A',
+          orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
+          po_expiry: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A',
+          products: po.item_count,
+          totalQty: po.total_qty,
+          status: po.status || 'Created',
+          location: po.location || '—',
+          state: po.ship_to_state || '—',
+        }));
         setPoData(data);
       } catch (error) {
         console.error('Error fetching Amazon PO data:', error);

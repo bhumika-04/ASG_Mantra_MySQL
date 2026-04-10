@@ -224,11 +224,19 @@ export const api = {
       return apiFetch(`/api/purchase-orders/amazon${query ? `?${query}` : ''}`);
     },
     getAmazonStats: () => apiFetch('/api/purchase-orders/amazon/stats'),
+    getAmazonOverview: (params?: any) => {
+      const query = new URLSearchParams(params).toString();
+      return apiFetch(`/api/purchase-orders/amazon/overview${query ? `?${query}` : ''}`);
+    },
     getBlinkit: (params?: any) => {
       const query = new URLSearchParams(params).toString();
       return apiFetch(`/api/purchase-orders/blinkit${query ? `?${query}` : ''}`);
     },
     getBlinkitStats: () => apiFetch('/api/purchase-orders/blinkit/stats'),
+    getBlinkitOverview: (params?: any) => {
+      const query = new URLSearchParams(params).toString();
+      return apiFetch(`/api/purchase-orders/blinkit/overview${query ? `?${query}` : ''}`);
+    },
   },
 
   // Blinkit facility-level inventory
