@@ -289,10 +289,11 @@ async def get_dispatch_overview(
         amz_q = amz_q.filter(False)
     amazon_sq = amz_q.group_by(AmazonInventoryData.ASIN).subquery()
 
-    # ── Blinkit stock subquery ────────────────────────────────────────────
+    # ── Blinkit stock subquery (BE = hub, FE = dark store) ───────────────
     blk_q = db.query(
         BlinkitInventoryData.ItemId.label('item_id'),
-        func.sum(BlinkitInventoryData.BackendInvQty).label('blinkit_stock'),
+        func.sum(BlinkitInventoryData.BackendInvQty).label('blinkit_be_stock'),
+        func.sum(BlinkitInventoryData.FrontendInvQty).label('blinkit_fe_stock'),
     )
     if latest_blinkit:
         blk_q = blk_q.filter(BlinkitInventoryData.ReportDate == latest_blinkit)
@@ -336,7 +337,8 @@ async def get_dispatch_overview(
             func.coalesce(wh_sq.c.packed_qty, 0).label('packed_qty'),
             func.coalesce(wh_sq.c.unpacked_qty, 0).label('unpacked_qty'),
             func.coalesce(amazon_sq.c.amazon_stock, 0).label('amazon_stock'),
-            func.coalesce(blinkit_sq.c.blinkit_stock, 0).label('blinkit_stock'),
+            func.coalesce(blinkit_sq.c.blinkit_be_stock, 0).label('blinkit_be_stock'),
+            func.coalesce(blinkit_sq.c.blinkit_fe_stock, 0).label('blinkit_fe_stock'),
         )
         .filter(Product.IsActive == True)
         .outerjoin(wh_sq, wh_sq.c.product_id == Product.Id)
@@ -364,7 +366,9 @@ async def get_dispatch_overview(
         packed = int(row.packed_qty or 0)
         unpacked = int(row.unpacked_qty or 0)
         amazon = int(row.amazon_stock or 0)
-        blinkit = int(row.blinkit_stock or 0)
+        blinkit_be = int(row.blinkit_be_stock or 0)
+        blinkit_fe = int(row.blinkit_fe_stock or 0)
+        blinkit = blinkit_be + blinkit_fe
         total_stock = amazon + blinkit
 
         # Status based on ASG warehouse stock (packed + unpacked)
@@ -384,6 +388,8 @@ async def get_dispatch_overview(
             'packedQty': packed,
             'unpackedQty': unpacked,
             'amazonStock': amazon,
+            'blinkitBeStock': blinkit_be,
+            'blinkitFeStock': blinkit_fe,
             'blinkitStock': blinkit,
             'totalStock': total_stock,
             'status': status,

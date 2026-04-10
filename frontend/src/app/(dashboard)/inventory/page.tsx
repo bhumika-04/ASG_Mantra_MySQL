@@ -28,6 +28,8 @@ interface InventoryItem {
   packedQty: number;
   unpackedQty: number;
   amazonStock: number;
+  blinkitBeStock: number;
+  blinkitFeStock: number;
   blinkitStock: number;
   totalStock: number;
   status: string;
@@ -73,6 +75,8 @@ export default function DispatchInventoryPage() {
           packedQty: row.packedQty || 0,
           unpackedQty: row.unpackedQty || 0,
           amazonStock: row.amazonStock || 0,
+          blinkitBeStock: row.blinkitBeStock || 0,
+          blinkitFeStock: row.blinkitFeStock || 0,
           blinkitStock: row.blinkitStock || 0,
           totalStock: row.totalStock || 0,
           status: row.status || 'Healthy',
@@ -289,12 +293,40 @@ export default function DispatchInventoryPage() {
       header: 'Blinkit Inv',
       accessorKey: 'blinkitStock',
       sortable: true,
-      width: 125,
-      minWidth: 110,
+      width: 110,
+      minWidth: 90,
       align: 'right',
       cell: (row) => (
         <span className={row.blinkitStock > 0 ? 'text-yellow-600 font-bold text-sm' : 'text-muted-foreground text-sm'}>
           {row.blinkitStock.toLocaleString()}
+        </span>
+      ),
+    },
+    {
+      id: 'blinkitBeStock',
+      header: 'Blinkit BE (Hub)',
+      accessorKey: 'blinkitBeStock',
+      sortable: true,
+      width: 130,
+      minWidth: 100,
+      align: 'right',
+      cell: (row) => (
+        <span className={row.blinkitBeStock > 0 ? 'text-blue-600 font-semibold text-sm' : 'text-muted-foreground text-sm'}>
+          {row.blinkitBeStock.toLocaleString()}
+        </span>
+      ),
+    },
+    {
+      id: 'blinkitFeStock',
+      header: 'Blinkit FE (Dark Store)',
+      accessorKey: 'blinkitFeStock',
+      sortable: true,
+      width: 155,
+      minWidth: 120,
+      align: 'right',
+      cell: (row) => (
+        <span className={row.blinkitFeStock > 0 ? 'text-orange-500 font-semibold text-sm' : 'text-muted-foreground text-sm'}>
+          {row.blinkitFeStock.toLocaleString()}
         </span>
       ),
     },
@@ -307,6 +339,8 @@ export default function DispatchInventoryPage() {
     if (filters.channel === 'amazon') {
       gridState.setColumnVisible('blinkitId', false);
       gridState.setColumnVisible('blinkitStock', false);
+      gridState.setColumnVisible('blinkitBeStock', false);
+      gridState.setColumnVisible('blinkitFeStock', false);
       gridState.setColumnVisible('amazonId', true);
       gridState.setColumnVisible('amazonStock', true);
     } else if (filters.channel === 'blinkit') {
@@ -314,11 +348,15 @@ export default function DispatchInventoryPage() {
       gridState.setColumnVisible('amazonStock', false);
       gridState.setColumnVisible('blinkitId', true);
       gridState.setColumnVisible('blinkitStock', true);
+      gridState.setColumnVisible('blinkitBeStock', true);
+      gridState.setColumnVisible('blinkitFeStock', true);
     } else {
       gridState.setColumnVisible('amazonId', true);
       gridState.setColumnVisible('amazonStock', true);
       gridState.setColumnVisible('blinkitId', true);
       gridState.setColumnVisible('blinkitStock', true);
+      gridState.setColumnVisible('blinkitBeStock', true);
+      gridState.setColumnVisible('blinkitFeStock', true);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters.channel]);
@@ -459,7 +497,9 @@ export default function DispatchInventoryPage() {
                   'Packed Qty': i.packedQty,
                   'Unpacked Qty': i.unpackedQty,
                   'Amazon Stock': i.amazonStock,
-                  'Blinkit Stock': i.blinkitStock,
+                  'Blinkit Inv (Total)': i.blinkitStock,
+                  'Blinkit BE (Hub)': i.blinkitBeStock,
+                  'Blinkit FE (Dark Store)': i.blinkitFeStock,
                   'Total Stock (ASG)': i.packedQty + i.unpackedQty,
                   'Status': i.status,
                 })),
