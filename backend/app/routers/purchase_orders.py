@@ -22,8 +22,21 @@ from app.schemas.purchase_order import PurchaseOrderCreate, PurchaseOrderUpdate
 from app.schemas.common import PaginatedResponse
 from app.utils.dependencies import get_current_user
 from app.utils.audit import log_audit, notify
+import time as _time
 
 router = APIRouter()
+
+# Cache latest inventory date for 5 minutes — avoids one DB round-trip per PO page load
+_inv_date_cache: dict = {"value": None, "ts": 0.0}
+
+def _get_latest_inv_date(db):
+    now = _time.monotonic()
+    if _inv_date_cache["value"] is not None and now - _inv_date_cache["ts"] < 300:
+        return _inv_date_cache["value"]
+    val = db.query(func.max(Inventory.InventoryDate)).scalar()
+    _inv_date_cache["value"] = val
+    _inv_date_cache["ts"] = now
+    return val
 
 # --- City/State helpers for Blinkit PO responses ---
 
@@ -54,6 +67,12 @@ _CITY_KEYWORDS = [
     'Agra', 'Nashik', 'Faridabad', 'Meerut', 'Rajkot', 'Varanasi', 'Srinagar',
     'Aurangabad', 'Dhanbad', 'Amritsar', 'Allahabad', 'Ranchi', 'Howrah', 'Jabalpur',
     'Gurgaon', 'Gurugram', 'Noida', 'Chandigarh', 'Coimbatore', 'Kochi', 'Mysuru',
+    # Logistics & warehouse hub cities common in Blinkit/Eagle POs
+    'Bhiwandi', 'Kundli', 'Sonipat', 'Manesar', 'Bilaspur', 'Palghar', 'Vasai',
+    'Navi Mumbai', 'Khopoli', 'Panvel', 'Bhosari', 'Whitefield', 'Bommasandra',
+    'Tumkur', 'Hosur', 'Sriperumbudur', 'Oragadam', 'Rai', 'Bawal', 'Haridwar',
+    'Roorkee', 'Rudrapur', 'Pantnagar', 'Kashipur', 'Baddi', 'Parwanoo',
+    'Khurja', 'Hapur', 'Pilkhuwa', 'Greater Noida', 'Bahadurgarh',
 ]
 
 
@@ -106,7 +125,7 @@ async def get_amazon_po_overview(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
+    page_size: int = Query(50, ge=1, le=1000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -145,12 +164,18 @@ async def get_amazon_po_overview(
         AmazonPOData.ShipToLocationCode,
     )
 
-    total = query.count()
+    # Single pass: subquery + COUNT(*) OVER() avoids a second GROUP BY round-trip
     offset = (page - 1) * page_size
-    rows = query.order_by(AmazonPOData.OrderedOnDate.desc()).offset(offset).limit(page_size).all()
+    subq = query.subquery()
+    rows_with_count = (
+        db.query(subq, func.count().over().label('_total'))
+        .order_by(subq.c.order_date.desc())
+        .offset(offset).limit(page_size).all()
+    )
+    total = rows_with_count[0]._total if rows_with_count else 0
 
     items = []
-    for r in rows:
+    for r in rows_with_count:
         location_parts = [r.ship_to_location_code, r.ship_to_city, r.ship_to_state]
         location = ', '.join(p for p in location_parts if p) or '—'
         items.append({
@@ -173,13 +198,37 @@ async def get_amazon_po_overview(
 
 @router.get("/amazon/stats")
 async def get_amazon_po_stats(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Return per-status counts and totals for Amazon POs (unfiltered, for KPI cards)."""
-    rows = db.query(AmazonPOData.POStatus, func.count(AmazonPOData.Id)).group_by(AmazonPOData.POStatus).all()
+    """Return per-status counts and totals for Amazon POs (optionally date-filtered)."""
+    q = db.query(AmazonPOData)
+    if start_date:
+        try:
+            q = q.filter(AmazonPOData.OrderedOnDate >= datetime.strptime(start_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+    if end_date:
+        try:
+            q = q.filter(AmazonPOData.OrderedOnDate <= datetime.strptime(end_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+    rows = q.with_entities(AmazonPOData.POStatus, func.count(AmazonPOData.Id)).group_by(AmazonPOData.POStatus).all()
     status_counts = {(r[0] or 'Created'): r[1] for r in rows}
-    total_units = db.query(func.sum(AmazonPOItemData.QuantityRequested)).scalar() or 0
+    items_q = db.query(func.sum(AmazonPOItemData.QuantityRequested)).join(AmazonPOData, AmazonPOItemData.POId == AmazonPOData.Id)
+    if start_date:
+        try:
+            items_q = items_q.filter(AmazonPOData.OrderedOnDate >= datetime.strptime(start_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+    if end_date:
+        try:
+            items_q = items_q.filter(AmazonPOData.OrderedOnDate <= datetime.strptime(end_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+    total_units = items_q.scalar() or 0
     return {
         "status_counts": status_counts,
         "total_pos": sum(status_counts.values()),
@@ -187,10 +236,27 @@ async def get_amazon_po_stats(
     }
 
 
+@router.get("/amazon/states")
+async def get_amazon_po_states(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Return all distinct non-null ShipToState values from Amazon POs."""
+    rows = (
+        db.query(AmazonPOData.ShipToState)
+        .filter(AmazonPOData.ShipToState.isnot(None), AmazonPOData.ShipToState != '')
+        .distinct()
+        .order_by(AmazonPOData.ShipToState)
+        .all()
+    )
+    return {"states": [r[0] for r in rows]}
+
+
 @router.get("/amazon", response_model=PaginatedResponse)
 async def get_amazon_purchase_orders(
     search: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
@@ -212,6 +278,9 @@ async def get_amazon_purchase_orders(
     if status:
         query = query.filter(AmazonPOData.POStatus == status)
 
+    if state:
+        query = query.filter(AmazonPOData.ShipToState == state)
+
     if start_date:
         try:
             query = query.filter(AmazonPOData.OrderedOnDate >= datetime.strptime(start_date, "%Y-%m-%d").date())
@@ -223,9 +292,15 @@ async def get_amazon_purchase_orders(
         except ValueError:
             pass
 
-    total = query.count()
+    # One round-trip: window function returns total alongside each row
     offset = (page - 1) * page_size
-    po_items = query.order_by(desc(AmazonPOData.OrderedOnDate)).offset(offset).limit(page_size).all()
+    rows_with_count = (
+        query.add_columns(func.count().over().label('_total'))
+        .order_by(desc(AmazonPOData.OrderedOnDate))
+        .offset(offset).limit(page_size).all()
+    )
+    total = rows_with_count[0]._total if rows_with_count else 0
+    po_items = [r[0] for r in rows_with_count]
 
     # Batch load products by ASIN (eliminates N+1)
     asins = list({item.ASIN for item in po_items if item.ASIN})
@@ -238,7 +313,7 @@ async def get_amazon_purchase_orders(
     product_ids = [p.Id for p in products_by_asin.values()]
     packed_by_product: dict = {}
     if product_ids:
-        latest_inv_date = db.query(func.max(Inventory.InventoryDate)).scalar()
+        latest_inv_date = _get_latest_inv_date(db)
         inv_q = db.query(Inventory.ProductId, func.sum(Inventory.PackedQty)).filter(
             Inventory.ProductId.in_(product_ids)
         )
@@ -285,7 +360,9 @@ async def get_amazon_purchase_orders(
             "packed_qty": packed_qty,
             "gap": gap,
             "unit_price": float(item.UnitCost) if item.UnitCost else 0.0,
-            "total_amount": float(item.TotalCost) if item.TotalCost else 0.0,
+            "total_amount": float(item.TotalCost) if item.TotalCost else (
+                round(float(item.UnitCost) * qty_requested, 2) if item.UnitCost and qty_requested else 0.0
+            ),
             "status": item_status,
             "po_status": po_header_status,
             "is_delayed": is_delayed,
@@ -310,7 +387,7 @@ async def get_blinkit_po_overview(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=200),
+    page_size: int = Query(50, ge=1, le=1000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -349,12 +426,18 @@ async def get_blinkit_po_overview(
         BlinkitPOData.ShipToGSTIN, BlinkitPOData.ExpectedDeliveryDate,
     )
 
-    total = query.count()
+    # Single pass: subquery + COUNT(*) OVER() avoids a second GROUP BY round-trip
     offset = (page - 1) * page_size
-    rows = query.order_by(BlinkitPOData.PODate.desc()).offset(offset).limit(page_size).all()
+    subq = query.subquery()
+    rows_with_count = (
+        db.query(subq, func.count().over().label('_total'))
+        .order_by(subq.c.order_date.desc())
+        .offset(offset).limit(page_size).all()
+    )
+    total = rows_with_count[0]._total if rows_with_count else 0
 
     items = []
-    for r in rows:
+    for r in rows_with_count:
         city, state = _blk_city_state(r.ship_to_address, r.ship_to_name, r.ship_to_gstin)
         items.append({
             "po_id": r.po_id,
@@ -375,13 +458,37 @@ async def get_blinkit_po_overview(
 
 @router.get("/blinkit/stats")
 async def get_blinkit_po_stats(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Return per-status counts and totals for Blinkit POs (unfiltered, for KPI cards)."""
-    rows = db.query(BlinkitPOData.Status, func.count(BlinkitPOData.Id)).group_by(BlinkitPOData.Status).all()
+    """Return per-status counts and totals for Blinkit POs (optionally date-filtered)."""
+    q = db.query(BlinkitPOData)
+    if start_date:
+        try:
+            q = q.filter(BlinkitPOData.PODate >= datetime.strptime(start_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+    if end_date:
+        try:
+            q = q.filter(BlinkitPOData.PODate <= datetime.strptime(end_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+    rows = q.with_entities(BlinkitPOData.Status, func.count(BlinkitPOData.Id)).group_by(BlinkitPOData.Status).all()
     status_counts = {(r[0] or 'Created'): r[1] for r in rows}
-    total_units = db.query(func.sum(BlinkitPOItemData.QTY)).scalar() or 0
+    items_q = db.query(func.sum(BlinkitPOItemData.QTY)).join(BlinkitPOData, BlinkitPOItemData.POId == BlinkitPOData.Id)
+    if start_date:
+        try:
+            items_q = items_q.filter(BlinkitPOData.PODate >= datetime.strptime(start_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+    if end_date:
+        try:
+            items_q = items_q.filter(BlinkitPOData.PODate <= datetime.strptime(end_date, "%Y-%m-%d").date())
+        except ValueError:
+            pass
+    total_units = items_q.scalar() or 0
     return {
         "status_counts": status_counts,
         "total_pos": sum(status_counts.values()),
@@ -424,9 +531,15 @@ async def get_blinkit_purchase_orders(
         except ValueError:
             pass
 
-    total = query.count()
+    # One round-trip: window function returns total alongside each row
     offset = (page - 1) * page_size
-    po_items = query.order_by(desc(BlinkitPOData.PODate)).offset(offset).limit(page_size).all()
+    rows_with_count = (
+        query.add_columns(func.count().over().label('_total'))
+        .order_by(desc(BlinkitPOData.PODate))
+        .offset(offset).limit(page_size).all()
+    )
+    total = rows_with_count[0]._total if rows_with_count else 0
+    po_items = [r[0] for r in rows_with_count]
 
     # Batch load products — priority: EagleCode→BlinkitId, ItemCode→BlinkitId, ItemCode→AsgSku
     eagle_codes = list({str(item.EagleCode) for item in po_items if item.EagleCode})
@@ -448,7 +561,7 @@ async def get_blinkit_purchase_orders(
     all_product_ids = list({p.Id for p in list(products_by_blinkit_id.values()) + list(products_by_asg_sku.values())})
     packed_by_product: dict = {}
     if all_product_ids:
-        latest_inv_date = db.query(func.max(Inventory.InventoryDate)).scalar()
+        latest_inv_date = _get_latest_inv_date(db)
         inv_q = db.query(Inventory.ProductId, func.sum(Inventory.PackedQty)).filter(
             Inventory.ProductId.in_(all_product_ids)
         )
@@ -863,6 +976,7 @@ async def update_amazon_po_status(
 
     old_status = item.ItemStatus
     item.ItemStatus = status_data.status
+
     log_audit(db, current_user.Id, "STATUS_CHANGE", "AmazonPOItem", str(item.Id),
               old_values={"itemStatus": old_status},
               new_values={"itemStatus": status_data.status})
@@ -891,6 +1005,7 @@ async def update_blinkit_po_status(
 
     old_status = item.ItemStatus
     item.ItemStatus = status_data.status
+
     log_audit(db, current_user.Id, "STATUS_CHANGE", "BlinkitPOItem", str(item.Id),
               old_values={"itemStatus": old_status},
               new_values={"itemStatus": status_data.status})
@@ -957,6 +1072,64 @@ async def update_blinkit_po_header_status(
     try:
         db.commit()
         return {"success": True, "message": f"Blinkit PO {po.PONumber} status updated to {status_data.status}"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/blinkit-po/{po_id}/update-header")
+async def update_blinkit_po_header(
+    po_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Update address/GSTIN header fields of an existing Blinkit PO (e.g. after re-extracting PDF)."""
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    po = db.query(BlinkitPOData).filter(BlinkitPOData.Id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Blinkit PO not found")
+
+    updatable = {
+        'bill_to_name':    'BillToName',
+        'bill_to_address': 'BillToAddress',
+        'bill_to_gstin':   'BillToGSTIN',
+        'ship_to_name':    'ShipToName',
+        'ship_to_address': 'ShipToAddress',
+        'ship_to_gstin':   'ShipToGSTIN',
+        'vendor_name':     'VendorName',
+        'vendor_gstin':    'VendorGSTIN',
+        'vendor_pan':      'VendorPAN',
+        'issuer_name':     'IssuerName',
+        'issuer_gstin':    'IssuerGSTIN',
+        'payment_terms':   'PaymentTerms',
+        'freight_terms':   'FreightTerms',
+        'grand_total':     'GrandTotal',
+        'total_taxable_amount': 'TotalTaxableAmount',
+        'total_tax':       'TotalTax',
+    }
+
+    old_vals = {}
+    new_vals = {}
+    for key, col in updatable.items():
+        if key in payload and payload[key] is not None:
+            old_val = getattr(po, col)
+            new_val = payload[key]
+            if str(old_val or '') != str(new_val or ''):
+                old_vals[key] = old_val
+                new_vals[key] = new_val
+                setattr(po, col, new_val)
+
+    if not new_vals:
+        return {"success": True, "message": "No changes to apply"}
+
+    log_audit(db, current_user.Id, "UPDATE", "BlinkitPO", str(po.Id),
+              old_values=old_vals, new_values=new_vals)
+    try:
+        db.commit()
+        return {"success": True, "message": f"PO {po.PONumber} header updated successfully"}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))

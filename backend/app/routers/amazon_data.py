@@ -328,6 +328,21 @@ async def preview_amazon_sales(
         fmt = detect_sales_format(df.columns.tolist())
         is_rk = (fmt == 'RKExcel')
 
+        # Column warnings
+        actual_cols = set(str(c).strip() for c in df.columns)
+        if is_rk:
+            expected = {'ASIN', 'SKU', 'Sellable', 'DRR(D-1)'}
+        else:
+            expected = {'ASIN', 'Product Title', 'Ordered Units', 'Ordered Revenue'}
+        unmapped = actual_cols - expected - {'Model Number', 'ModelNumber', 'Brand', 'Shipped Units',
+                                              'Shipped Revenue', 'Net Shipped GMS(D-1)', 'Date', 'report_date'}
+        missing = expected - actual_cols
+        column_warnings = []
+        if unmapped:
+            column_warnings.append(f"Unknown columns (not used): {', '.join(sorted(unmapped))}")
+        if missing:
+            column_warnings.append(f"Expected columns not found: {', '.join(sorted(missing))}")
+
         seen_asins: set = set()
         new_products = []
         preview_rows = []
@@ -395,7 +410,7 @@ async def preview_amazon_sales(
                 AmazonSalesData.ReportDate == detected_date
             ).scalar()
             if existing_count > 0:
-                duplicate_warning = f"Found {existing_count} existing sales records for {detected_date.strftime('%Y-%m-%d')}. This data may already be uploaded."
+                duplicate_warning = f"Found {existing_count} existing sales records for {detected_date.strftime('%d-%m-%Y')}. This data may already be uploaded."
 
         return {
             'success': True,
@@ -406,6 +421,7 @@ async def preview_amazon_sales(
             'detectedDate': detected_date.isoformat() if date_found else None,
             'duplicateDataWarning': duplicate_warning,
             'salesFormat': fmt,  # 'VendorCSV' or 'RKExcel'
+            'columnWarnings': column_warnings,
         }
     except HTTPException:
         raise
@@ -850,6 +866,79 @@ def _upload_rk_excel_sheet(df: pd.DataFrame, report_date: date, db: Session) -> 
 
 
 # ============================================================
+# QUERY: Amazon Inventory (per-ASIN view)
+# ============================================================
+@router.get("/inventory")
+async def get_amazon_inventory(
+    search: Optional[str] = Query(None),
+    report_date: Optional[str] = Query(None, description="Filter by report date (YYYY-MM-DD)"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get Amazon inventory data with per-ASIN detail."""
+    query = db.query(AmazonInventoryData)
+
+    if report_date:
+        try:
+            rd = datetime.strptime(report_date, "%Y-%m-%d").date()
+            query = query.filter(AmazonInventoryData.ReportDate == rd)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    else:
+        latest = db.query(func.max(AmazonInventoryData.ReportDate)).scalar()
+        if latest:
+            query = query.filter(AmazonInventoryData.ReportDate == latest)
+
+    if search:
+        query = query.filter(
+            (AmazonInventoryData.ProductTitle.ilike(f"%{search}%")) |
+            (AmazonInventoryData.ASIN.ilike(f"%{search}%")) |
+            (AmazonInventoryData.ModelNumber.ilike(f"%{search}%"))
+        )
+
+    total = query.count()
+
+    stats_row = query.with_entities(
+        func.sum(AmazonInventoryData.SellableOnHandUnits).label('total_sellable'),
+        func.sum(AmazonInventoryData.UnsellableOnHandUnits).label('total_unsellable'),
+        func.sum(AmazonInventoryData.InTransitQuantity).label('total_in_transit'),
+        func.count(AmazonInventoryData.ASIN.distinct()).label('unique_asins'),
+    ).one()
+
+    offset = (page - 1) * page_size
+    items = query.order_by(
+        desc(AmazonInventoryData.SellableOnHandUnits)
+    ).offset(offset).limit(page_size).all()
+
+    dates_list = db.query(AmazonInventoryData.ReportDate).distinct().order_by(
+        desc(AmazonInventoryData.ReportDate)
+    ).limit(20).all()
+
+    total_sellable = int(stats_row.total_sellable or 0)
+    total_unsellable = int(stats_row.total_unsellable or 0)
+    total_in_transit = int(stats_row.total_in_transit or 0)
+
+    return {
+        "items": [item.to_dict() for item in items],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size,
+        "stats": {
+            "totalSellableUnits": total_sellable,
+            "totalUnsellableUnits": total_unsellable,
+            "totalInTransit": total_in_transit,
+            "uniqueAsins": int(stats_row.unique_asins or 0),
+        },
+        "filters": {
+            "report_dates": [d[0].isoformat() for d in dates_list if d[0]],
+        }
+    }
+
+
+# ============================================================
 # PREVIEW 2: Amazon Inventory — dry-run validation
 # ============================================================
 @router.post("/inventory/preview")
@@ -872,6 +961,25 @@ async def preview_amazon_inventory(
         detected_date, date_found = extract_date_from_metadata(contents, filename)
 
         df = read_file(contents, filename, skiprows=1)
+
+        # Column warnings for Amazon inventory
+        actual_cols = set(str(c).strip() for c in df.columns)
+        inv_expected = {'ASIN', 'Product Title'}
+        inv_sellable = {'Sellable On Hand Units', 'Sellable On-Hand Units', 'Sellable'}
+        inv_known_extra = {'Model Number', 'ModelNumber', 'Brand', 'In Transit Quantity',
+                           'Sellable In Transit Units', 'Unsellable On-Hand Units',
+                           'Unsellable On Hand Units', 'Unfulfillable', 'Reserved',
+                           'Reserved FC Transfers'}
+        unmapped_inv = actual_cols - inv_expected - inv_sellable - inv_known_extra
+        missing_inv = inv_expected - actual_cols
+        has_sellable = bool(actual_cols & inv_sellable)
+        column_warnings = []
+        if unmapped_inv:
+            column_warnings.append(f"Unknown columns (not used): {', '.join(sorted(unmapped_inv))}")
+        if missing_inv:
+            column_warnings.append(f"Expected columns not found: {', '.join(sorted(missing_inv))}")
+        if not has_sellable:
+            column_warnings.append("Sellable On Hand Units column not found — sellable quantity will be 0")
 
         seen_asins: set = set()
         new_products = []
@@ -941,7 +1049,7 @@ async def preview_amazon_inventory(
                 AmazonInventoryData.ReportDate == detected_date
             ).scalar()
             if existing_count > 0:
-                duplicate_warning = f"Found {existing_count} existing inventory records for {detected_date.strftime('%Y-%m-%d')}. This data may already be uploaded."
+                duplicate_warning = f"Found {existing_count} existing inventory records for {detected_date.strftime('%d-%m-%Y')}. This data may already be uploaded."
 
         return {
             'success': True,
@@ -951,6 +1059,7 @@ async def preview_amazon_inventory(
             'newFacilities': [],
             'detectedDate': detected_date.isoformat() if date_found else None,
             'duplicateDataWarning': duplicate_warning,
+            'columnWarnings': column_warnings,
         }
     except HTTPException:
         raise
@@ -1189,7 +1298,7 @@ async def preview_amazon_po(
             if existing:
                 duplicate_pos.append({
                     'poNumber': po['poNumber'],
-                    'uploadedOn': existing.CreatedAt.strftime('%d %b %Y') if existing.CreatedAt else 'unknown date',
+                    'uploadedOn': existing.CreatedAt.strftime('%d-%m-%Y') if existing.CreatedAt else 'unknown date',
                 })
 
         return {
@@ -1431,7 +1540,9 @@ async def get_amazon_sales_analytics(
                 MAX(ProductTitle)                               AS product_title,
                 MAX(SKU)                                        AS sku,
                 SUM(ISNULL(OrderedUnits, 0))                    AS total_units,
-                SUM(OrderedRevenue)                             AS total_revenue
+                SUM(OrderedRevenue)                             AS total_revenue,
+                MIN(ReportDate)                                 AS first_sale,
+                MAX(ReportDate)                                 AS last_sale
             FROM AmazonSales
             WHERE ReportDate >= :start_dt AND ReportDate <= :end_dt AND SourceFile = 'VendorCSV'
             GROUP BY ASIN
@@ -1444,6 +1555,8 @@ async def get_amazon_sales_analytics(
                 "product_title": row[1] or row[2] or row[0],
                 "total_units":   int(row[3] or 0),
                 "total_revenue": float(row[4] or 0),
+                "first_sale":    row[5].strftime('%d-%m-%Y') if row[5] else None,
+                "last_sale":     row[6].strftime('%d-%m-%Y') if row[6] else None,
             }
             for row in top_rows
         ]
@@ -1532,42 +1645,41 @@ async def list_amazon_sales_products(
 ):
     """List all products from AmazonSales aggregated by ASIN, with pagination, search, and date range."""
     try:
-        clauses = ["s.ASIN IS NOT NULL"]
+        clauses = ["ASIN IS NOT NULL", "SourceFile = 'VendorCSV'"]
         params: dict = {"offset": (page - 1) * page_size, "page_size": page_size}
         if search:
-            clauses.append("(s.ProductTitle LIKE :search OR s.ASIN LIKE :search OR s.SKU LIKE :search)")
+            clauses.append("(ProductTitle LIKE :search OR ASIN LIKE :search OR SKU LIKE :search)")
             params["search"] = f"%{search}%"
         if start_date:
-            clauses.append("s.ReportDate >= :start_date")
+            clauses.append("ReportDate >= :start_date")
             params["start_date"] = start_date
         if end_date:
-            clauses.append("s.ReportDate <= :end_date")
+            clauses.append("ReportDate <= :end_date")
             params["end_date"] = end_date
         where = "WHERE " + " AND ".join(clauses)
 
-        total = int(db.execute(text(f"SELECT COUNT(DISTINCT s.ASIN) FROM AmazonSales s {where}"), params).scalar() or 0)
+        total = int(db.execute(text(f"SELECT COUNT(DISTINCT ASIN) FROM AmazonSales {where}"), params).scalar() or 0)
 
         rows = db.execute(text(f"""
             SELECT
-                s.ASIN,
-                COALESCE(NULLIF(MAX(s.ProductTitle), ''), p.ProductName, s.ASIN) AS product_title,
-                MAX(s.SKU)                                   AS sku,
-                SUM(ISNULL(s.OrderedUnits, 0))               AS total_units,
-                SUM(ISNULL(s.OrderedRevenue, 0))             AS total_revenue,
-                MIN(s.ReportDate)                            AS first_sale,
-                MAX(s.ReportDate)                            AS last_sale
-            FROM AmazonSales s
-            LEFT JOIN Products p ON p.AmazonId = s.ASIN
+                ASIN,
+                MAX(ProductTitle)                  AS product_title,
+                MAX(SKU)                           AS sku,
+                SUM(ISNULL(OrderedUnits, 0))       AS total_units,
+                SUM(OrderedRevenue)                AS total_revenue,
+                MIN(ReportDate)                    AS first_sale,
+                MAX(ReportDate)                    AS last_sale
+            FROM AmazonSales
             {where}
-            GROUP BY s.ASIN, p.ProductName
-            ORDER BY SUM(ISNULL(s.OrderedUnits, 0)) DESC
+            GROUP BY ASIN
+            ORDER BY SUM(ISNULL(OrderedUnits, 0)) DESC
             OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
         """), params).fetchall()
 
         items = [
             {
                 "asin":         row[0] or "",
-                "productTitle": row[1] or row[0] or "Unknown",
+                "productTitle": row[1] or row[2] or row[0] or "Unknown",
                 "sku":          row[2] or "",
                 "totalUnits":   int(row[3] or 0),
                 "totalRevenue": float(row[4] or 0),
@@ -1589,8 +1701,8 @@ def _parse_date(val) -> date:
     if pd.isna(val) or str(val).strip() in ('', 'nan'):
         return None
     s = str(val).strip()
-    for fmt in ('%m/%d/%Y', '%m/%d/%y', '%d/%m/%Y', '%d/%m/%y',
-                '%Y-%m-%d', '%d-%m-%Y', '%d.%m.%Y', '%d.%m.%y'):
+    for fmt in ('%d/%m/%Y', '%d/%m/%y', '%d-%m-%Y', '%d-%m-%y',
+                '%d.%m.%Y', '%d.%m.%y', '%Y-%m-%d', '%m/%d/%Y', '%m/%d/%y'):
         try:
             return datetime.strptime(s.split(' ')[0], fmt).date()
         except ValueError:
@@ -1670,16 +1782,25 @@ async def extract_amazon_po_pdf(
     if len(contents) == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    result = extract_amazon_po_from_pdf(contents)
+    try:
+        result = extract_amazon_po_from_pdf(contents)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF parsing error: {str(e)}")
 
-    data = result.to_dict()
+    try:
+        data = result.to_dict()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to serialize result: {str(e)}")
 
     # Check if this PO already exists in the DB
     po_number = data.get("header", {}).get("po_number")
     if po_number:
-        existing = db.query(AmazonPOData).filter(AmazonPOData.PONumber == po_number).first()
-        if existing:
-            data["duplicateWarning"] = f"PO {po_number} is already in the database (uploaded on {existing.CreatedAt.strftime('%d %b %Y') if existing.CreatedAt else 'unknown date'}). Confirming will be rejected."
+        try:
+            existing = db.query(AmazonPOData).filter(AmazonPOData.PONumber == po_number).first()
+            if existing:
+                data["duplicateWarning"] = f"PO {po_number} is already in the database (uploaded on {existing.CreatedAt.strftime('%d-%m-%Y') if existing.CreatedAt else 'unknown date'}). Confirming will be rejected."
+        except Exception as e:
+            data["duplicate_check_error"] = str(e)
 
     return data
 

@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
@@ -12,11 +12,11 @@ import {
   PackageOpen,
   Boxes,
   Download,
-  CalendarDays,
 } from 'lucide-react';
 import { api } from '@/lib/api';
 import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
 import { exportToCSV } from '@/lib/export';
+import { SnapshotDatePicker } from '@/components/ui/snapshot-date-picker';
 
 interface InventoryItem {
   id: number;
@@ -32,6 +32,7 @@ interface InventoryItem {
   blinkitFeStock: number;
   blinkitStock: number;
   totalStock: number;
+  totalChannelStock: number;
   status: string;
 }
 
@@ -65,22 +66,27 @@ export default function DispatchInventoryPage() {
         }
 
         // Endpoint already returns one row per product with correct platform stock
-        setItems(rawItems.map((row: any) => ({
-          id: row.id,
-          productName: row.productName,
-          asgSku: row.asgSku,
-          amazonId: row.amazonId || null,
-          blinkitId: row.blinkitId || null,
-          gs1: row.gs1 || null,
-          packedQty: row.packedQty || 0,
-          unpackedQty: row.unpackedQty || 0,
-          amazonStock: row.amazonStock || 0,
-          blinkitBeStock: row.blinkitBeStock || 0,
-          blinkitFeStock: row.blinkitFeStock || 0,
-          blinkitStock: row.blinkitStock || 0,
-          totalStock: row.totalStock || 0,
-          status: row.status || 'Healthy',
-        })));
+        setItems(rawItems.map((row: any) => {
+          const amazonStock   = row.amazonStock   || 0;
+          const blinkitStock  = row.blinkitStock  || 0;
+          return {
+            id: row.id,
+            productName: row.productName,
+            asgSku: row.asgSku,
+            amazonId: row.amazonId || null,
+            blinkitId: row.blinkitId || null,
+            gs1: row.gs1 || null,
+            packedQty: row.packedQty || 0,
+            unpackedQty: row.unpackedQty || 0,
+            amazonStock,
+            blinkitBeStock: row.blinkitBeStock || 0,
+            blinkitFeStock: row.blinkitFeStock || 0,
+            blinkitStock,
+            totalStock: row.totalStock || 0,
+            totalChannelStock: amazonStock + blinkitStock,
+            status: row.status || 'Healthy',
+          };
+        }));
       } catch (error) {
         console.error('Error fetching inventory:', error);
       } finally {
@@ -231,7 +237,7 @@ export default function DispatchInventoryPage() {
             ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
             : 'text-muted-foreground border-transparent'
         }`}>
-          {row.packedQty.toLocaleString()}
+          {row.packedQty.toLocaleString('en-IN')}
         </span>
       ),
     },
@@ -249,7 +255,7 @@ export default function DispatchInventoryPage() {
             ? 'bg-yellow-50 text-yellow-700 border-yellow-200'
             : 'text-muted-foreground border-transparent'
         }`}>
-          {row.unpackedQty.toLocaleString()}
+          {row.unpackedQty.toLocaleString('en-IN')}
         </span>
       ),
     },
@@ -269,7 +275,7 @@ export default function DispatchInventoryPage() {
               ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
               : 'bg-red-50 text-red-600 border-red-200'
           }`}>
-            {asgTotal.toLocaleString()}
+            {asgTotal.toLocaleString('en-IN')}
           </span>
         );
       },
@@ -284,21 +290,7 @@ export default function DispatchInventoryPage() {
       align: 'right',
       cell: (row) => (
         <span className={row.amazonStock > 0 ? 'text-blue-600 font-bold text-sm' : 'text-muted-foreground text-sm'}>
-          {row.amazonStock.toLocaleString()}
-        </span>
-      ),
-    },
-    {
-      id: 'blinkitStock',
-      header: 'Blinkit Inv',
-      accessorKey: 'blinkitStock',
-      sortable: true,
-      width: 110,
-      minWidth: 90,
-      align: 'right',
-      cell: (row) => (
-        <span className={row.blinkitStock > 0 ? 'text-yellow-600 font-bold text-sm' : 'text-muted-foreground text-sm'}>
-          {row.blinkitStock.toLocaleString()}
+          {row.amazonStock.toLocaleString('en-IN')}
         </span>
       ),
     },
@@ -311,8 +303,8 @@ export default function DispatchInventoryPage() {
       minWidth: 100,
       align: 'right',
       cell: (row) => (
-        <span className={row.blinkitBeStock > 0 ? 'text-blue-600 font-semibold text-sm' : 'text-muted-foreground text-sm'}>
-          {row.blinkitBeStock.toLocaleString()}
+        <span className={row.blinkitBeStock > 0 ? 'text-indigo-600 font-semibold text-sm' : 'text-muted-foreground text-sm'}>
+          {row.blinkitBeStock.toLocaleString('en-IN')}
         </span>
       ),
     },
@@ -326,7 +318,39 @@ export default function DispatchInventoryPage() {
       align: 'right',
       cell: (row) => (
         <span className={row.blinkitFeStock > 0 ? 'text-orange-500 font-semibold text-sm' : 'text-muted-foreground text-sm'}>
-          {row.blinkitFeStock.toLocaleString()}
+          {row.blinkitFeStock.toLocaleString('en-IN')}
+        </span>
+      ),
+    },
+    {
+      id: 'blinkitStock',
+      header: 'Blinkit Inv',
+      accessorKey: 'blinkitStock',
+      sortable: true,
+      width: 110,
+      minWidth: 90,
+      align: 'right',
+      cell: (row) => (
+        <span className={row.blinkitStock > 0 ? 'text-yellow-600 font-bold text-sm' : 'text-muted-foreground text-sm'}>
+          {row.blinkitStock.toLocaleString('en-IN')}
+        </span>
+      ),
+    },
+    {
+      id: 'totalChannelStock',
+      header: 'Total Channel Stock',
+      accessorKey: 'totalChannelStock',
+      sortable: true,
+      width: 160,
+      minWidth: 130,
+      align: 'right',
+      cell: (row) => (
+        <span className={`px-2 py-0.5 rounded text-xs font-bold border ${
+          row.totalChannelStock > 0
+            ? 'bg-blue-50 text-blue-800 border-blue-200'
+            : 'bg-red-50 text-red-600 border-red-200'
+        }`}>
+          {row.totalChannelStock.toLocaleString('en-IN')}
         </span>
       ),
     },
@@ -343,6 +367,7 @@ export default function DispatchInventoryPage() {
       gridState.setColumnVisible('blinkitFeStock', false);
       gridState.setColumnVisible('amazonId', true);
       gridState.setColumnVisible('amazonStock', true);
+      gridState.setColumnVisible('totalChannelStock', false);
     } else if (filters.channel === 'blinkit') {
       gridState.setColumnVisible('amazonId', false);
       gridState.setColumnVisible('amazonStock', false);
@@ -350,6 +375,7 @@ export default function DispatchInventoryPage() {
       gridState.setColumnVisible('blinkitStock', true);
       gridState.setColumnVisible('blinkitBeStock', true);
       gridState.setColumnVisible('blinkitFeStock', true);
+      gridState.setColumnVisible('totalChannelStock', false);
     } else {
       gridState.setColumnVisible('amazonId', true);
       gridState.setColumnVisible('amazonStock', true);
@@ -357,6 +383,7 @@ export default function DispatchInventoryPage() {
       gridState.setColumnVisible('blinkitStock', true);
       gridState.setColumnVisible('blinkitBeStock', true);
       gridState.setColumnVisible('blinkitFeStock', true);
+      gridState.setColumnVisible('totalChannelStock', true);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters.channel]);
@@ -395,28 +422,28 @@ export default function DispatchInventoryPage() {
           />
           <StatsCard
             title="Packed Qty"
-            value={totalPackedQty.toLocaleString()}
+            value={totalPackedQty.toLocaleString('en-IN')}
             icon={PackageCheck}
             description={inventoryDate ? `ASG stock as of ${inventoryDate}` : 'Ready to ship'}
             variant="green"
           />
           <StatsCard
             title="Unpacked Qty"
-            value={totalUnpackedQty.toLocaleString()}
+            value={totalUnpackedQty.toLocaleString('en-IN')}
             icon={PackageOpen}
             description="Raw stock"
             variant="yellow"
           />
           <StatsCard
             title="Amazon Inv"
-            value={amazonStock.toLocaleString()}
+            value={amazonStock.toLocaleString('en-IN')}
             icon={PackageCheck}
             description={amazonDate ? `As of ${amazonDate}` : 'Units in Amazon'}
             variant="blue"
           />
           <StatsCard
             title="Blinkit Inv"
-            value={blinkitStock.toLocaleString()}
+            value={blinkitStock.toLocaleString('en-IN')}
             icon={Boxes}
             description={blinkitDate ? `As of ${blinkitDate}` : 'Units in Blinkit'}
             variant="orange"
@@ -425,38 +452,13 @@ export default function DispatchInventoryPage() {
 
         {/* ASG Snapshot Date Selector */}
         {availableDates.length > 0 && (
-          <div className="flex items-center gap-3 px-1">
-            <div className="flex items-center gap-1.5 text-sm text-muted-foreground shrink-0">
-              <CalendarDays className="h-4 w-4" />
-              <span className="font-medium text-foreground">ASG Snapshot Date:</span>
-            </div>
-            <div className="flex flex-wrap gap-2">
-              {availableDates.map((d) => {
-                const active = (selectedDate || availableDates[0]) === d;
-                return (
-                  <button
-                    key={d}
-                    onClick={() => setSelectedDate(d)}
-                    className={`px-3 py-1 text-xs rounded-full border font-medium transition-colors ${
-                      active
-                        ? 'bg-blue-600 text-white border-blue-600'
-                        : 'bg-muted/50 text-muted-foreground border-border hover:bg-muted hover:text-foreground'
-                    }`}
-                  >
-                    {d}
-                  </button>
-                );
-              })}
-            </div>
-            {selectedDate && selectedDate !== availableDates[0] && (
-              <button
-                onClick={() => setSelectedDate('')}
-                className="text-xs text-muted-foreground hover:text-foreground underline shrink-0"
-              >
-                Reset to latest
-              </button>
-            )}
-          </div>
+          <SnapshotDatePicker
+            availableDates={availableDates}
+            selectedDate={selectedDate || availableDates[0] || ''}
+            onSelect={setSelectedDate}
+            onReset={() => setSelectedDate('')}
+            className="px-1"
+          />
         )}
 
         {/* Filters */}
@@ -497,10 +499,10 @@ export default function DispatchInventoryPage() {
                   'Packed Qty': i.packedQty,
                   'Unpacked Qty': i.unpackedQty,
                   'Amazon Stock': i.amazonStock,
-                  'Blinkit Inv (Total)': i.blinkitStock,
                   'Blinkit BE (Hub)': i.blinkitBeStock,
                   'Blinkit FE (Dark Store)': i.blinkitFeStock,
-                  'Total Stock (ASG)': i.packedQty + i.unpackedQty,
+                  'Blinkit Inv (Total)': i.blinkitStock,
+                  'Total Channel Stock': i.totalChannelStock,
                   'Status': i.status,
                 })),
                 'inventory'

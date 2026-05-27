@@ -4,9 +4,11 @@ import { usePathname, useRouter } from 'next/navigation';
 import { Bell, User, LogOut, CalendarDays, ChevronDown, Check } from 'lucide-react';
 import { Breadcrumb, generateBreadcrumbs } from '@/components/ui/breadcrumb';
 import { Button } from '@/components/ui/button';
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { useEffect, useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useFilter, FILTER_OPTIONS } from '@/contexts/FilterContext';
+import api from '@/lib/api';
 import { SidebarTrigger } from '@/components/ui/sidebar';
 import {
   DropdownMenu,
@@ -29,6 +31,11 @@ const FILTER_PAGES = [
   '/amazon-sales',
   '/blinkit-sales',
   '/distributor',
+  '/po-lifecycle',
+  '/amazon-po',
+  '/amazon-po-overview',
+  '/blinkit-po',
+  '/blinkit-po-overview',
 ];
 
 export function Header() {
@@ -37,6 +44,22 @@ export function Header() {
   const { user, logout } = useAuth();
   const { filterMode, setFilterMode, customStart, setCustomStart, customEnd, setCustomEnd } = useFilter();
   const breadcrumbs = generateBreadcrumbs(pathname);
+  const [mounted, setMounted] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+
+  useEffect(() => { setMounted(true); }, []);
+
+  useEffect(() => {
+    if (!mounted || !user) return;
+    const fetchUnread = () => {
+      api.notifications.getStats().then((s: any) => {
+        setUnreadCount(s?.unreadNotifications ?? 0);
+      }).catch(() => {});
+    };
+    fetchUnread();
+    const interval = setInterval(fetchUnread, 60000);
+    return () => clearInterval(interval);
+  }, [mounted, user]);
 
   const showFilter = FILTER_PAGES.includes(pathname);
   const currentLabel = FILTER_OPTIONS.find(o => o.value === filterMode)?.label ?? 'All Time';
@@ -47,7 +70,7 @@ export function Header() {
   };
 
   return (
-    <header className="sticky top-0 z-30 flex h-16 items-center gap-4 bg-background px-6 border-b">
+    <header className="flex h-16 shrink-0 items-center gap-4 bg-background px-6 border-b z-30">
       {/* Left: Sidebar trigger + Breadcrumbs */}
       <div className="flex items-center gap-4 flex-1 min-w-0">
         <SidebarTrigger className="-ml-2 flex-shrink-0" />
@@ -122,6 +145,11 @@ export function Header() {
             <TooltipTrigger asChild>
               <Button variant="ghost" size="icon" className="relative h-9 w-9" onClick={() => router.push('/notifications')}>
                 <Bell className="h-4 w-4" />
+                {mounted && unreadCount > 0 && (
+                  <span className="absolute -top-0.5 -right-0.5 h-4 w-4 rounded-full bg-red-500 text-[10px] font-bold text-white flex items-center justify-center leading-none">
+                    {unreadCount > 9 ? '9+' : unreadCount}
+                  </span>
+                )}
                 <span className="sr-only">Notifications</span>
               </Button>
             </TooltipTrigger>
@@ -129,8 +157,8 @@ export function Header() {
           </Tooltip>
         </TooltipProvider>
 
-        {/* User Profile Dropdown */}
-        {user && (
+        {/* User Profile Dropdown — deferred until after hydration to avoid SSR/client ID mismatch */}
+        {mounted && user && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" className="relative h-9 w-9 rounded-full p-0">

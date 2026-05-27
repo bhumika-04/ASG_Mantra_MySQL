@@ -46,6 +46,7 @@ class DistributorStockData(Base):
     MH_Qty = Column(Integer, nullable=True)
     KT_Qty = Column(Integer, nullable=True)
     WB_Qty = Column(Integer, nullable=True)
+    HR_Qty = Column(Integer, nullable=True)
 
     # Metadata
     CreatedAt = Column(DateTime, default=func.getdate())
@@ -64,5 +65,6 @@ class DistributorStockData(Base):
             "mhQty": self.MH_Qty,
             "ktQty": self.KT_Qty,
             "wbQty": self.WB_Qty,
+            "hrQty": self.HR_Qty,
             "createdAt": self.CreatedAt.isoformat() if self.CreatedAt else None,
         }

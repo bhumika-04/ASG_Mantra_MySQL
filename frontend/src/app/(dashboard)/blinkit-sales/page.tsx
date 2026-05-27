@@ -19,6 +19,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import api from '@/lib/api';
+import { fmtDate } from '@/lib/format';
 
 interface BlinkitProduct {
   itemId: string;
@@ -29,22 +30,12 @@ interface BlinkitProduct {
   lastSale: string | null;
 }
 
-function filterTrend(data: any[], mode: string, customStart: string, customEnd: string) {
-  if (mode === 'all') return data;
-  const { start_date, end_date } = computeDateRange(mode as FilterMode, customStart, customEnd);
-  return data.filter((d) => {
-    const date = (d.date || '').slice(0, 10);
-    if (start_date && date < start_date) return false;
-    if (end_date && date > end_date) return false;
-    return true;
-  });
-}
-
 const PAGE_SIZE = 50;
 
 export default function BlinkitSalesPage() {
   const { filterMode, customStart, customEnd } = useFilter();
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [stats, setStats] = useState({
     total_qty: 0,
     total_revenue: 0,
@@ -54,6 +45,7 @@ export default function BlinkitSalesPage() {
   });
   const [dailyTrend, setDailyTrend] = useState<any[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [hasLoaded, setHasLoaded] = useState(false);
 
   // Products grid state
   const [products, setProducts] = useState<BlinkitProduct[]>([]);
@@ -86,19 +78,19 @@ export default function BlinkitSalesPage() {
     },
     {
       id: 'totalQty', header: 'Total Qty Sold', accessorKey: 'totalQty', sortable: true, width: 130, align: 'right',
-      cell: (row) => <span className="font-mono font-semibold text-yellow-600">{Math.round(row.totalQty).toLocaleString()}</span>,
+      cell: (row) => <span className="font-mono font-semibold text-yellow-600">{Math.round(row.totalQty).toLocaleString('en-IN')}</span>,
     },
     {
       id: 'totalRevenue', header: 'Revenue (₹)', accessorKey: 'totalRevenue', sortable: true, width: 130, align: 'right',
-      cell: (row) => <span className="font-mono text-gray-700">₹{Math.round(row.totalRevenue).toLocaleString()}</span>,
+      cell: (row) => <span className="font-mono text-gray-700">₹{Math.round(row.totalRevenue).toLocaleString('en-IN')}</span>,
     },
     {
       id: 'firstSale', header: 'First Sale', accessorKey: 'firstSale', sortable: true, width: 110,
-      cell: (row) => <span className="text-sm text-gray-500">{row.firstSale || '—'}</span>,
+      cell: (row) => <span className="text-sm text-gray-500">{fmtDate(row.firstSale)}</span>,
     },
     {
       id: 'lastSale', header: 'Last Sale', accessorKey: 'lastSale', sortable: true, width: 110,
-      cell: (row) => <span className="text-sm text-gray-500">{row.lastSale || '—'}</span>,
+      cell: (row) => <span className="text-sm text-gray-500">{fmtDate(row.lastSale)}</span>,
     },
   ], 'blinkit-sales');
 
@@ -130,8 +122,12 @@ export default function BlinkitSalesPage() {
   useEffect(() => {
     const fetchAnalytics = async () => {
       try {
-        setIsLoading(true);
         setFetchError(null);
+        if (!hasLoaded) {
+          setIsLoading(true);
+        } else {
+          setIsRefreshing(true);
+        }
         const dateParams = getDateParams();
         const analytics = await (api as any).blinkitSalesData.getAnalytics(
           Object.keys(dateParams).length ? dateParams : { days: 1825 }
@@ -144,15 +140,18 @@ export default function BlinkitSalesPage() {
           total_records_all_time: analytics.summary?.total_records_all_time || 0,
         });
         setDailyTrend(analytics.daily_trend || []);
+        setHasLoaded(true);
       } catch (error: any) {
         setFetchError(error?.message || String(error));
       } finally {
         setIsLoading(false);
+        setIsRefreshing(false);
       }
     };
+    setProductsPage(1);
     fetchAnalytics();
     fetchProducts(1, productsSearch);
-  }, [fetchProducts, getDateParams]);
+  }, [fetchProducts, getDateParams]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleProductSearch = () => {
     setProductsPage(1);
@@ -176,7 +175,14 @@ export default function BlinkitSalesPage() {
 
   return (
     <ProtectedRoute>
-      <div className="p-6 space-y-6">
+      <div className="p-4 sm:p-6 space-y-6">
+        {isRefreshing && (
+          <div className="flex items-center gap-2 text-xs text-yellow-700 bg-yellow-50 border border-yellow-200 rounded px-3 py-2">
+            <RefreshCw className="h-3 w-3 animate-spin" />
+            Updating to selected date range…
+          </div>
+        )}
+
         {fetchError && (
           <div className="p-4 bg-red-50 border border-red-300 rounded-lg text-sm text-red-800">
             <strong>API Error:</strong> {fetchError}
@@ -185,8 +191,8 @@ export default function BlinkitSalesPage() {
 
         {/* KPI Cards */}
         <StatsGrid columns={4}>
-          <StatsCard title="Total Qty Sold" value={Math.round(stats.total_qty).toLocaleString()} icon={Package} description="Units sold" variant="yellow" />
-          <StatsCard title="Total Revenue" value={`₹${Math.round(stats.total_revenue).toLocaleString()}`} icon={DollarSign} description="MRP-based revenue" variant="yellow" />
+          <StatsCard title="Total Qty Sold" value={Math.round(stats.total_qty).toLocaleString('en-IN')} icon={Package} description="Units sold" variant="yellow" />
+          <StatsCard title="Total Revenue" value={`₹${Math.round(stats.total_revenue).toLocaleString('en-IN')}`} icon={DollarSign} description="MRP-based revenue" variant="yellow" />
           <StatsCard title="Active Products" value={stats.active_items.toString()} icon={TrendingUp} description="Distinct items sold" variant="yellow" />
           <StatsCard
             title="Monthly Growth"
@@ -204,31 +210,34 @@ export default function BlinkitSalesPage() {
             <CardTitle>Daily Sales Trend</CardTitle>
           </CardHeader>
           <CardContent>
-            {(() => {
-              const filtered = filterMode === 'custom' && (!customStart || !customEnd)
-                ? dailyTrend
-                : filterTrend(dailyTrend, filterMode, customStart, customEnd);
-              return filtered.length > 0 ? (
-                <ResponsiveContainer width="100%" height={280}>
-                  <AreaChart data={filtered}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                    <XAxis dataKey="date" tick={{ fill: '#6b7280', fontSize: 11 }} axisLine={{ stroke: '#e5e7eb' }} interval="preserveStartEnd" />
-                    <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} axisLine={{ stroke: '#e5e7eb' }} />
-                    <Tooltip
-                      contentStyle={{ backgroundColor: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '8px' }}
-                      formatter={(value: number | undefined) => [Number(value ?? 0).toLocaleString(), 'Qty Sold']}
-                    />
-                    <Area type="monotone" dataKey="total_qty" stroke="#fbbf24" fill="#fef3c7" strokeWidth={2} name="Qty Sold" />
-                  </AreaChart>
-                </ResponsiveContainer>
-              ) : (
-                <div className="h-64 flex items-center justify-center text-muted-foreground">
-                  {stats.total_records_all_time > 0
-                    ? `No data in selected date range (${stats.total_records_all_time.toLocaleString()} records exist in DB)`
-                    : 'No Blinkit sales data uploaded yet'}
-                </div>
-              );
-            })()}
+            {dailyTrend.length > 0 ? (
+              <ResponsiveContainer width="100%" height={280}>
+                <AreaChart data={dailyTrend}>
+                  <defs>
+                    <linearGradient id="colorBlinkitSales" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#fbbf24" stopOpacity={0.6}/>
+                      <stop offset="95%" stopColor="#fde68a" stopOpacity={0.05}/>
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                  <XAxis dataKey="date" tick={{ fill: '#6b7280', fontSize: 11 }} axisLine={{ stroke: '#e5e7eb' }} interval="preserveStartEnd" />
+                  <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} axisLine={{ stroke: '#e5e7eb' }} />
+                  <Tooltip
+                    contentStyle={{ backgroundColor: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '8px' }}
+                    formatter={(value: number | undefined) => [Number(value ?? 0).toLocaleString('en-IN'), 'Qty Sold']}
+                  />
+                  <Area type="monotone" dataKey="total_qty" stroke="#fbbf24" fill="url(#colorBlinkitSales)" strokeWidth={2} name="Qty Sold" />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-64 flex items-center justify-center text-muted-foreground">
+                {isRefreshing ? (
+                  <div className="flex items-center gap-2"><RefreshCw className="h-4 w-4 animate-spin" /> Loading chart…</div>
+                ) : stats.total_records_all_time > 0
+                  ? `No data in selected date range (${stats.total_records_all_time.toLocaleString('en-IN')} records exist in DB)`
+                  : 'No Blinkit sales data uploaded yet'}
+              </div>
+            )}
           </CardContent>
         </Card>
 
@@ -237,7 +246,7 @@ export default function BlinkitSalesPage() {
           <CardHeader className="pb-2">
             <div className="flex items-center justify-between flex-wrap gap-3">
               <CardTitle className="text-base font-medium">
-                All Products ({productsTotal.toLocaleString()})
+                All Products ({productsTotal.toLocaleString('en-IN')})
               </CardTitle>
               <div className="flex items-center gap-2">
                 <div className="flex gap-1">
@@ -283,7 +292,7 @@ export default function BlinkitSalesPage() {
               <>
                 <DataGrid data={products} gridState={gridState} pageSize={PAGE_SIZE} />
                 <div className="flex items-center justify-between pt-2">
-                  <p className="text-sm text-gray-500">{productsTotal.toLocaleString()} products</p>
+                  <p className="text-sm text-gray-500">{productsTotal.toLocaleString('en-IN')} products</p>
                   <div className="flex items-center gap-2">
                     <Button variant="outline" size="sm" onClick={() => { const p = Math.max(1, productsPage - 1); setProductsPage(p); fetchProducts(p, productsSearch); }} disabled={productsPage === 1}>
                       Previous

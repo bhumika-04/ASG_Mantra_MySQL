@@ -31,9 +31,11 @@ class AmazonPOHeaderPreview(BaseModel):
     po_number: Optional[str] = None
     po_status: Optional[str] = None
     vendor_code: Optional[str] = None
+    vendor_address: Optional[str] = None
     ship_to_location_code: Optional[str] = None
     ship_to_city: Optional[str] = None
     ship_to_state: Optional[str] = None
+    ship_to_address: Optional[str] = None
     ordered_on_date: Optional[str] = None
     ship_window_start_date: Optional[str] = None
     ship_window_end_date: Optional[str] = None

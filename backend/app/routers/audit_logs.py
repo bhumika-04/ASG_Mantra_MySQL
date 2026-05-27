@@ -155,6 +155,30 @@ async def get_audit_stats(
     }
 
 
+@router.delete("/cleanup")
+async def cleanup_old_logs(
+    days: int = Query(60, ge=30, description="Delete logs older than N days"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete audit logs older than specified days.
+    Admin only.
+    """
+    if current_user.Role != "Admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    cutoff_date = datetime.now() - timedelta(days=days)
+    deleted_count = db.query(AuditLog).filter(AuditLog.CreatedAt < cutoff_date).delete()
+    db.commit()
+
+    return {
+        "success": True,
+        "message": f"Deleted {deleted_count} audit logs older than {days} days",
+        "deletedCount": deleted_count
+    }
+
+
 @router.delete("/{log_id}")
 async def delete_audit_log(
     log_id: int,
@@ -176,27 +200,3 @@ async def delete_audit_log(
     db.commit()
 
     return {"success": True, "message": f"Audit log {log_id} deleted"}
-
-
-@router.delete("/cleanup")
-async def cleanup_old_logs(
-    days: int = Query(90, ge=30, description="Delete logs older than N days"),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Delete audit logs older than specified days.
-    Admin only.
-    """
-    if current_user.Role != "Admin":
-        raise HTTPException(status_code=403, detail="Admin role required")
-
-    cutoff_date = datetime.now() - timedelta(days=days)
-    deleted_count = db.query(AuditLog).filter(AuditLog.CreatedAt < cutoff_date).delete()
-    db.commit()
-
-    return {
-        "success": True,
-        "message": f"Deleted {deleted_count} audit logs older than {days} days",
-        "deletedCount": deleted_count
-    }

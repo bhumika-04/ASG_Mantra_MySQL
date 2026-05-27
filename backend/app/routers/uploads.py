@@ -45,6 +45,33 @@ def _normalize(val: str) -> str:
     return s
 
 
+def check_column_warnings(
+    file_columns: list,
+    col_map: dict,
+    required_targets: list,
+    optional_targets: list = [],
+) -> list:
+    """Return warning strings for extra or missing columns in an uploaded file.
+
+    file_columns:     original column names from the file
+    col_map:          {original_col: mapped_target} built during column detection
+    required_targets: target field names that must be mapped (triggers a warning if absent)
+    optional_targets: target fields that are expected but not strictly required
+    """
+    warnings = []
+    unmapped = [str(c) for c in file_columns if c not in col_map]
+    if unmapped:
+        warnings.append(f"Unknown columns (not used): {', '.join(unmapped)}")
+    mapped_targets = set(col_map.values())
+    missing_required = [t for t in required_targets if t not in mapped_targets]
+    if missing_required:
+        warnings.append(f"Required columns not found: {', '.join(missing_required)}")
+    missing_optional = [t for t in optional_targets if t not in mapped_targets]
+    if missing_optional:
+        warnings.append(f"Optional columns not found (data will be empty): {', '.join(missing_optional)}")
+    return warnings
+
+
 def clean_numeric(val) -> float:
     """Clean currency symbols (₹, $), commas, LRM chars and whitespace from numeric values."""
     if pd.isna(val) or str(val).strip() in ('', '-', 'nan'):
@@ -307,6 +334,11 @@ async def preview_inventory_data(
                 column_mapping[col] = 'warehouse'
             elif col_lower == 'channel':
                 column_mapping[col] = 'channel'
+        column_warnings = check_column_warnings(
+            list(df.columns), column_mapping,
+            required_targets=['asg_sku', 'packed_qty'],
+            optional_targets=['unpacked_qty', 'warehouse'],
+        )
         df = df.rename(columns=column_mapping)
 
         if 'asg_sku' not in df.columns:
@@ -416,6 +448,7 @@ async def preview_inventory_data(
             'valid': valid_count,
             'skuNotFound': sku_not_found_count,
             'rows': rows,
+            'columnWarnings': column_warnings,
         }
 
     except HTTPException:

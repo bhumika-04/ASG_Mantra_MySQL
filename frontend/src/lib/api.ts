@@ -105,7 +105,6 @@ export const api = {
   },
 
   dashboard: {
-    getStats: () => apiFetch('/api/dashboard/stats'),
     getInventoryStats: () => apiFetch('/api/dashboard/inventory-stats'),
     getCharts: (params?: { start_date?: string; end_date?: string }) => {
       const q = params ? Object.entries(params).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join('&') : '';
@@ -219,11 +218,20 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
+    updateBlinkitPOHeader: (poId: number, data: Record<string, unknown>) =>
+      apiFetch(`/api/purchase-orders/blinkit-po/${poId}/update-header`, {
+        method: 'PATCH',
+        body: JSON.stringify(data),
+      }),
+    getAmazonStates: () => apiFetch('/api/purchase-orders/amazon/states'),
     getAmazon: (params?: any) => {
       const query = new URLSearchParams(params).toString();
       return apiFetch(`/api/purchase-orders/amazon${query ? `?${query}` : ''}`);
     },
-    getAmazonStats: () => apiFetch('/api/purchase-orders/amazon/stats'),
+    getAmazonStats: (params?: any) => {
+      const query = params ? new URLSearchParams(params).toString() : '';
+      return apiFetch(`/api/purchase-orders/amazon/stats${query ? `?${query}` : ''}`);
+    },
     getAmazonOverview: (params?: any) => {
       const query = new URLSearchParams(params).toString();
       return apiFetch(`/api/purchase-orders/amazon/overview${query ? `?${query}` : ''}`);
@@ -232,10 +240,21 @@ export const api = {
       const query = new URLSearchParams(params).toString();
       return apiFetch(`/api/purchase-orders/blinkit${query ? `?${query}` : ''}`);
     },
-    getBlinkitStats: () => apiFetch('/api/purchase-orders/blinkit/stats'),
+    getBlinkitStats: (params?: any) => {
+      const query = params ? new URLSearchParams(params).toString() : '';
+      return apiFetch(`/api/purchase-orders/blinkit/stats${query ? `?${query}` : ''}`);
+    },
     getBlinkitOverview: (params?: any) => {
       const query = new URLSearchParams(params).toString();
       return apiFetch(`/api/purchase-orders/blinkit/overview${query ? `?${query}` : ''}`);
+    },
+  },
+
+  // Amazon ASIN-level inventory
+  amazonInventory: {
+    getAll: (params?: { search?: string; report_date?: string; page?: number; page_size?: number }) => {
+      const query = new URLSearchParams(params as any).toString();
+      return apiFetch(`/api/upload/amazon-data/inventory${query ? `?${query}` : ''}`);
     },
   },
 
@@ -606,8 +625,11 @@ export const api = {
   // Notifications endpoints
   notifications: {
     getAll: () => apiFetch('/api/notifications'),
+    getStats: () => apiFetch('/api/notifications/stats'),
     markAsRead: (id: number) =>
       apiFetch(`/api/notifications/${id}/read`, { method: 'PUT' }),
+    markAllRead: () =>
+      apiFetch('/api/notifications/mark-all-read', { method: 'PUT' }),
   },
 };
 

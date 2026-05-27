@@ -91,12 +91,6 @@ export const navigationItems: NavItem[] = [
     roles: ROUTE_PERMISSIONS['/blinkit-sales'],
   },
   {
-    title: 'Blinkit Inventory',
-    href: '/blinkit-inventory',
-    icon: Store,
-    roles: ROUTE_PERMISSIONS['/blinkit-inventory'],
-  },
-  {
     title: 'Low Inventory Alerts',
     href: '/low-stock-alerts',
     icon: AlertTriangle,

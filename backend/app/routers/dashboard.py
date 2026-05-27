@@ -177,21 +177,25 @@ async def get_dashboard_charts(
         # Top 5 Amazon Products — filtered by date range if provided
         amz_top_rows = db.execute(text("""
             SELECT TOP 5
-                MAX(ProductTitle)            AS name,
-                SUM(OrderedRevenue)          AS revenue,
-                SUM(ISNULL(OrderedUnits, 0)) AS quantity
-            FROM AmazonSales
-            WHERE ReportDate IS NOT NULL AND SourceFile = 'VendorCSV'
-              AND (:start IS NULL OR ReportDate >= :start)
-              AND (:end IS NULL OR ReportDate <= :end)
-            GROUP BY ASIN
-            ORDER BY SUM(OrderedRevenue) DESC
+                s.ASIN,
+                MAX(s.ProductTitle)            AS name,
+                SUM(s.OrderedRevenue)          AS revenue,
+                SUM(ISNULL(s.OrderedUnits, 0)) AS quantity,
+                MAX(p.AsgSku)                  AS sku
+            FROM AmazonSales s
+            LEFT JOIN Products p ON p.AmazonId = s.ASIN
+            WHERE s.ReportDate IS NOT NULL AND s.SourceFile = 'VendorCSV'
+              AND (:start IS NULL OR s.ReportDate >= :start)
+              AND (:end IS NULL OR s.ReportDate <= :end)
+            GROUP BY s.ASIN
+            ORDER BY SUM(s.OrderedRevenue) DESC
         """), {"start": s_date, "end": e_date}).fetchall()
         amazon_product_data = [
             {
-                'name':     (row[0] or 'Unknown')[:25] + ('...' if row[0] and len(row[0]) > 25 else ''),
-                'revenue':  float(row[1] or 0),
-                'quantity': int(row[2] or 0),
+                'name':     row[1] or 'Unknown',
+                'revenue':  float(row[2] or 0),
+                'quantity': int(row[3] or 0),
+                'sku':      row[4] or row[0] or '',
             }
             for row in amz_top_rows
         ]
@@ -199,21 +203,25 @@ async def get_dashboard_charts(
         # Top 5 Blinkit Products — filtered by date range if provided
         blinkit_top_rows = db.execute(text("""
             SELECT TOP 5
-                MAX(ItemName) AS name,
-                SUM(MRP)      AS revenue,
-                SUM(QtySold)  AS quantity
-            FROM BlinkitSales
-            WHERE SaleDate IS NOT NULL
-              AND (:start IS NULL OR SaleDate >= :start)
-              AND (:end IS NULL OR SaleDate <= :end)
-            GROUP BY ItemId
-            ORDER BY SUM(MRP) DESC
+                s.ItemId,
+                MAX(s.ItemName) AS name,
+                SUM(s.MRP)      AS revenue,
+                SUM(s.QtySold)  AS quantity,
+                MAX(p.AsgSku)   AS sku
+            FROM BlinkitSales s
+            LEFT JOIN Products p ON p.BlinkitId = CAST(s.ItemId AS NVARCHAR(50))
+            WHERE s.SaleDate IS NOT NULL
+              AND (:start IS NULL OR s.SaleDate >= :start)
+              AND (:end IS NULL OR s.SaleDate <= :end)
+            GROUP BY s.ItemId
+            ORDER BY SUM(s.MRP) DESC
         """), {"start": s_date, "end": e_date}).fetchall()
         blinkit_product_data = [
             {
-                'name':     (row[0] or 'Unknown')[:25] + ('...' if row[0] and len(row[0]) > 25 else ''),
-                'revenue':  float(row[1] or 0),
-                'quantity': float(row[2] or 0),
+                'name':     row[1] or 'Unknown',
+                'revenue':  float(row[2] or 0),
+                'quantity': float(row[3] or 0),
+                'sku':      row[4] or '',
             }
             for row in blinkit_top_rows
         ]
@@ -225,8 +233,8 @@ async def get_dashboard_charts(
         )
 
     overall_product_data = sorted(
-        [{'name': p['name'], 'channel': 'Amazon',  'revenue': p['revenue'], 'quantity': p['quantity']} for p in amazon_product_data] +
-        [{'name': p['name'], 'channel': 'Blinkit', 'revenue': p['revenue'], 'quantity': p['quantity']} for p in blinkit_product_data],
+        [{'name': p['name'], 'sku': p['sku'], 'channel': 'Amazon',  'revenue': p['revenue'], 'quantity': p['quantity']} for p in amazon_product_data] +
+        [{'name': p['name'], 'sku': p['sku'], 'channel': 'Blinkit', 'revenue': p['revenue'], 'quantity': p['quantity']} for p in blinkit_product_data],
         key=lambda x: x['revenue'], reverse=True
     )[:10]
 

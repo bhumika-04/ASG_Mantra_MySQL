@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useRef } from 'react';
-import { useRouter } from 'next/navigation';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -21,6 +20,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
+import { fmtDate, fmtCurrency, fmtN } from '@/lib/format';
 
 interface UploadResult {
   success: boolean;
@@ -83,6 +83,7 @@ interface SemanticPreview {
   newProducts: NewProduct[];
   detectedDate: string | null; // null = date not found in CSV metadata
   duplicateDataWarning?: string | null; // Warning if similar data already exists
+  columnWarnings?: string[]; // Warnings about extra or missing columns
   poSummary?: {
     poNumber: string;
     shipToLocationCode: string;
@@ -97,7 +98,6 @@ interface SemanticPreview {
 }
 
 export default function AmazonUploadPage() {
-  const router = useRouter();
   const [isUploading, setIsUploading] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
@@ -140,6 +140,7 @@ export default function AmazonUploadPage() {
           newProducts: result.newProducts ?? [],
           detectedDate,
           duplicateDataWarning: result.duplicateDataWarning ?? null,
+          columnWarnings: result.columnWarnings ?? [],
           poSummary: result.poSummary,
           poItems: result.poItems,
           duplicatePos: result.duplicatePos ?? [],
@@ -182,7 +183,6 @@ export default function AmazonUploadPage() {
         if (result.data?.inventory_warnings?.length > 0) {
           setInventoryWarnings(result.data.inventory_warnings);
         }
-        router.refresh();
       }
       setUploadResult(result);
       const processed =
@@ -304,7 +304,6 @@ export default function AmazonUploadPage() {
           },
         });
         setPdfExtractData(null);
-        router.refresh();
       } else {
         toast.error(result.message || 'Failed to save PO');
       }
@@ -490,6 +489,21 @@ export default function AmazonUploadPage() {
                 </div>
               )}
 
+              {/* Column Warnings */}
+              {(semanticPreview.columnWarnings?.length ?? 0) > 0 && (
+                <div className="p-3 bg-orange-50 border border-orange-200 rounded-lg">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 text-orange-500 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <span className="text-sm font-semibold text-orange-800">Column warnings</span>
+                      {semanticPreview.columnWarnings!.map((w, i) => (
+                        <p key={i} className="text-xs text-orange-700 mt-1">{w}</p>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Duplicate Data Warning */}
               {semanticPreview.duplicateDataWarning && (
                 <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
@@ -598,7 +612,7 @@ export default function AmazonUploadPage() {
                               {po.status || '—'}
                             </span>
                           </td>
-                          <td className="px-3 py-2 text-xs">{po.orderedOnDate || '—'}</td>
+                          <td className="px-3 py-2 text-xs">{fmtDate(po.orderedOnDate)}</td>
                           <td className="px-3 py-2 text-xs">{po.paymentTerms || '—'}</td>
                         </tr>
                       ))}
@@ -656,13 +670,13 @@ export default function AmazonUploadPage() {
                               ) : '—'}
                             </td>
                             <td className="px-3 py-1.5">{item.windowType || '—'}</td>
-                            <td className="px-3 py-1.5">{item.expectedDate || '—'}</td>
+                            <td className="px-3 py-1.5">{fmtDate(item.expectedDate)}</td>
                             <td className="px-3 py-1.5 text-right font-semibold">{item.quantityRequested ?? '—'}</td>
                             <td className="px-3 py-1.5 text-right text-green-700">{item.acceptedQuantity ?? '—'}</td>
                             <td className="px-3 py-1.5 text-right text-blue-700">{item.quantityReceived ?? '—'}</td>
                             <td className="px-3 py-1.5 text-right text-orange-600">{item.quantityOutstanding ?? '—'}</td>
-                            <td className="px-3 py-1.5 text-right">{item.unitCost != null ? `₹${item.unitCost.toFixed(2)}` : '—'}</td>
-                            <td className="px-3 py-1.5 text-right font-medium">{item.totalCost != null ? `₹${item.totalCost.toFixed(2)}` : '—'}</td>
+                            <td className="px-3 py-1.5 text-right">{item.unitCost != null ? fmtCurrency(item.unitCost, 2) : '—'}</td>
+                            <td className="px-3 py-1.5 text-right font-medium">{item.totalCost != null ? fmtCurrency(item.totalCost, 2) : '—'}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -715,24 +729,24 @@ export default function AmazonUploadPage() {
                             <td className="p-2 text-xs max-w-[300px] truncate" title={row.productTitle}>{row.productTitle}</td>
                             {semanticPreview.uploadType === 'amazon/sales' && semanticPreview.salesFormat === 'RKExcel' && (
                               <>
-                                <td className="p-2 text-right text-xs">{row.orderedUnits != null ? row.orderedUnits.toFixed(2) : '—'}</td>
-                                <td className="p-2 text-right text-xs">{row.orderedRevenue ? `₹${row.orderedRevenue.toFixed(2)}` : '—'}</td>
-                                <td className="p-2 text-right text-xs">{row.shippedUnits ?? '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.orderedUnits != null ? fmtN(Math.round(row.orderedUnits)) : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.orderedRevenue ? fmtCurrency(row.orderedRevenue, 2) : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.shippedUnits != null ? fmtN(Math.round(row.shippedUnits)) : '—'}</td>
                               </>
                             )}
                             {semanticPreview.uploadType === 'amazon/sales' && semanticPreview.salesFormat !== 'RKExcel' && (
                               <>
-                                <td className="p-2 text-right text-xs">{row.orderedUnits ?? '—'}</td>
-                                <td className="p-2 text-right text-xs">{row.orderedRevenue ? `₹${row.orderedRevenue.toFixed(2)}` : '—'}</td>
-                                <td className="p-2 text-right text-xs">{row.shippedUnits ?? '—'}</td>
-                                <td className="p-2 text-right text-xs">{row.shippedRevenue ? `₹${row.shippedRevenue.toFixed(2)}` : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.orderedUnits != null ? fmtN(Math.round(row.orderedUnits)) : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.orderedRevenue ? fmtCurrency(row.orderedRevenue, 2) : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.shippedUnits != null ? fmtN(Math.round(row.shippedUnits)) : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.shippedRevenue ? fmtCurrency(row.shippedRevenue, 2) : '—'}</td>
                               </>
                             )}
                             {semanticPreview.uploadType === 'amazon/inventory' && (
                               <>
-                                <td className="p-2 text-right text-xs">{row.sellableQuantity ?? '—'}</td>
-                                <td className="p-2 text-right text-xs">{row.unfulfilledQuantity ?? '—'}</td>
-                                <td className="p-2 text-right text-xs">{row.reservedQuantity ?? '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.sellableQuantity != null ? fmtN(Math.round(row.sellableQuantity)) : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.unfulfilledQuantity != null ? fmtN(Math.round(row.unfulfilledQuantity)) : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.reservedQuantity != null ? fmtN(Math.round(row.reservedQuantity)) : '—'}</td>
                               </>
                             )}
                           </tr>

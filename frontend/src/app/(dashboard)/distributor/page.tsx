@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useState, useEffect } from 'react';
 import { useFilter, computeDateRange } from '@/contexts/FilterContext';
@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
+import { fmtDate, fmtN } from '@/lib/format';
 
 interface DistributorStockItem {
   id: number;
@@ -35,6 +36,7 @@ interface DistributorStockItem {
   mhQty: number | null;
   ktQty: number | null;
   wbQty: number | null;
+  hrQty: number | null;
 }
 
 interface PreviewRow {
@@ -45,6 +47,7 @@ interface PreviewRow {
   mhQty: number | null;
   ktQty: number | null;
   wbQty: number | null;
+  hrQty: number | null;
   reportDate: string;
 }
 
@@ -62,7 +65,7 @@ interface UploadResult {
 export default function DistributorPage() {
   const { filterMode, customStart, customEnd } = useFilter();
   const [items, setItems] = useState<DistributorStockItem[]>([]);
-  const [stats, setStats] = useState({ totalClosingQty: 0, totalDlQty: 0, totalMhQty: 0, totalKtQty: 0, totalWbQty: 0, totalSkus: 0 });
+  const [stats, setStats] = useState({ totalClosingQty: 0, totalDlQty: 0, totalMhQty: 0, totalKtQty: 0, totalWbQty: 0, totalHrQty: 0, totalSkus: 0 });
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -77,6 +80,7 @@ export default function DistributorPage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [reportDate, setReportDate] = useState('');
   const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null);
+  const [columnWarnings, setColumnWarnings] = useState<string[]>([]);
 
   const PAGE_SIZE = 50;
 
@@ -139,6 +143,15 @@ export default function DistributorPage() {
       align: 'right',
       cell: (row) => <span className="font-mono text-sm">{row.wbQty ?? '—'}</span>,
     },
+    {
+      id: 'hrQty',
+      header: 'HR',
+      accessorKey: 'hrQty',
+      sortable: true,
+      width: 80,
+      align: 'right',
+      cell: (row) => <span className="font-mono text-sm">{row.hrQty ?? '—'}</span>,
+    },
   ], 'distributor-stock');
 
   const fetchStock = async (p = 1, s = '') => {
@@ -153,7 +166,7 @@ export default function DistributorPage() {
       setItems(data.items || []);
       setTotal(data.total || 0);
       setTotalPages(data.total_pages || 1);
-      setStats(data.stats || { totalClosingQty: 0, totalDlQty: 0, totalMhQty: 0, totalKtQty: 0, totalWbQty: 0, totalSkus: 0 });
+      setStats(data.stats || { totalClosingQty: 0, totalDlQty: 0, totalMhQty: 0, totalKtQty: 0, totalWbQty: 0, totalHrQty: 0, totalSkus: 0 });
     } catch (error: any) {
       toast.error(error.message || 'Failed to load Eagle stock');
     } finally {
@@ -175,10 +188,10 @@ export default function DistributorPage() {
   }, [search]);
 
   const handleDownloadTemplate = () => {
-    const headers = ['SKU', 'ITEM', 'Total Stock', 'DL', 'MH', 'KT', 'WB'];
+    const headers = ['SKU', 'ITEM', 'Total Stock', 'DL', 'MH', 'KT', 'WB', 'HR'];
     const sample = [
-      ['ASG-OM-EPSOM-SALT-1KG', 'ORGANIX MANTRA EPSOM SALT', '3040', '60', '640', '1530', '810'],
-      ['ASG-OM-ROSEMARY-ESSENTIAL-OIL-15ML', 'ORGANIX MANTRA ROSEMARY ESSENTIAL OIL FOR HAIR', '642', '322', '', '320', ''],
+      ['ASG-OM-EPSOM-SALT-1KG', 'ORGANIX MANTRA EPSOM SALT', '3040', '60', '640', '1530', '810', ''],
+      ['ASG-OM-ROSEMARY-ESSENTIAL-OIL-15ML', 'ORGANIX MANTRA ROSEMARY ESSENTIAL OIL FOR HAIR', '642', '322', '', '320', '', '200'],
     ];
     const rows = [headers, ...sample].map(r => r.join(',')).join('\n');
     const blob = new Blob([rows], { type: 'text/csv' });
@@ -201,6 +214,7 @@ export default function DistributorPage() {
       const result: any = await api.distributorStock.preview(file, { channel: 'Blinkit' });
       setPreviewRows(result.rows || []);
       setDuplicateWarning(result.duplicateWarning || null);
+      setColumnWarnings(result.columnWarnings || []);
       // Pre-fill date picker with detected date from file
       if (result.detectedDate) {
         setReportDate(result.detectedDate);
@@ -250,19 +264,21 @@ export default function DistributorPage() {
     setReportDate('');
     setUploadResult(null);
     setDuplicateWarning(null);
+    setColumnWarnings([]);
   };
 
   return (
     <ProtectedRoute>
       <div className="p-6 space-y-6">
         {/* KPI Cards */}
-        <StatsGrid columns={6}>
-          <StatsCard title="Total SKUs" value={stats.totalSkus.toLocaleString()} icon={Package} description="Distinct products" variant="blue" />
-          <StatsCard title="Total Stock" value={stats.totalClosingQty.toLocaleString()} icon={Package} description="Closing qty across all regions" variant="green" />
-          <StatsCard title="DL" value={stats.totalDlQty.toLocaleString()} icon={Building2} description="Delhi stock" variant="orange" />
-          <StatsCard title="MH" value={stats.totalMhQty.toLocaleString()} icon={Building2} description="Maharashtra stock" variant="purple" />
-          <StatsCard title="KT" value={stats.totalKtQty.toLocaleString()} icon={Building2} description="Karnataka stock" variant="red" />
-          <StatsCard title="WB" value={stats.totalWbQty.toLocaleString()} icon={Building2} description="West Bengal stock" variant="yellow" />
+        <StatsGrid columns={7}>
+          <StatsCard title="Total SKUs" value={stats.totalSkus.toLocaleString('en-IN')} icon={Package} description="Distinct products" variant="blue" />
+          <StatsCard title="Total Stock" value={stats.totalClosingQty.toLocaleString('en-IN')} icon={Package} description="Closing qty across all regions" variant="green" />
+          <StatsCard title="DL" value={stats.totalDlQty.toLocaleString('en-IN')} icon={Building2} description="Delhi stock" variant="orange" />
+          <StatsCard title="MH" value={stats.totalMhQty.toLocaleString('en-IN')} icon={Building2} description="Maharashtra stock" variant="purple" />
+          <StatsCard title="KT" value={stats.totalKtQty.toLocaleString('en-IN')} icon={Building2} description="Karnataka stock" variant="red" />
+          <StatsCard title="WB" value={stats.totalWbQty.toLocaleString('en-IN')} icon={Building2} description="West Bengal stock" variant="yellow" />
+          <StatsCard title="HR" value={stats.totalHrQty.toLocaleString('en-IN')} icon={Building2} description="Haryana stock" variant="blue" />
         </StatsGrid>
 
         {/* Upload Result */}
@@ -320,7 +336,7 @@ export default function DistributorPage() {
                   description={isPreviewing ? 'Parsing file...' : 'Drop Eagle weekly stock file here'}
                 />
                 <p className="text-xs text-gray-400 mt-2">
-                  Columns: SKU, ITEM (item name), Total Stock, DL / MH / KT / WB (regional stock)
+                  Columns: SKU, ITEM (item name), Total Stock, DL / MH / KT / WB / HR (regional stock)
                 </p>
               </div>
             ) : (
@@ -337,6 +353,21 @@ export default function DistributorPage() {
                     <X className="h-4 w-4" />
                   </button>
                 </div>
+
+                {/* Column warnings */}
+                {columnWarnings.length > 0 && (
+                  <div className="px-4 py-2.5 bg-orange-50 border-b border-orange-200">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="h-4 w-4 text-orange-500 mt-0.5 flex-shrink-0" />
+                      <div>
+                        <p className="text-xs font-medium text-orange-800 mb-1">Column warnings:</p>
+                        {columnWarnings.map((w, i) => (
+                          <p key={i} className="text-xs text-orange-700">{w}</p>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Duplicate warning */}
                 {duplicateWarning && (
@@ -373,6 +404,7 @@ export default function DistributorPage() {
                         <th className="px-3 py-2 text-right font-medium text-blue-800">MH</th>
                         <th className="px-3 py-2 text-right font-medium text-blue-800">KT</th>
                         <th className="px-3 py-2 text-right font-medium text-blue-800">WB</th>
+                        <th className="px-3 py-2 text-right font-medium text-blue-800">HR</th>
                         <th className="px-3 py-2 text-right font-medium text-blue-800">Date</th>
                       </tr>
                     </thead>
@@ -386,7 +418,8 @@ export default function DistributorPage() {
                           <td className="px-3 py-1.5 text-right text-gray-600">{r.mhQty ?? '—'}</td>
                           <td className="px-3 py-1.5 text-right text-gray-600">{r.ktQty ?? '—'}</td>
                           <td className="px-3 py-1.5 text-right text-gray-600">{r.wbQty ?? '—'}</td>
-                          <td className="px-3 py-1.5 text-right text-gray-400">{reportDate || r.reportDate}</td>
+                          <td className="px-3 py-1.5 text-right text-gray-600">{r.hrQty ?? '—'}</td>
+                          <td className="px-3 py-1.5 text-right text-gray-400">{fmtDate(reportDate || r.reportDate)}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -459,7 +492,7 @@ export default function DistributorPage() {
                 {/* Pagination */}
                 <div className="flex items-center justify-between pt-2">
                   <p className="text-sm text-gray-500">
-                    {total.toLocaleString()} items
+                    {total.toLocaleString('en-IN')} items
                   </p>
                   <div className="flex items-center gap-2">
                     <Button

@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useRef } from 'react';
-import { useRouter } from 'next/navigation';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -24,6 +23,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
+import { fmtDate, fmtCurrency, fmtN } from '@/lib/format';
 
 interface UploadResult {
   success: boolean;
@@ -45,6 +45,7 @@ interface PdfExtractData {
   page_count: number;
   item_count: number;
   duplicate_warning?: string;
+  existing_po_id?: number;
 }
 
 interface PackingAlert {
@@ -115,11 +116,11 @@ interface SemanticPreview {
   detectedDate?: string | null;
   previewRows?: PreviewRow[];
   duplicateDataWarning?: string | null;
+  columnWarnings?: string[];
   duplicatePos?: { poNumber: string; uploadedOn: string }[];
 }
 
 export default function BlinkitUploadPage() {
-  const router = useRouter();
   const [isUploading, setIsUploading] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
@@ -128,6 +129,7 @@ export default function BlinkitUploadPage() {
   const [pdfExtractData, setPdfExtractData] = useState<PdfExtractData | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
+  const [isUpdatingHeader, setIsUpdatingHeader] = useState(false);
   const [reportDate, setReportDate] = useState('');
   const [packingAlerts, setPackingAlerts] = useState<PackingAlert[]>([]);
   const [inventoryWarnings, setInventoryWarnings] = useState<{ item_code: string; item_name: string; ordered_qty: number; packed_qty: number; shortfall: number }[]>([]);
@@ -156,6 +158,7 @@ export default function BlinkitUploadPage() {
         detectedDate: result.detectedDate,
         previewRows: result.previewRows ?? [],
         duplicateDataWarning: result.duplicateDataWarning,
+        columnWarnings: result.columnWarnings ?? [],
         duplicatePos: result.duplicatePos ?? [],
       });
       // Set report date from preview
@@ -189,7 +192,6 @@ export default function BlinkitUploadPage() {
         if (result.data?.inventory_warnings?.length > 0) {
           setInventoryWarnings(result.data.inventory_warnings);
         }
-        router.refresh();
       }
 
       setUploadResult(result);
@@ -293,7 +295,6 @@ export default function BlinkitUploadPage() {
       });
       setPdfExtractData(null);
       toast.success(result.message);
-      router.refresh();
 
       // Notify about auto-created products and warehouses
       if (result.data?.products_created?.length > 0) {
@@ -310,6 +311,20 @@ export default function BlinkitUploadPage() {
   };
 
   const handleCancelPdfPreview = () => setPdfExtractData(null);
+
+  const handleUpdatePOHeader = async () => {
+    if (!pdfExtractData?.existing_po_id || !pdfExtractData.header) return;
+    setIsUpdatingHeader(true);
+    try {
+      await api.purchaseOrders.updateBlinkitPOHeader(pdfExtractData.existing_po_id, pdfExtractData.header);
+      toast.success('PO header updated successfully');
+      setPdfExtractData(null);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to update PO header');
+    } finally {
+      setIsUpdatingHeader(false);
+    }
+  };
 
   const handleDownloadTemplate = (type: string) => {
     let headers: string[];
@@ -396,6 +411,21 @@ export default function BlinkitUploadPage() {
                 </div>
               )}
 
+              {/* Column Warnings */}
+              {(semanticPreview.columnWarnings?.length ?? 0) > 0 && (
+                <div className="p-3 bg-orange-50 border border-orange-200 rounded-lg">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 text-orange-500 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <span className="text-sm font-semibold text-orange-800">Column warnings</span>
+                      {semanticPreview.columnWarnings!.map((w, i) => (
+                        <p key={i} className="text-xs text-orange-700 mt-1">{w}</p>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Duplicate Warning */}
               {semanticPreview.duplicateDataWarning && (
                 <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
@@ -455,8 +485,8 @@ export default function BlinkitUploadPage() {
                                 <td className="p-2 text-xs">{row.manufacturerName || '—'}</td>
                                 <td className="p-2 text-xs">{row.cityName || '—'}</td>
                                 <td className="p-2 text-xs">{row.category || '—'}</td>
-                                <td className="p-2 text-xs text-right">{row.qtySold?.toFixed(2) || '—'}</td>
-                                <td className="p-2 text-xs text-right font-semibold">₹{row.mrp?.toFixed(2) || '—'}</td>
+                                <td className="p-2 text-xs text-right">{row.qtySold != null ? fmtN(Math.round(row.qtySold)) : '—'}</td>
+                                <td className="p-2 text-xs text-right font-semibold">{row.mrp != null ? fmtCurrency(row.mrp, 2) : '—'}</td>
                               </>
                             )}
                             {semanticPreview.uploadType === 'blinkit/inventory' && (
@@ -563,9 +593,9 @@ export default function BlinkitUploadPage() {
                           <tr key={i} className="border-t hover:bg-muted/20">
                             <td className="p-2 font-mono font-semibold">{po.poNumber}</td>
                             <td className="p-2 max-w-[180px] truncate text-muted-foreground">{po.shipToName || '—'}</td>
-                            <td className="p-2 text-muted-foreground">{po.poDate || '—'}</td>
+                            <td className="p-2 text-muted-foreground">{fmtDate(po.poDate)}</td>
                             <td className="p-2 text-muted-foreground">{po.paymentTerms || '—'}</td>
-                            <td className="p-2 text-muted-foreground">{po.expectedDelivery || '—'}</td>
+                            <td className="p-2 text-muted-foreground">{fmtDate(po.expectedDelivery)}</td>
                             <td className="p-2">
                               <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
                                 po.status === 'Delivered' ? 'bg-purple-100 text-purple-700' :
@@ -627,19 +657,19 @@ export default function BlinkitUploadPage() {
                             <td className="p-2 max-w-[180px] truncate" title={item.itemName ?? ''}>{item.itemName || '—'}</td>
                             <td className="p-2 font-mono">{item.hsnCode || '—'}</td>
                             <td className="p-2">{item.size || '—'}</td>
-                            <td className="p-2 text-right">₹{item.mrp?.toFixed(2) ?? '—'}</td>
+                            <td className="p-2 text-right">{item.mrp != null ? fmtCurrency(item.mrp, 2) : '—'}</td>
                             <td className="p-2 text-right font-semibold text-blue-700">{item.qty ?? '—'}</td>
                             <td className="p-2">{item.uom || '—'}</td>
-                            <td className="p-2 text-right">₹{item.unitBaseCost?.toFixed(2) ?? '—'}</td>
-                            <td className="p-2 text-right">{item.discount != null ? `₹${item.discount.toFixed(2)}` : '—'}</td>
-                            <td className="p-2 text-right font-semibold">{item.taxableValue != null ? `₹${item.taxableValue.toFixed(2)}` : '—'}</td>
+                            <td className="p-2 text-right">{item.unitBaseCost != null ? fmtCurrency(item.unitBaseCost, 2) : '—'}</td>
+                            <td className="p-2 text-right">{item.discount != null ? fmtCurrency(item.discount, 2) : '—'}</td>
+                            <td className="p-2 text-right font-semibold">{item.taxableValue != null ? fmtCurrency(item.taxableValue, 2) : '—'}</td>
                             <td className="p-2 text-right">{item.cgstRate != null ? `${item.cgstRate}%` : '—'}</td>
-                            <td className="p-2 text-right">{item.cgstAmt != null ? `₹${item.cgstAmt.toFixed(2)}` : '—'}</td>
+                            <td className="p-2 text-right">{item.cgstAmt != null ? fmtCurrency(item.cgstAmt, 2) : '—'}</td>
                             <td className="p-2 text-right">{item.sgstRate != null ? `${item.sgstRate}%` : '—'}</td>
-                            <td className="p-2 text-right">{item.sgstAmt != null ? `₹${item.sgstAmt.toFixed(2)}` : '—'}</td>
+                            <td className="p-2 text-right">{item.sgstAmt != null ? fmtCurrency(item.sgstAmt, 2) : '—'}</td>
                             <td className="p-2 text-right">{item.igstRate != null ? `${item.igstRate}%` : '—'}</td>
-                            <td className="p-2 text-right">{item.igstAmt != null ? `₹${item.igstAmt.toFixed(2)}` : '—'}</td>
-                            <td className="p-2 text-right font-semibold text-green-700">{item.totalAmount != null ? `₹${item.totalAmount.toFixed(2)}` : '—'}</td>
+                            <td className="p-2 text-right">{item.igstAmt != null ? fmtCurrency(item.igstAmt, 2) : '—'}</td>
+                            <td className="p-2 text-right font-semibold text-green-700">{item.totalAmount != null ? fmtCurrency(item.totalAmount, 2) : '—'}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -769,11 +799,16 @@ export default function BlinkitUploadPage() {
                     </CardHeader>
                     <CardContent className="space-y-6 pt-5">
                       {pdfExtractData.duplicate_warning && (
-                        <div className="p-3 bg-red-50 border border-red-400 rounded-lg flex items-start gap-2">
+                        <div className="p-3 bg-red-50 border border-red-400 rounded-lg flex items-start gap-3">
                           <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
-                          <div>
+                          <div className="flex-1 min-w-0">
                             <p className="font-semibold text-red-800 text-sm">Duplicate PO — Cannot Save</p>
                             <p className="text-sm text-red-700 mt-0.5">{pdfExtractData.duplicate_warning}</p>
+                            {pdfExtractData.existing_po_id && (
+                              <p className="text-xs text-red-600 mt-1.5">
+                                You can update the header fields (Ship To, Bill To, GSTIN, etc.) of the existing PO using the button below.
+                              </p>
+                            )}
                           </div>
                         </div>
                       )}
@@ -805,7 +840,7 @@ export default function BlinkitUploadPage() {
                         </div>
                         <div className="p-3 bg-orange-50 rounded-lg border border-orange-100">
                           <span className="text-orange-600 block text-xs font-medium">Expected Delivery</span>
-                          <span className="font-semibold text-orange-900">{pdfExtractData.header?.expected_delivery_date || '—'}</span>
+                          <span className="font-semibold text-orange-900">{fmtDate(pdfExtractData.header?.expected_delivery_date)}</span>
                         </div>
                       </div>
 
@@ -815,7 +850,7 @@ export default function BlinkitUploadPage() {
                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                           {/* PO Info — blue */}
                           {([
-                            ['PO Date', pdfExtractData.header?.po_date],
+                            ['PO Date', fmtDate(pdfExtractData.header?.po_date)],
                             ['Payment Terms', pdfExtractData.header?.payment_terms],
                           ] as [string, any][]).map(([label, value]) => (
                             <div key={label} className="bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
@@ -867,11 +902,11 @@ export default function BlinkitUploadPage() {
                                   <td className="px-3 py-2 text-gray-500">{item.sno ?? '-'}</td>
                                   <td className="px-3 py-2 font-mono text-blue-700">{item.item_code ?? '-'}</td>
                                   <td className="px-3 py-2 max-w-[200px] truncate" title={item.item_name}>{item.item_name ?? '-'}</td>
-                                  <td className="px-3 py-2">{item.mrp ?? '-'}</td>
-                                  <td className="px-3 py-2 font-semibold text-green-700">{item.qty ?? '-'}</td>
-                                  <td className="px-3 py-2">{item.unit_base_cost ?? '-'}</td>
-                                  <td className="px-3 py-2">{item.taxable_value?.toLocaleString('en-IN') ?? '-'}</td>
-                                  <td className="px-3 py-2 font-semibold text-green-800">{item.total_amount?.toLocaleString('en-IN') ?? '-'}</td>
+                                  <td className="px-3 py-2">{item.mrp != null ? fmtCurrency(item.mrp, 2) : '-'}</td>
+                                  <td className="px-3 py-2 font-semibold text-green-700">{item.qty != null ? fmtN(item.qty) : '-'}</td>
+                                  <td className="px-3 py-2">{item.unit_base_cost != null ? fmtCurrency(item.unit_base_cost, 2) : '-'}</td>
+                                  <td className="px-3 py-2">{item.taxable_value != null ? fmtCurrency(item.taxable_value, 2) : '-'}</td>
+                                  <td className="px-3 py-2 font-semibold text-green-800">{item.total_amount != null ? fmtCurrency(item.total_amount, 2) : '-'}</td>
                                 </tr>
                               ))}
                             </tbody>
@@ -884,10 +919,22 @@ export default function BlinkitUploadPage() {
                           {pdfExtractData.duplicate_warning ? 'This PO already exists — saving blocked.' : `${pdfExtractData.item_count} item(s) will be saved`}
                         </p>
                         <div className="flex gap-2">
-                          <Button variant="outline" onClick={handleCancelPdfPreview} disabled={isConfirming}>Cancel</Button>
-                          <Button className="bg-green-600 hover:bg-green-700" onClick={handleConfirmPdfUpload} disabled={isConfirming || !!pdfExtractData.duplicate_warning}>
-                            {isConfirming ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving...</> : <><CheckCircle2 className="h-4 w-4 mr-2" />Confirm &amp; Save to Database</>}
-                          </Button>
+                          <Button variant="outline" onClick={handleCancelPdfPreview} disabled={isConfirming || isUpdatingHeader}>Cancel</Button>
+                          {pdfExtractData.duplicate_warning && pdfExtractData.existing_po_id ? (
+                            <Button
+                              className="bg-blue-600 hover:bg-blue-700"
+                              onClick={handleUpdatePOHeader}
+                              disabled={isUpdatingHeader}
+                            >
+                              {isUpdatingHeader
+                                ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Updating...</>
+                                : <><CheckCircle2 className="h-4 w-4 mr-2" />Update PO Header</>}
+                            </Button>
+                          ) : (
+                            <Button className="bg-green-600 hover:bg-green-700" onClick={handleConfirmPdfUpload} disabled={isConfirming}>
+                              {isConfirming ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving...</> : <><CheckCircle2 className="h-4 w-4 mr-2" />Confirm &amp; Save to Database</>}
+                            </Button>
+                          )}
                         </div>
                       </div>
                     </CardContent>

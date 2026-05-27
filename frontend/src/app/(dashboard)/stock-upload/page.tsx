@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useState, useEffect, useRef } from 'react';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api, { API_BASE_URL } from '@/lib/api';
+import { fmtN } from '@/lib/format';
 
 interface Product {
   id: number;
@@ -61,6 +62,7 @@ interface PreviewResult {
   valid: number;
   skuNotFound: number;
   rows: PreviewRow[];
+  columnWarnings?: string[];
 }
 
 interface UploadResult {
@@ -124,7 +126,7 @@ export default function InventoryUploadPage() {
       try {
         const token = localStorage.getItem('token');
         const [productsData, warehousesData, inventoryData] = await Promise.all([
-          api.products.getAll(),
+          api.products.getAll({ page_size: 200 }),
           fetch(`${API_BASE_URL}/api/distributors/asg-warehouses?active_only=true`, {
             headers: { 'Authorization': `Bearer ${token}` }
           }).then(r => r.json()),
@@ -491,6 +493,21 @@ export default function InventoryUploadPage() {
                     {/* Step 2: Preview table */}
                     {previewResult && (
                       <div className="space-y-4">
+                        {/* Column warnings */}
+                        {(previewResult.columnWarnings?.length ?? 0) > 0 && (
+                          <div className="p-3 bg-orange-50 border border-orange-200 rounded-lg">
+                            <div className="flex items-start gap-2">
+                              <AlertCircle className="h-4 w-4 text-orange-500 flex-shrink-0 mt-0.5" />
+                              <div>
+                                <span className="text-sm font-semibold text-orange-800">Column warnings</span>
+                                {previewResult.columnWarnings!.map((w, i) => (
+                                  <p key={i} className="text-xs text-orange-700 mt-1">{w}</p>
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
                         {/* Summary bar */}
                         <div className="flex items-center justify-between p-3 bg-muted/40 rounded-lg">
                           <div className="flex items-center gap-4 text-sm">
@@ -574,13 +591,13 @@ export default function InventoryUploadPage() {
                                     )}
                                   </td>
                                   <td className="p-2 text-right text-gray-400 font-mono text-xs">
-                                    {row.currentPackedQty !== null ? row.currentPackedQty : '—'}
+                                    {row.currentPackedQty !== null ? fmtN(row.currentPackedQty) : '—'}
                                   </td>
                                   <td className="p-2 text-right text-gray-400 font-mono text-xs">
-                                    {row.currentUnpackedQty !== null ? row.currentUnpackedQty : '—'}
+                                    {row.currentUnpackedQty !== null ? fmtN(row.currentUnpackedQty) : '—'}
                                   </td>
-                                  <td className="p-2 text-right text-emerald-700 font-medium">{row.packedQty}</td>
-                                  <td className="p-2 text-right text-amber-700 font-medium">{row.unpackedQty}</td>
+                                  <td className="p-2 text-right text-emerald-700 font-medium">{fmtN(row.packedQty)}</td>
+                                  <td className="p-2 text-right text-amber-700 font-medium">{fmtN(row.unpackedQty)}</td>
                                   <td className="p-2 whitespace-nowrap">
                                     {row.warehouse ? (
                                       row.warehouseFound ? (
@@ -693,16 +710,16 @@ export default function InventoryUploadPage() {
                               <Package className="h-4 w-4 text-muted-foreground flex-shrink-0" />
                               <span className="text-muted-foreground text-xs font-medium">Current Stock:</span>
                               <span className="flex items-center gap-1 text-xs">
-                                <span className="font-semibold text-emerald-700">{selectedProductStock.packedQty.toLocaleString()}</span>
+                                <span className="font-semibold text-emerald-700">{selectedProductStock.packedQty.toLocaleString('en-IN')}</span>
                                 <span className="text-muted-foreground">packed</span>
                               </span>
                               <span className="text-muted-foreground">·</span>
                               <span className="flex items-center gap-1 text-xs">
-                                <span className="font-semibold text-amber-700">{selectedProductStock.unpackedQty.toLocaleString()}</span>
+                                <span className="font-semibold text-amber-700">{selectedProductStock.unpackedQty.toLocaleString('en-IN')}</span>
                                 <span className="text-muted-foreground">unpacked</span>
                               </span>
                               <span className="ml-auto text-xs text-muted-foreground font-medium">
-                                Total: {(selectedProductStock.packedQty + selectedProductStock.unpackedQty).toLocaleString()}
+                                Total: {(selectedProductStock.packedQty + selectedProductStock.unpackedQty).toLocaleString('en-IN')}
                               </span>
                             </div>
                           )}

@@ -161,6 +161,34 @@ async def mark_all_notifications_as_read(
         raise HTTPException(status_code=500, detail=f"Failed to update notifications: {str(e)}")
 
 
+@router.delete("/clear-all")
+async def clear_all_notifications(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete all read notifications for the current user.
+    """
+    user_id = str(current_user.Id)
+
+    try:
+        deleted_count = db.query(Notification).filter(
+            Notification.UserId == user_id,
+            Notification.IsRead == True
+        ).delete()
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": f"Deleted {deleted_count} read notifications",
+            "deletedCount": deleted_count
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete notifications: {str(e)}")
+
+
 @router.delete("/{notification_id}")
 async def delete_notification(
     notification_id: int,
@@ -189,34 +217,6 @@ async def delete_notification(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to delete notification: {str(e)}")
-
-
-@router.delete("/clear-all")
-async def clear_all_notifications(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Delete all read notifications for the current user.
-    """
-    user_id = str(current_user.Id)
-
-    try:
-        deleted_count = db.query(Notification).filter(
-            Notification.UserId == user_id,
-            Notification.IsRead == True
-        ).delete()
-
-        db.commit()
-
-        return {
-            "success": True,
-            "message": f"Deleted {deleted_count} read notifications",
-            "deletedCount": deleted_count
-        }
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to delete notifications: {str(e)}")
 
 
 @router.get("/stats")

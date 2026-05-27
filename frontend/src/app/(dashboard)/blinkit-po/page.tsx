@@ -1,7 +1,8 @@
-'use client';
+﻿'use client';
 
 import { useState, useEffect, useMemo, useCallback, useRef, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
+import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { FilterBar } from '@/components/ui/filter-bar';
 import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
@@ -37,6 +38,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import api from '@/lib/api';
+import { fmtDate } from '@/lib/format';
 
 // KPI config keyed by DB status name
 const KPI_CONFIG: Record<string, { icon: React.ReactNode; color: string; bg: string; desc: string }> = {
@@ -84,6 +86,7 @@ interface POItem {
 
 function BlinkitPOPageContent() {
   const searchParams = useSearchParams();
+  const { filterMode, customStart, customEnd } = useFilter();
   const [search, setSearch] = useState(searchParams.get('search') || '');
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
   const [poData, setPoData] = useState<POItem[]>([]);
@@ -152,6 +155,11 @@ function BlinkitPOPageContent() {
     try {
       await api.purchaseOrders.updateBlinkitItemStatus(actionRow.id, { status: dbStatus });
       setPoData(prev => prev.map(p => p.id === actionRow.id ? { ...p, status: statusInput } : p));
+      // Refresh KPI stats with current date filter
+      const p: Record<string, string> = {};
+      if (effectiveDateFrom) p.start_date = effectiveDateFrom;
+      if (effectiveDateTo) p.end_date = effectiveDateTo;
+      (api.purchaseOrders as any).getBlinkitStats(Object.keys(p).length ? p : undefined).then((s: any) => setStatsData(s)).catch(() => {});
       toast.success(`Status updated to ${statusInput}`);
       closeDialog();
     } catch {
@@ -160,6 +168,14 @@ function BlinkitPOPageContent() {
       setIsSaving(false);
     }
   };
+
+  const { effectiveDateFrom, effectiveDateTo } = useMemo(() => {
+    if (filterMode !== 'all') {
+      const { start_date, end_date } = computeDateRange(filterMode as FilterMode, customStart, customEnd);
+      return { effectiveDateFrom: start_date || '', effectiveDateTo: end_date || '' };
+    }
+    return { effectiveDateFrom: filters.dateFrom, effectiveDateTo: filters.dateTo };
+  }, [filterMode, customStart, customEnd, filters.dateFrom, filters.dateTo]);
 
   const fetchBlinkitPOs = useCallback(async (p: number, statusFilter: string, searchQuery: string, dateFrom: string, dateTo: string) => {
     try {
@@ -174,7 +190,7 @@ function BlinkitPOPageContent() {
       const transformedPOs = (response.items || []).map((po: any) => ({
         id: po.id,
         po_number: po.po_number,
-        po_date: po.order_date ? new Date(po.order_date).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' }) : '-',
+        po_date: po.order_date ? fmtDate(po.order_date) : '-',
         orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
         blinkitSku: po.blinkit_id || po.blinkitId || '',
         product_name: po.product_name || po.productName || '',
@@ -187,7 +203,7 @@ function BlinkitPOPageContent() {
         city: po.ship_to_city || '—',
         state: po.ship_to_state || '—',
         shipTo: po.ship_to_name || '—',
-        delivery: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-US', { day: 'numeric', month: 'short' }) : '-',
+        delivery: po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : '-',
         status: po.status || 'Created',
       }));
       setPoData(transformedPOs);
@@ -200,31 +216,36 @@ function BlinkitPOPageContent() {
     }
   }, []);
 
-  // Fetch unfiltered stats once for KPI cards
+  // Fetch date-filtered stats for KPI cards — re-runs when global filter changes
   useEffect(() => {
-    (api.purchaseOrders as any).getBlinkitStats().then((s: any) => setStatsData(s)).catch(() => {});
-  }, []);
+    const params: Record<string, string> = {};
+    if (effectiveDateFrom) params.start_date = effectiveDateFrom;
+    if (effectiveDateTo) params.end_date = effectiveDateTo;
+    (api.purchaseOrders as any).getBlinkitStats(Object.keys(params).length ? params : undefined)
+      .then((s: any) => setStatsData(s)).catch(() => {});
+  }, [effectiveDateFrom, effectiveDateTo]);
 
   // Initial load
   useEffect(() => {
-    fetchBlinkitPOs(1, filters.status, search, filters.dateFrom, filters.dateTo);
+    fetchBlinkitPOs(1, filters.status, search, effectiveDateFrom, effectiveDateTo);
   }, [fetchBlinkitPOs]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Re-fetch when filters change — reset to page 1
-  const prevFiltersRef = useRef({ status: filters.status, search, dateFrom: filters.dateFrom, dateTo: filters.dateTo });
+  // Re-fetch when filters or global date filter change — reset to page 1
+  const prevFiltersRef = useRef({ status: filters.status, state: filters.state, search, dateFrom: effectiveDateFrom, dateTo: effectiveDateTo });
   useEffect(() => {
     const prev = prevFiltersRef.current;
     const changed =
       prev.status !== filters.status ||
+      prev.state !== filters.state ||
       prev.search !== search ||
-      prev.dateFrom !== filters.dateFrom ||
-      prev.dateTo !== filters.dateTo;
+      prev.dateFrom !== effectiveDateFrom ||
+      prev.dateTo !== effectiveDateTo;
     if (changed) {
-      prevFiltersRef.current = { status: filters.status, search, dateFrom: filters.dateFrom, dateTo: filters.dateTo };
+      prevFiltersRef.current = { status: filters.status, state: filters.state, search, dateFrom: effectiveDateFrom, dateTo: effectiveDateTo };
       setPage(1);
-      fetchBlinkitPOs(1, filters.status, search, filters.dateFrom, filters.dateTo);
+      fetchBlinkitPOs(1, filters.status, search, effectiveDateFrom, effectiveDateTo);
     }
-  }, [filters.status, search, filters.dateFrom, filters.dateTo, fetchBlinkitPOs]);
+  }, [filters.status, filters.state, search, effectiveDateFrom, effectiveDateTo, fetchBlinkitPOs]);
 
   const gridColumns: GridColumn<POItem>[] = [
     {
@@ -279,7 +300,7 @@ function BlinkitPOPageContent() {
       width: 110,
       minWidth: 90,
       align: 'right',
-      cell: (row) => <span className="font-medium">{row.ordered_qty.toLocaleString()}</span>,
+      cell: (row) => <span className="font-medium">{row.ordered_qty.toLocaleString('en-IN')}</span>,
     },
     {
       id: 'acceptedQty',
@@ -292,7 +313,7 @@ function BlinkitPOPageContent() {
       cell: (row) => (
         row.accepted_qty != null ? (
           <span className={`font-medium ${row.accepted_qty < row.ordered_qty ? 'text-amber-600' : 'text-emerald-600'}`}>
-            {row.accepted_qty.toLocaleString()}
+            {row.accepted_qty.toLocaleString('en-IN')}
           </span>
         ) : (
           <span className="text-muted-foreground text-xs">—</span>
@@ -322,7 +343,7 @@ function BlinkitPOPageContent() {
       align: 'right',
       cell: (row) => (
         <span className={row.pending_qty > 0 ? 'font-medium text-amber-600' : 'text-muted-foreground'}>
-          {row.pending_qty.toLocaleString()}
+          {row.pending_qty.toLocaleString('en-IN')}
         </span>
       ),
     },
@@ -441,7 +462,6 @@ function BlinkitPOPageContent() {
     { label: 'Cancelled',  value: 'Cancelled' },
   ];
 
-  // Search, status, and date are server-side. State is client-side (derived from address text).
   const filteredPoData = useMemo(() => {
     if (filters.state !== 'all') {
       return poData.filter((po) => po.state === filters.state);
@@ -497,7 +517,7 @@ function BlinkitPOPageContent() {
             <div>
               <p className="text-xs text-muted-foreground">Total POs</p>
               <p className="text-xl font-bold">{totalPOs}</p>
-              <p className="text-xs text-muted-foreground">{totalUnits.toLocaleString()} units</p>
+              <p className="text-xs text-muted-foreground">{totalUnits.toLocaleString('en-IN')} units</p>
             </div>
           </div>
           {kpiCards.map(({ label, count, status }) => {
@@ -538,7 +558,7 @@ function BlinkitPOPageContent() {
               values={filters}
               onChange={(key, value) => setFilters(prev => ({ ...prev, [key]: value }))}
               onClear={() => { setFilters(DEFAULT_FILTER_VALUES); setSearch(''); }}
-              showDateRange
+              showDateRange={filterMode === 'all'}
               showChannel={false}
               showStatus
               statusOptions={poStatusOptions}
@@ -592,13 +612,13 @@ function BlinkitPOPageContent() {
           <>
             <DataGrid data={filteredPoData} gridState={gridState} />
             <div className="flex items-center justify-between pt-1">
-              <p className="text-sm text-muted-foreground">{total.toLocaleString()} line items</p>
+              <p className="text-sm text-muted-foreground">{total.toLocaleString('en-IN')} line items</p>
               <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" onClick={() => { const p = Math.max(1, page - 1); setPage(p); fetchBlinkitPOs(p, filters.status, search, filters.dateFrom, filters.dateTo); }} disabled={page === 1 || isLoading}>
+                <Button variant="outline" size="sm" onClick={() => { const p = Math.max(1, page - 1); setPage(p); fetchBlinkitPOs(p, filters.status, search, effectiveDateFrom, effectiveDateTo); }} disabled={page === 1 || isLoading}>
                   Previous
                 </Button>
                 <span className="text-sm text-muted-foreground">Page {page} of {totalPages}</span>
-                <Button variant="outline" size="sm" onClick={() => { const p = Math.min(totalPages, page + 1); setPage(p); fetchBlinkitPOs(p, filters.status, search, filters.dateFrom, filters.dateTo); }} disabled={page === totalPages || isLoading}>
+                <Button variant="outline" size="sm" onClick={() => { const p = Math.min(totalPages, page + 1); setPage(p); fetchBlinkitPOs(p, filters.status, search, effectiveDateFrom, effectiveDateTo); }} disabled={page === totalPages || isLoading}>
                   Next
                 </Button>
               </div>

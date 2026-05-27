@@ -245,8 +245,8 @@ def _parse_date(val) -> date:
     if pd.isna(val) or str(val).strip() in ('', 'nan'):
         return None
     s = str(val).strip()
-    for fmt in ('%m/%d/%Y', '%m/%d/%y', '%d/%m/%Y', '%d/%m/%y',
-                '%Y-%m-%d', '%d-%m-%Y', '%d.%m.%Y', '%d.%m.%y'):
+    for fmt in ('%d/%m/%Y', '%d/%m/%y', '%d-%m-%Y', '%d-%m-%y',
+                '%d.%m.%Y', '%d.%m.%y', '%Y-%m-%d', '%m/%d/%Y', '%m/%d/%y'):
         try:
             return datetime.strptime(s.split(' ')[0], fmt).date()
         except ValueError:
@@ -453,6 +453,14 @@ async def preview_blinkit_sales(
                 col_map[col] = 'qty_sold'
             elif cl == 'mrp':
                 col_map[col] = 'mrp'
+            elif cl in ('date', 'sale_date', 'saledate'):
+                col_map[col] = 'date'
+        from app.routers.uploads import check_column_warnings
+        column_warnings = check_column_warnings(
+            list(df.columns), col_map,
+            required_targets=['item_id', 'item_name', 'qty_sold'],
+            optional_targets=['city_name', 'mrp'],
+        )
         df = df.rename(columns=col_map)
 
         seen_ids: set = set()
@@ -502,7 +510,7 @@ async def preview_blinkit_sales(
                 BlinkitSalesData.SaleDate == detected_date
             ).scalar()
             if existing_count > 0:
-                duplicate_warning = f"Found {existing_count} existing sales records for {detected_date.strftime('%Y-%m-%d')}. This data may already be uploaded."
+                duplicate_warning = f"Found {existing_count} existing sales records for {detected_date.strftime('%d-%m-%Y')}. This data may already be uploaded."
 
         return {
             'success': True,
@@ -513,6 +521,7 @@ async def preview_blinkit_sales(
             'detectedDate': detected_date.isoformat() if detected_date else None,
             'previewRows': preview_rows,
             'duplicateDataWarning': duplicate_warning,
+            'columnWarnings': column_warnings,
         }
     except HTTPException:
         raise
@@ -726,6 +735,12 @@ async def preview_blinkit_inventory(
                 col_map[col] = 'facility_name'
             elif cl in ('backend_facility_id', 'facility_id'):
                 col_map[col] = 'facility_id'
+        from app.routers.uploads import check_column_warnings
+        column_warnings = check_column_warnings(
+            list(df.columns), col_map,
+            required_targets=['item_id', 'item_name'],
+            optional_targets=['backend_inv_qty', 'frontend_inv_qty', 'facility_name'],
+        )
         df = df.rename(columns=col_map)
 
         seen_item_ids: set = set()
@@ -793,7 +808,7 @@ async def preview_blinkit_inventory(
                 BlinkitInventoryData.ReportDate == detected_date
             ).scalar()
             if existing_count > 0:
-                duplicate_warning = f"Found {existing_count} existing inventory records for {detected_date.strftime('%Y-%m-%d')}. This data may already be uploaded."
+                duplicate_warning = f"Found {existing_count} existing inventory records for {detected_date.strftime('%d-%m-%Y')}. This data may already be uploaded."
 
         return {
             'success': True,
@@ -804,6 +819,7 @@ async def preview_blinkit_inventory(
             'detectedDate': detected_date.isoformat() if detected_date else None,
             'previewRows': preview_rows,
             'duplicateDataWarning': duplicate_warning,
+            'columnWarnings': column_warnings,
         }
     except HTTPException:
         raise
@@ -1073,7 +1089,7 @@ async def preview_blinkit_po(
             if existing:
                 duplicate_pos.append({
                     'poNumber': po['poNumber'],
-                    'uploadedOn': existing.CreatedAt.strftime('%d %b %Y') if existing.CreatedAt else 'unknown date',
+                    'uploadedOn': existing.CreatedAt.strftime('%d-%m-%Y') if existing.CreatedAt else 'unknown date',
                 })
 
         return {
@@ -1334,7 +1350,10 @@ async def extract_blinkit_po_pdf(
     if len(contents) == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    result = extract_po_from_pdf(contents)
+    try:
+        result = extract_po_from_pdf(contents)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF parsing error: {str(e)}")
 
     if not result.success:
         raise HTTPException(
@@ -1342,15 +1361,22 @@ async def extract_blinkit_po_pdf(
             detail=f"Failed to parse PDF: {'; '.join(result.errors)}"
         )
 
-    data = result.to_dict()
+    try:
+        data = result.to_dict()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to serialize result: {str(e)}")
 
     # Check if this PO already exists in the database
-    po_number = (data.get('header') or {}).get('po_number', '').strip()
+    po_number = ((data.get('header') or {}).get('po_number') or '').strip()
     if po_number:
-        existing = db.query(BlinkitPOData).filter(BlinkitPOData.PONumber == po_number).first()
-        if existing:
-            uploaded_on = existing.CreatedAt.strftime('%d %b %Y') if existing.CreatedAt else 'unknown date'
-            data['duplicate_warning'] = f"PO {po_number} already exists in the database (uploaded {uploaded_on}). Saving again will be blocked."
+        try:
+            existing = db.query(BlinkitPOData).filter(BlinkitPOData.PONumber == po_number).first()
+            if existing:
+                uploaded_on = existing.CreatedAt.strftime('%d-%m-%Y') if existing.CreatedAt else 'unknown date'
+                data['duplicate_warning'] = f"PO {po_number} already exists in the database (uploaded {uploaded_on}). Saving again will be blocked."
+                data['existing_po_id'] = existing.Id
+        except Exception as e:
+            data['duplicate_check_error'] = str(e)
 
     return data
 
@@ -1590,7 +1616,9 @@ async def get_blinkit_sales_analytics(
                 ItemId,
                 MAX(ItemName)   AS item_name,
                 SUM(QtySold)    AS total_qty,
-                SUM(MRP)        AS total_revenue
+                SUM(MRP)        AS total_revenue,
+                MIN(SaleDate)   AS first_sale,
+                MAX(SaleDate)   AS last_sale
             FROM BlinkitSales
             WHERE SaleDate >= :start_dt AND SaleDate <= :end_dt
             GROUP BY ItemId
@@ -1603,6 +1631,8 @@ async def get_blinkit_sales_analytics(
                 "item_name":     row[1] or str(row[0]),
                 "total_qty":     float(row[2] or 0),
                 "total_revenue": float(row[3] or 0),
+                "first_sale":    row[4].strftime('%d-%m-%Y') if row[4] else None,
+                "last_sale":     row[5].strftime('%d-%m-%Y') if row[5] else None,
             }
             for row in top_rows
         ]
@@ -1792,6 +1822,7 @@ async def get_distributor_stock(
         'mh': DistributorStockData.MH_Qty,
         'kt': DistributorStockData.KT_Qty,
         'wb': DistributorStockData.WB_Qty,
+        'hr': DistributorStockData.HR_Qty,
     }
     if region and region in region_map:
         query = query.filter(region_map[region] > 0)
@@ -1804,6 +1835,7 @@ async def get_distributor_stock(
         sqlfunc.sum(DistributorStockData.MH_Qty).label('total_mh'),
         sqlfunc.sum(DistributorStockData.KT_Qty).label('total_kt'),
         sqlfunc.sum(DistributorStockData.WB_Qty).label('total_wb'),
+        sqlfunc.sum(DistributorStockData.HR_Qty).label('total_hr'),
         sqlfunc.count(sqlfunc.distinct(DistributorStockData.ItemName)).label('total_skus'),
     ).one()
 
@@ -1826,6 +1858,7 @@ async def get_distributor_stock(
             "totalMhQty": int(stats_row.total_mh or 0),
             "totalKtQty": int(stats_row.total_kt or 0),
             "totalWbQty": int(stats_row.total_wb or 0),
+            "totalHrQty": int(stats_row.total_hr or 0),
             "totalSkus": int(stats_row.total_skus or 0),
         },
         "filters": {
@@ -1888,11 +1921,19 @@ async def preview_distributor_stock(
             target = 'kt_qty'
         elif cl == 'wb':
             target = 'wb_qty'
+        elif cl in ('hr', 'har', 'haryana'):
+            target = 'hr_qty'
         if target:
             if target in assigned_targets:
                 del col_map[assigned_targets[target]]
             col_map[col] = target
             assigned_targets[target] = col
+    from app.routers.uploads import check_column_warnings
+    column_warnings = check_column_warnings(
+        list(df.columns), col_map,
+        required_targets=['item_name', 'closing_qty'],
+        optional_targets=['dl_qty', 'mh_qty', 'kt_qty', 'wb_qty', 'hr_qty'],
+    )
     df = df.rename(columns=col_map)
 
     # Override date if provided
@@ -1921,6 +1962,7 @@ async def preview_distributor_stock(
             "mhQty": safe_int(row.get('mh_qty')),
             "ktQty": safe_int(row.get('kt_qty')),
             "wbQty": safe_int(row.get('wb_qty')),
+            "hrQty": safe_int(row.get('hr_qty')),
             "reportDate": rd.isoformat(),
         })
 
@@ -1939,6 +1981,7 @@ async def preview_distributor_stock(
         "detectedDate": detected_date,
         "totalRows": len(rows),
         "duplicateWarning": duplicate_warning,
+        "columnWarnings": column_warnings,
     }
 
 
@@ -2015,6 +2058,8 @@ async def upload_distributor_stock(
             target = 'kt_qty'
         elif cl == 'wb':
             target = 'wb_qty'
+        elif cl in ('hr', 'har', 'haryana'):
+            target = 'hr_qty'
         if target:
             # If a previous column already mapped to this target, drop its mapping first
             if target in assigned_targets:
@@ -2053,6 +2098,7 @@ async def upload_distributor_stock(
             mh_qty = safe_int(row.get('mh_qty'))
             kt_qty = safe_int(row.get('kt_qty'))
             wb_qty = safe_int(row.get('wb_qty'))
+            hr_qty = safe_int(row.get('hr_qty'))
 
             # Upsert: update quantities if row already exists (DistributorId + ReportDate + ItemName)
             existing = db.query(DistributorStockData).filter(
@@ -2069,6 +2115,7 @@ async def upload_distributor_stock(
                 existing.MH_Qty = mh_qty
                 existing.KT_Qty = kt_qty
                 existing.WB_Qty = wb_qty
+                existing.HR_Qty = hr_qty
             else:
                 record = DistributorStockData(
                     ReportDate=row_date,
@@ -2082,6 +2129,7 @@ async def upload_distributor_stock(
                     MH_Qty=mh_qty,
                     KT_Qty=kt_qty,
                     WB_Qty=wb_qty,
+                    HR_Qty=hr_qty,
                 )
                 db.add(record)
             rows_processed += 1

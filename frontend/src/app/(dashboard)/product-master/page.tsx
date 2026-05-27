@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import api from '@/lib/api';
 import { toast } from 'sonner';
+import { fmtCurrency } from '@/lib/format';
 
 interface PreviewRow {
   rowNumber: number;
@@ -495,7 +496,7 @@ export default function ProductMasterPage() {
                                   <td className="p-2 text-muted-foreground">{row.brand || '—'}</td>
                                   <td className="p-2 text-muted-foreground">{row.category || '—'}</td>
                                   <td className="p-2 text-right text-muted-foreground">
-                                    {row.unitPrice != null ? `₹${row.unitPrice}` : '—'}
+                                    {row.unitPrice != null ? fmtCurrency(row.unitPrice, 2) : '—'}
                                   </td>
                                   <td className="p-2 text-muted-foreground italic max-w-[200px] truncate">
                                     {row.reason || ''}

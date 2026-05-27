@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import * as React from 'react';
 import { cn } from '@/lib/utils';
@@ -110,14 +110,14 @@ export function InventoryCard({
         {/* Packed */}
         <div className="col-span-1 text-center">
           <span className="bg-emerald-50 text-emerald-700 px-2 py-1 rounded font-semibold text-xs border border-emerald-200">
-            {packedQty.toLocaleString()}
+            {packedQty.toLocaleString('en-IN')}
           </span>
         </div>
 
         {/* Unpacked */}
         <div className="col-span-1 text-center">
           <span className="bg-orange-50 text-orange-700 px-2 py-1 rounded font-semibold text-xs border border-orange-200">
-            {unpackedQty.toLocaleString()}
+            {unpackedQty.toLocaleString('en-IN')}
           </span>
         </div>
 
@@ -129,7 +129,7 @@ export function InventoryCard({
               "font-semibold text-xs",
               amazonInv > 0 ? "text-blue-600" : "text-muted-foreground"
             )}>
-              {amazonInv.toLocaleString()}
+              {amazonInv.toLocaleString('en-IN')}
             </span>
           </div>
         </div>
@@ -142,7 +142,7 @@ export function InventoryCard({
               "font-semibold text-xs",
               blinkitInv > 0 ? "text-yellow-600" : "text-muted-foreground"
             )}>
-              {blinkitInv.toLocaleString()}
+              {blinkitInv.toLocaleString('en-IN')}
             </span>
           </div>
         </div>

@@ -1,7 +1,8 @@
-'use client';
+﻿'use client';
 
 import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
+import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { FilterBar } from '@/components/ui/filter-bar';
 import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
@@ -18,10 +19,10 @@ import {
   Download,
 } from 'lucide-react';
 import api from '@/lib/api';
+import { fmtDate } from '@/lib/format';
 
 interface POOverviewItem {
   id: number;
-  ids: number[];
   po_id: number;
   po_number: string;
   po_date: string;
@@ -29,8 +30,6 @@ interface POOverviewItem {
   po_expiry: string;
   products: number;
   totalQty: number;
-  packed_qty: number;
-  gap: number;
   status: string;
   location: string;
   state: string;
@@ -59,23 +58,33 @@ const BADGE_STYLES: Record<string, string> = {
 
 export default function AmazonPOOverviewPage() {
   const router = useRouter();
+  const { filterMode, customStart, customEnd } = useFilter();
   const [search, setSearch] = useState('');
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
   const [poData, setPoData] = useState<POOverviewItem[]>([]);
+  const [statsData, setStatsData] = useState<{ status_counts: Record<string, number>; total_pos: number; total_units: number } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    const fetchPOData = async () => {
+    const fetchAll = async () => {
       try {
         setIsLoading(true);
-        const response = await (api.purchaseOrders as any).getAmazonOverview({ page_size: 200 }) as any;
+        const dateParams = filterMode === 'all' ? {} : (() => {
+          const { start_date, end_date } = computeDateRange(filterMode as FilterMode, customStart, customEnd);
+          return { ...(start_date ? { start_date } : {}), ...(end_date ? { end_date } : {}) };
+        })();
+        const statsParams = Object.keys(dateParams).length ? dateParams : undefined;
+        const [response, statsRes] = await Promise.all([
+          (api.purchaseOrders as any).getAmazonOverview({ page_size: 200, ...dateParams }) as any,
+          (api.purchaseOrders as any).getAmazonStats(statsParams) as any,
+        ]);
         const data = (response.items || []).map((po: any) => ({
           id: po.po_id,
           po_id: po.po_id,
           po_number: po.po_number,
-          po_date: po.order_date ? new Date(po.order_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A',
+          po_date: po.order_date ? fmtDate(po.order_date) : 'N/A',
           orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
-          po_expiry: po.expected_delivery_date ? new Date(po.expected_delivery_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : 'N/A',
+          po_expiry: po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : 'N/A',
           products: po.item_count,
           totalQty: po.total_qty,
           status: po.status || 'Created',
@@ -83,6 +92,7 @@ export default function AmazonPOOverviewPage() {
           state: po.ship_to_state || '—',
         }));
         setPoData(data);
+        setStatsData(statsRes);
       } catch (error) {
         console.error('Error fetching Amazon PO data:', error);
       } finally {
@@ -90,8 +100,8 @@ export default function AmazonPOOverviewPage() {
       }
     };
 
-    fetchPOData();
-  }, []);
+    fetchAll();
+  }, [filterMode, customStart, customEnd]);
 
   const poStatusOptions = [
     { label: 'All',        value: 'all' },
@@ -140,16 +150,17 @@ export default function AmazonPOOverviewPage() {
     return [{ label: 'All', value: 'all' }, ...states.map(s => ({ label: s, value: s }))];
   }, [poData]);
 
-  // Calculate stats using display status names
+  // KPI stats from dedicated endpoint — accurate regardless of grid page size
   const stats = useMemo(() => {
-    const created    = poData.filter(p => p.status === 'Created').length;
-    const dispatched = poData.filter(p => p.status === 'Dispatched').length;
-    const inTransit  = poData.filter(p => p.status === 'In Transit').length;
-    const delivered  = poData.filter(p => p.status === 'Delivered').length;
-    const delayed    = poData.filter(p => p.status === 'Delayed').length;
-
-    return { created, dispatched, inTransit, delivered, delayed };
-  }, [poData]);
+    const sc = statsData?.status_counts || {};
+    return {
+      created:    sc['Created']    || 0,
+      dispatched: sc['Dispatched'] || 0,
+      inTransit:  sc['In Transit'] || 0,
+      delivered:  sc['Delivered']  || 0,
+      delayed:    sc['Delayed']    || 0,
+    };
+  }, [statsData]);
 
   const getStatusBadge = (status: string) => {
     const style = BADGE_STYLES[status] || 'bg-gray-50 text-gray-700 border-gray-200';
@@ -221,7 +232,7 @@ export default function AmazonPOOverviewPage() {
       width: 120,
       minWidth: 90,
       align: 'right',
-      cell: (row) => <span className="font-semibold">{row.totalQty.toLocaleString()}</span>,
+      cell: (row) => <span className="font-semibold">{row.totalQty.toLocaleString('en-IN')}</span>,
     },
     {
       id: 'status',

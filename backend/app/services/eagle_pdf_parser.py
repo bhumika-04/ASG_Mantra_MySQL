@@ -130,16 +130,26 @@ def _cell_text(cell) -> str:
 def _dedup_merged_text(text: str) -> str:
     """When pdfplumber merges two side-by-side columns, text may appear doubled.
     E.g. 'EAGLE NETWORK PVT LTD  EAGLE NETWORK PVT LTD' → 'EAGLE NETWORK PVT LTD'
-    Heuristic: if the string is longer than 20 chars and the first half repeats in the second, keep first half.
     """
     if not text or len(text) < 20:
         return text
-    # Try progressively longer prefixes
+    # Heuristic 1: prefix at half-boundary repeats exactly
     for split in range(len(text) // 4, len(text) // 2 + 1):
         prefix = text[:split].rstrip()
         remainder = text[split:].strip()
         if remainder.startswith(prefix):
             return prefix
+    # Heuristic 2: first N words appear again later in the string
+    words = text.split()
+    for n_words in (5, 4, 3):
+        if len(words) < n_words * 2:
+            continue
+        key = ' '.join(words[:n_words])
+        if len(key) < 10:
+            continue
+        pos = text.find(key, len(key))
+        if pos > 0:
+            return text[:pos].rstrip()
     return text
 
 
@@ -315,30 +325,55 @@ def _extract_header_from_text(text: str, header: POHeaderExtracted) -> POHeaderE
     # Note: in pdfplumber text, Bill To and Ship To may be on the same line
     # (side-by-side in the PDF), causing their content lines to be merged.
     # We de-duplicate by taking only the first half if the name repeats.
+    _GSTIN_PAT = r'(\d{2}[A-Z]{5}\d{4}[A-Z]\d[A-Z\d][A-Z][\dA-Z]?)'
+
     for label, name_field, addr_field, gstin_field in [
         (r'Bill\s*To', 'bill_to_name', 'bill_to_address', 'bill_to_gstin'),
         (r'Ship\s*To', 'ship_to_name', 'ship_to_address', 'ship_to_gstin'),
     ]:
+        # Capture name, then 0-N address lines, then GSTIN.
+        # [:\s-]* handles both "GSTIN: 07..." and "GST-07..." PDF variants.
         m = re.search(
-            label + r'\s*\n([^\n]+)\n([^\n]+)\nGST[-:]?(\w+)',
+            label + r'[^\n]*\n([^\n]+)\n((?:[^\n]*\n)*?)(?:GSTIN|GST)[:\s-]*' + _GSTIN_PAT,
             text, re.I
         )
         if m:
             if not getattr(header, name_field):
-                name_val = m.group(1).strip()
-                # De-duplicate if pdfplumber merged both columns (e.g. "X PVT LTD  X PVT LTD")
-                name_val = _dedup_merged_text(name_val)
+                name_val = _dedup_merged_text(m.group(1).strip())
                 setattr(header, name_field, name_val)
             if not getattr(header, addr_field):
-                addr_val = _dedup_merged_text(m.group(2).strip())
-                setattr(header, addr_field, addr_val)
+                raw_addr = m.group(2).strip()
+                # Dedup each line individually (pdfplumber merges side-by-side columns per line)
+                deduped_lines = [_dedup_merged_text(ln.strip()) for ln in raw_addr.split('\n') if ln.strip()]
+                # Strip trailing PDF-artifact fragments (ALL-CAPS abbreviations ≤5 chars, e.g. "NO.")
+                deduped_lines = [re.sub(r'\s+(?:[A-Z]{1,5}\.?)+\s*$', '', ln).strip() for ln in deduped_lines]
+                deduped_lines = [ln for ln in deduped_lines if ln]
+                addr_val = '\n'.join(deduped_lines)
+                setattr(header, addr_field, addr_val or None)
             if not getattr(header, gstin_field):
                 setattr(header, gstin_field, m.group(3).strip())
         else:
-            # Fallback: just grab the name after the label
-            m2 = re.search(label + r'\s*\n([^\n]{5,})', text, re.I)
-            if m2 and not getattr(header, name_field):
-                setattr(header, name_field, _dedup_merged_text(m2.group(1).strip()))
+            # Fallback: capture name + address lines up to the first GSTIN-like line
+            m2 = re.search(
+                label + r'[^\n]*\n([^\n]{5,})\n((?:(?!' + _GSTIN_PAT + r')[^\n]*\n){0,6})',
+                text, re.I
+            )
+            if m2:
+                if not getattr(header, name_field):
+                    setattr(header, name_field, _dedup_merged_text(m2.group(1).strip()))
+                if not getattr(header, addr_field):
+                    raw_addr = m2.group(2).strip()
+                    deduped_lines = [_dedup_merged_text(ln.strip()) for ln in raw_addr.split('\n') if ln.strip()]
+                    addr_val = '\n'.join(deduped_lines)
+                    setattr(header, addr_field, addr_val or None)
+            # Try to find GSTIN in surrounding block using format-based pattern
+            if not getattr(header, gstin_field):
+                gstin_m = re.search(
+                    label + r'[\s\S]{0,300}?' + _GSTIN_PAT,
+                    text, re.I
+                )
+                if gstin_m:
+                    setattr(header, gstin_field, gstin_m.group(1))
 
     # Summary totals
     def _extract_total(label_pattern: str) -> Optional[float]:
@@ -722,8 +757,16 @@ def extract_po_from_pdf(pdf_bytes: bytes) -> POExtractResult:
 
         # ── Step 5: Extract line items using column-map approach ──
         seen_items_table = False
+        last_col_map = None
         for table in all_tables:
             if not _is_items_table(table):
+                # Continuation of items table on a subsequent page (no header row)
+                if last_col_map:
+                    for row in table:
+                        if row and not _is_header_or_total_row(row) and _is_data_row(row):
+                            item = _parse_item_row_mapped(row, last_col_map)
+                            if item:
+                                result.items.append(item)
                 continue
 
             seen_items_table = True
@@ -731,6 +774,7 @@ def extract_po_from_pdf(pdf_bytes: bytes) -> POExtractResult:
 
             if header_row_idx >= 0:
                 col_map = _build_col_map(table, header_row_idx)
+                last_col_map = col_map
                 for row_i, row in enumerate(table):
                     if row_i <= header_row_idx + 1:
                         continue  # skip header rows

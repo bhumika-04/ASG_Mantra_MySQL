@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
@@ -125,7 +125,7 @@ export function POStatusModal({
         <div className="flex items-center justify-between mb-4">
           <div>
             <h3 className="text-base font-semibold">{po.po_number}</h3>
-            <p className="text-xs text-muted-foreground">{po.quantity.toLocaleString()} units</p>
+            <p className="text-xs text-muted-foreground">{po.quantity.toLocaleString('en-IN')} units</p>
           </div>
           <div className="flex items-center gap-2">
             <Badge variant="outline" className={STATUS_STYLES[po.status] || 'bg-gray-50 text-gray-700 border-gray-200'}>{po.status}</Badge>

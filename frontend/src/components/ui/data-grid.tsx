@@ -422,7 +422,17 @@ export function DataGrid<T extends Record<string, any>>({
     <div className={cn('relative', className)}>
       {/* Grid Table */}
       <div className="rounded-lg border bg-card overflow-auto scrollbar-hide">
-        <table className="w-full border-collapse" style={{ minWidth: `${totalTableWidth}px` }}>
+        <table
+          className="border-collapse"
+          style={{ tableLayout: 'fixed', width: `max(100%, ${totalTableWidth}px)` }}
+        >
+          {/* Column widths — table-layout:fixed makes these authoritative */}
+          <colgroup>
+            <col style={{ width: `${SNO_WIDTH}px` }} />
+            {visibleColumnsArray.map((col) => (
+              <col key={col.id} style={{ width: `${columnWidths[col.id] || col.width || 150}px` }} />
+            ))}
+          </colgroup>
           {/* Header */}
           <thead className="bg-muted/50">
             <tr>
@@ -458,8 +468,6 @@ export function DataGrid<T extends Record<string, any>>({
                     column.align === 'right' && 'text-right'
                   )}
                   style={{
-                    minWidth: `${column.minWidth || columnWidths[column.id] || 100}px`,
-                    overflow: 'hidden',
                     position: 'sticky',
                     top: 0,
                     zIndex: column.sticky ? 20 : 10,
@@ -489,12 +497,12 @@ export function DataGrid<T extends Record<string, any>>({
                     )}
                   </div>
                   {/* Resize Handle */}
-                  {!column.sticky && (
-                    <div
-                      className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/50 active:bg-primary"
-                      onMouseDown={(e) => handleResizeStart(e, column.id)}
-                    />
-                  )}
+                  <div
+                    className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize group"
+                    onMouseDown={(e) => handleResizeStart(e, column.id)}
+                  >
+                    <div className="absolute right-0 top-2 bottom-2 w-0.5 bg-border group-hover:bg-primary/60 group-active:bg-primary transition-colors" />
+                  </div>
                 </th>
               ))}
             </tr>
@@ -536,9 +544,12 @@ export function DataGrid<T extends Record<string, any>>({
                       column.align === 'center' && 'text-center',
                       column.align === 'right' && 'text-right'
                     )}
+                    title={
+                      column.sticky && column.accessorKey && typeof row[column.accessorKey] === 'string'
+                        ? (row[column.accessorKey] as string)
+                        : undefined
+                    }
                     style={{
-                      minWidth: `${column.minWidth || columnWidths[column.id] || 100}px`,
-                      maxWidth: `${columnWidths[column.id] || column.width || 300}px`,
                       overflow: 'hidden',
                       backgroundColor: '#ffffff',
                       ...(column.sticky ? {

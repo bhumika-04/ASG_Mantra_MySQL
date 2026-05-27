@@ -20,6 +20,8 @@ from app.utils.dependencies import get_current_user
 
 router = APIRouter()
 
+LOW_STOCK_THRESHOLD = 50  # Matches threshold in alerts.py
+
 
 @router.get("", response_model=PaginatedResponse, include_in_schema=False)
 @router.get("/", response_model=PaginatedResponse)
@@ -63,9 +65,9 @@ async def get_inventory(
             )
         )
 
-    # Apply low stock filter
+    # Apply low stock filter (items at or below threshold, including out-of-stock)
     if low_stock_only:
-        query = query.filter(Inventory.CurrentStock == 0)
+        query = query.filter(Inventory.CurrentStock <= LOW_STOCK_THRESHOLD)
 
     # Get total count
     total = query.count()
@@ -97,7 +99,7 @@ async def get_inventory(
             "unpacked_qty": item.UnpackedQty,
             "inventory_date": item.InventoryDate.isoformat() if item.InventoryDate else None,
             "last_updated": item.LastUpdated.isoformat() if item.LastUpdated else None,
-            "is_low_stock": item.CurrentStock == 0,
+            "is_low_stock": item.CurrentStock <= LOW_STOCK_THRESHOLD,
         })
 
     return {

@@ -15,7 +15,12 @@ export const FILTER_OPTIONS: { label: string; value: FilterMode }[] = [
   { label: 'Custom Range', value: 'custom' },
 ];
 
-const fmt = (d: Date) => d.toISOString().split('T')[0];
+const fmt = (d: Date) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
 
 export function computeDateRange(mode: FilterMode, customStart = '', customEnd = ''): { start_date?: string; end_date?: string } {
   const today = new Date();

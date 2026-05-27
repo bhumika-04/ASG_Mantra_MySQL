@@ -1,7 +1,7 @@
-'use client';
+﻿'use client';
 
 import { useState, useEffect } from 'react';
-import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
+import { useFilter, computeDateRange } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -17,7 +17,6 @@ import {
 import {
   PieChart,
   Pie,
-  Cell,
   BarChart,
   Bar,
   AreaChart,
@@ -72,6 +71,7 @@ interface MonthlySalesItem {
 
 interface TopProduct {
   name: string;
+  sku: string;
   channel: string;
   revenue: number;
   quantity: number;
@@ -84,14 +84,21 @@ interface ChartData {
 }
 
 
+function stripBrand(name: string): string {
+  return name
+    .replace(/^organix\s+mantra\s*/i, '')
+    .replace(/^organic\s+mantra\s*/i, '')
+    .trim();
+}
+
 function formatPeriodLabel(p: string, isWeekly: boolean): string {
   if (isWeekly && p.length === 10) {
     const d = new Date(p + 'T00:00:00');
-    return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' });
+    return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
   }
   const [year, month] = p.split('-');
   const d = new Date(parseInt(year), parseInt(month) - 1, 1);
-  return d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+  return d.toLocaleDateString('en-IN', { month: 'short', year: '2-digit' });
 }
 
 export default function DashboardPage() {
@@ -183,7 +190,7 @@ export default function DashboardPage() {
             Inventory overview and platform allocation
           </p>
           <Badge variant="outline" className="text-xs">
-            Last updated: {new Date().toLocaleTimeString()}
+            Last updated: {new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' })}
           </Badge>
         </div>
 
@@ -191,27 +198,27 @@ export default function DashboardPage() {
         <StatsGrid columns={4}>
           <StatsCard
             title="Total SKUs"
-            value={stats.totalSKUs.toLocaleString()}
+            value={stats.totalSKUs.toLocaleString('en-IN')}
             icon={Package}
             description="Active products"
           />
           <StatsCard
             title="Packed Inventory"
-            value={stats.packedInventory.toLocaleString()}
+            value={stats.packedInventory.toLocaleString('en-IN')}
             icon={PackageCheck}
             description="Ready to ship"
             variant="blue"
           />
           <StatsCard
             title="Unpacked Inventory"
-            value={stats.unpackedInventory.toLocaleString()}
+            value={stats.unpackedInventory.toLocaleString('en-IN')}
             icon={PackageOpen}
             description="Raw stock"
             variant="yellow"
           />
           <StatsCard
             title="Pending POs"
-            value={stats.pendingPOs.toLocaleString()}
+            value={stats.pendingPOs.toLocaleString('en-IN')}
             icon={ClipboardList}
             description={`${stats.delayedPOs} delayed`}
             variant={stats.delayedPOs > 0 ? 'orange' : 'default'}
@@ -249,7 +256,7 @@ export default function DashboardPage() {
                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                     <XAxis dataKey="month" tick={{ fill: '#6b7280', fontSize: 11 }} tickFormatter={(v) => formatPeriodLabel(v, chartData.is_weekly)} />
                     <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
-                    <Tooltip labelFormatter={(v) => formatPeriodLabel(v, chartData.is_weekly)} formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString()}`, '']} />
+                    <Tooltip labelFormatter={(v) => formatPeriodLabel(v, chartData.is_weekly)} formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString('en-IN')}`, '']} />
                     <Legend />
                     <Area type="monotone" dataKey="Amazon" stroke="#60a5fa" strokeWidth={2} fillOpacity={1} fill="url(#colorAmazon)" />
                     <Area type="monotone" dataKey="Blinkit" stroke="#fbbf24" strokeWidth={2} fillOpacity={1} fill="url(#colorBlinkit)" />
@@ -269,7 +276,7 @@ export default function DashboardPage() {
                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                     <XAxis dataKey="month" tick={{ fill: '#6b7280', fontSize: 11 }} tickFormatter={(v) => formatPeriodLabel(v, chartData.is_weekly)} />
                     <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
-                    <Tooltip labelFormatter={(v) => formatPeriodLabel(v, chartData.is_weekly)} formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString()}`, '']} />
+                    <Tooltip labelFormatter={(v) => formatPeriodLabel(v, chartData.is_weekly)} formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString('en-IN')}`, '']} />
                     <Legend />
                     <Bar dataKey="Amazon" fill="#60a5fa" radius={[4, 4, 0, 0]} />
                     <Bar dataKey="Blinkit" fill="#fbbf24" radius={[4, 4, 0, 0]} />
@@ -279,39 +286,54 @@ export default function DashboardPage() {
             </Card>
 
             {/* 3. Channel Distribution - Pie Chart */}
-            <Card>
-              <CardHeader className="pb-2">
+            <Card className="flex flex-col">
+              <CardHeader className="pb-2 shrink-0">
                 <CardTitle className="text-base font-medium">Channel Distribution</CardTitle>
               </CardHeader>
-              <CardContent>
+              <CardContent className="flex-1 flex flex-col pt-0 pb-4">
                 {(() => {
                   const amazonTotal = chartData.monthly_sales.reduce((s, r) => s + r.Amazon, 0);
                   const blinkitTotal = chartData.monthly_sales.reduce((s, r) => s + r.Blinkit, 0);
                   const total = amazonTotal + blinkitTotal;
+                  const amazonPct = total > 0 ? Math.round((amazonTotal / total) * 100) : 0;
+                  const blinkitPct = total > 0 ? 100 - amazonPct : 0;
                   const distData = [
-                    { name: 'Amazon', value: amazonTotal, color: '#60a5fa' },
-                    { name: 'Blinkit', value: blinkitTotal, color: '#fbbf24' },
+                    { name: 'Amazon', value: amazonTotal, fill: '#60a5fa' },
+                    { name: 'Blinkit', value: blinkitTotal, fill: '#fbbf24' },
                   ];
                   return (
-                    <ResponsiveContainer width="100%" height={240}>
-                      <PieChart>
-                        <Pie
-                          data={distData}
-                          cx="50%"
-                          cy="50%"
-                          labelLine={false}
-                          label={({ name, value }) => `${name}: ${total > 0 ? Math.round((value / total) * 100) : 0}%`}
-                          outerRadius={90}
-                          dataKey="value"
-                        >
-                          {distData.map((entry, i) => (
-                            <Cell key={i} fill={entry.color} />
-                          ))}
-                        </Pie>
-                        <Tooltip formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString()}`, 'Revenue']} />
-                        <Legend />
-                      </PieChart>
-                    </ResponsiveContainer>
+                    <div className="flex-1 flex flex-col">
+                      <ResponsiveContainer width="100%" height={200}>
+                        <PieChart>
+                          <Pie
+                            data={distData}
+                            cx="50%"
+                            cy="50%"
+                            outerRadius={88}
+                            dataKey="value"
+                          />
+                          <Tooltip formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString('en-IN')}`, 'Revenue']} />
+                        </PieChart>
+                      </ResponsiveContainer>
+                      {/* Channel breakdown — no overlap, always readable */}
+                      <div className="flex items-center justify-center gap-8 pt-3 border-t mt-auto">
+                        <div className="flex items-center gap-2.5">
+                          <div className="h-3 w-3 rounded-full bg-blue-400 shrink-0" />
+                          <div>
+                            <p className="text-sm font-bold leading-none">{amazonPct}%</p>
+                            <p className="text-xs text-muted-foreground mt-0.5">Amazon</p>
+                          </div>
+                        </div>
+                        <div className="h-8 w-px bg-border" />
+                        <div className="flex items-center gap-2.5">
+                          <div className="h-3 w-3 rounded-full bg-yellow-400 shrink-0" />
+                          <div>
+                            <p className="text-sm font-bold leading-none">{blinkitPct}%</p>
+                            <p className="text-xs text-muted-foreground mt-0.5">Blinkit</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                   );
                 })()}
               </CardContent>
@@ -338,19 +360,38 @@ export default function DashboardPage() {
                   const filteredTop = (topProductsChannel === 'all'
                     ? chartData.top_products
                     : chartData.top_products.filter(p => (p.channel || '').toLowerCase() === topProductsChannel)
-                  ).slice(0, 5);
+                  ).slice(0, 5).map((p: any) => {
+                    const full = stripBrand(p.name);
+                    return {
+                      ...p,
+                      fullName: full,
+                      sku: p.sku || '',
+                      name: full.length > 18 ? full.slice(0, 18) + '…' : full,
+                      fill: (p.channel || '').toLowerCase() === 'amazon' ? '#60a5fa' : '#fbbf24',
+                    };
+                  });
                   return (
                     <ResponsiveContainer width="100%" height={240}>
                       <BarChart data={filteredTop} layout="vertical">
                         <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                         <XAxis type="number" tick={{ fill: '#6b7280', fontSize: 11 }} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
-                        <YAxis dataKey="name" type="category" width={110} tick={{ fill: '#6b7280', fontSize: 10 }} />
-                        <Tooltip formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString()}`, 'Revenue']} />
-                        <Bar dataKey="revenue" radius={[0, 4, 4, 0]} name="Revenue">
-                          {filteredTop.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={entry.channel === 'Amazon' ? '#60a5fa' : '#fbbf24'} />
-                          ))}
-                        </Bar>
+                        <YAxis dataKey="name" type="category" width={130} tick={{ fill: '#6b7280', fontSize: 10 }} />
+                        <Tooltip
+                          content={({ active, payload }) => {
+                            if (!active || !payload?.length) return null;
+                            const d = payload[0];
+                            return (
+                              <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, padding: '10px 12px', maxWidth: 260, boxShadow: '0 2px 8px rgba(0,0,0,0.10)' }}>
+                                <p style={{ fontWeight: 600, fontSize: 13, marginBottom: 4, lineHeight: 1.4, whiteSpace: 'normal', wordBreak: 'break-word' }}>{d.payload.fullName}</p>
+                                {d.payload.sku && (
+                                  <p style={{ fontSize: 11, color: '#6b7280', marginBottom: 4 }}>SKU: <span style={{ fontFamily: 'monospace', color: '#374151' }}>{d.payload.sku}</span></p>
+                                )}
+                                <p style={{ fontSize: 13, color: '#6b7280' }}>Revenue: ₹{Number(d.value ?? 0).toLocaleString('en-IN')}</p>
+                              </div>
+                            );
+                          }}
+                        />
+                        <Bar dataKey="revenue" radius={[0, 4, 4, 0]} name="Revenue" />
                       </BarChart>
                     </ResponsiveContainer>
                   );

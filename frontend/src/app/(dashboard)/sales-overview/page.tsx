@@ -10,17 +10,16 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { TrendingUp, ShoppingCart, Package, Box, Download, Search } from 'lucide-react';
 import { exportToCSV } from '@/lib/export';
+import { fmtCurrency } from '@/lib/format';
 import {
   BarChart,
   Bar,
   PieChart,
   Pie,
-  Cell,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
   ResponsiveContainer,
 } from 'recharts';
 import api from '@/lib/api';
@@ -32,6 +31,8 @@ interface TopProduct {
   amazon: number;
   blinkit: number;
   total: number;
+  amazonRevenue: number;
+  blinkitRevenue: number;
 }
 
 function filterMonthly(data: any[], mode: string, customStart: string, customEnd: string) {
@@ -93,11 +94,11 @@ export default function SalesOverviewPage() {
         const blkQty: number     = Math.round(blinkitAnalytics?.summary?.total_qty || 0);
 
         setStats({
-          total_revenue:  amzRevenue + blkRevenue,
-          total_orders:   amzUnits + blkQty,
-          amazon_revenue: amzRevenue,
+          total_revenue:   amzRevenue + blkRevenue,
+          total_orders:    amzUnits + blkQty,
+          amazon_revenue:  amzRevenue,
           blinkit_revenue: blkRevenue,
-          activeProducts: (amazonAnalytics?.summary?.active_products || 0) + (blinkitAnalytics?.summary?.active_items || 0),
+          activeProducts:  (amazonAnalytics?.summary?.active_products || 0) + (blinkitAnalytics?.summary?.active_items || 0),
         });
 
         // Build combined top products list — merge by product name
@@ -108,15 +109,18 @@ export default function SalesOverviewPage() {
           const key = name.toLowerCase();
           if (productMap.has(key)) {
             const existing = productMap.get(key);
-            existing.amazon += Math.round(p.total_units || 0);
-            existing.total += Math.round(p.total_units || 0);
+            existing.amazon        += Math.round(p.total_units || 0);
+            existing.total         += Math.round(p.total_units || 0);
+            existing.amazonRevenue += (p.total_revenue || 0);
           } else {
             productMap.set(key, {
               name,
-              sku: p.asin || '',
-              amazon: Math.round(p.total_units || 0),
-              blinkit: 0,
-              total: Math.round(p.total_units || 0),
+              sku:           p.asin || '',
+              amazon:        Math.round(p.total_units || 0),
+              blinkit:       0,
+              total:         Math.round(p.total_units || 0),
+              amazonRevenue: p.total_revenue || 0,
+              blinkitRevenue: 0,
             });
           }
         });
@@ -126,15 +130,18 @@ export default function SalesOverviewPage() {
           const key = name.toLowerCase();
           if (productMap.has(key)) {
             const existing = productMap.get(key);
-            existing.blinkit += Math.round(p.total_qty || 0);
-            existing.total += Math.round(p.total_qty || 0);
+            existing.blinkit        += Math.round(p.total_qty || 0);
+            existing.total          += Math.round(p.total_qty || 0);
+            existing.blinkitRevenue += (p.total_revenue || 0);
           } else {
             productMap.set(key, {
               name,
-              sku: String(p.item_id),
-              amazon: 0,
-              blinkit: Math.round(p.total_qty || 0),
-              total: Math.round(p.total_qty || 0),
+              sku:           String(p.item_id),
+              amazon:        0,
+              blinkit:       Math.round(p.total_qty || 0),
+              total:         Math.round(p.total_qty || 0),
+              amazonRevenue:  0,
+              blinkitRevenue: p.total_revenue || 0,
             });
           }
         });
@@ -142,9 +149,7 @@ export default function SalesOverviewPage() {
         // Resolve ASG SKU from product master lookup
         for (const [key, product] of productMap) {
           const asgSku = skuLookup.get(key);
-          if (asgSku) {
-            product.sku = asgSku;
-          }
+          if (asgSku) product.sku = asgSku;
         }
 
         const sortedProducts = Array.from(productMap.values())
@@ -153,7 +158,7 @@ export default function SalesOverviewPage() {
 
         setTopProducts(sortedProducts);
 
-        // Monthly data from dashboard charts (uses dedicated AmazonSales/BlinkitSales tables)
+        // Monthly data from dashboard charts
         setMonthlyData(chartsData?.monthly_sales || []);
       } catch (error) {
         console.error('Error fetching sales overview:', error);
@@ -165,39 +170,71 @@ export default function SalesOverviewPage() {
     fetchSalesOverview();
   }, [filterMode, customStart, customEnd]);
 
-  // Calculate percentages
+  // Channel split for pie chart — derived from KPI revenue (same data source as cards)
   const totalRevenue = stats.amazon_revenue + stats.blinkit_revenue;
-  const amazonPercentage = totalRevenue > 0
-    ? Math.round((stats.amazon_revenue / totalRevenue) * 100)
-    : 0;
-  const blinkitPercentage = totalRevenue > 0
-    ? Math.round((stats.blinkit_revenue / totalRevenue) * 100)
-    : 0;
+  const amazonPct = totalRevenue > 0 ? Math.round((stats.amazon_revenue / totalRevenue) * 100) : 0;
+  const blinkitPct = totalRevenue > 0 ? Math.round((stats.blinkit_revenue / totalRevenue) * 100) : 0;
+  const channelData = [
+    { name: 'Amazon',  value: amazonPct,  fill: '#60a5fa' },
+    { name: 'Blinkit', value: blinkitPct, fill: '#fbbf24' },
+  ];
 
   const gridColumns: GridColumn<TopProduct>[] = [
-    { id: 'name', header: 'Product Name', accessorKey: 'name', sortable: true, width: 320, minWidth: 200, wrap: true, cell: (row) => (
-      <span
-        className="font-medium text-sm leading-snug"
-        style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
-        title={row.name ?? undefined}
-      >
-        {row.name || '—'}
-      </span>
-    ) },
-    { id: 'sku', header: 'ASG SKU', accessorKey: 'sku', sticky: true, width: 175, minWidth: 130, cell: (row) => <Badge variant="outline" className="bg-slate-50 text-slate-700 border-slate-200 font-mono text-xs whitespace-nowrap">{row.sku}</Badge> },
-    { id: 'amazon', header: 'Amazon Units', accessorKey: 'amazon', sortable: true, width: 130, minWidth: 110, align: 'right', cell: (row) => (
-      <Badge variant="outline" className={row.amazon > 0 ? 'bg-blue-50 text-blue-700 border-blue-200 font-semibold' : 'bg-gray-50 text-gray-400 border-gray-200'}>{row.amazon.toLocaleString()}</Badge>
-    )},
-    { id: 'blinkit', header: 'Blinkit Units', accessorKey: 'blinkit', sortable: true, width: 130, minWidth: 110, align: 'right', cell: (row) => (
-      <Badge variant="outline" className={row.blinkit > 0 ? 'bg-yellow-50 text-yellow-700 border-yellow-200 font-semibold' : 'bg-gray-50 text-gray-400 border-gray-200'}>{row.blinkit.toLocaleString()}</Badge>
-    )},
-    { id: 'total', header: 'Total Units', accessorKey: 'total', sortable: true, width: 130, minWidth: 110, align: 'right', cell: (row) => (
-      <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200 font-bold">{row.total.toLocaleString()}</Badge>
-    )},
+    {
+      id: 'name', header: 'Product Name', accessorKey: 'name', sortable: true, width: 300, minWidth: 180, wrap: true,
+      cell: (row) => (
+        <span
+          className="font-medium text-sm leading-snug"
+          style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
+          title={row.name ?? undefined}
+        >
+          {row.name || '—'}
+        </span>
+      ),
+    },
+    {
+      id: 'sku', header: 'ASG SKU', accessorKey: 'sku', width: 175, minWidth: 130,
+      cell: (row) => <Badge variant="outline" className="bg-slate-50 text-slate-700 border-slate-200 font-mono text-xs whitespace-nowrap">{row.sku}</Badge>,
+    },
+    {
+      id: 'amazon', header: 'Amazon Units', accessorKey: 'amazon', sortable: true, width: 130, minWidth: 110, align: 'right',
+      cell: (row) => (
+        <Badge variant="outline" className={row.amazon > 0 ? 'bg-blue-50 text-blue-700 border-blue-200 font-semibold' : 'bg-gray-50 text-gray-400 border-gray-200'}>
+          {row.amazon.toLocaleString('en-IN')}
+        </Badge>
+      ),
+    },
+    {
+      id: 'blinkit', header: 'Blinkit Units', accessorKey: 'blinkit', sortable: true, width: 130, minWidth: 110, align: 'right',
+      cell: (row) => (
+        <Badge variant="outline" className={row.blinkit > 0 ? 'bg-yellow-50 text-yellow-700 border-yellow-200 font-semibold' : 'bg-gray-50 text-gray-400 border-gray-200'}>
+          {row.blinkit.toLocaleString('en-IN')}
+        </Badge>
+      ),
+    },
+    {
+      id: 'total', header: 'Total Units', accessorKey: 'total', sortable: true, width: 120, minWidth: 100, align: 'right',
+      cell: (row) => (
+        <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200 font-bold">
+          {row.total.toLocaleString('en-IN')}
+        </Badge>
+      ),
+    },
+    {
+      id: 'totalRevenue', header: 'Total Revenue', accessorKey: 'amazonRevenue', sortable: true, width: 145, minWidth: 120, align: 'right',
+      cell: (row) => {
+        const rev = (row.amazonRevenue || 0) + (row.blinkitRevenue || 0);
+        return (
+          <span className={rev > 0 ? 'text-sm font-semibold text-emerald-700' : 'text-sm text-gray-400'}>
+            {rev > 0 ? fmtCurrency(Math.round(rev)) : '—'}
+          </span>
+        );
+      },
+    },
   ];
 
   const filteredTopProducts = topProducts.filter(p => {
-    if (productChannel === 'amazon' && p.amazon === 0) return false;
+    if (productChannel === 'amazon'  && p.amazon  === 0) return false;
     if (productChannel === 'blinkit' && p.blinkit === 0) return false;
     if (productSearch.trim()) {
       const q = productSearch.trim().toLowerCase();
@@ -223,27 +260,27 @@ export default function SalesOverviewPage() {
 
   return (
     <ProtectedRoute>
-      <div className="p-6 space-y-6">
+      <div className="p-4 sm:p-6 space-y-6">
         {/* KPI Cards */}
         <StatsGrid columns={4}>
           <StatsCard
             title="Total Units Sold"
-            value={stats.total_orders.toLocaleString()}
+            value={stats.total_orders.toLocaleString('en-IN')}
             icon={TrendingUp}
-            description={stats.total_revenue > 0 ? `₹${Math.round(stats.total_revenue).toLocaleString()} revenue` : 'Amazon units + Blinkit qty'}
+            description={stats.total_revenue > 0 ? `${fmtCurrency(Math.round(stats.total_revenue))} revenue` : 'Amazon units + Blinkit qty'}
           />
           <StatsCard
             title="Amazon Sales"
-            value={stats.amazon_revenue > 0 ? `₹${Math.round(stats.amazon_revenue).toLocaleString()}` : `${amazonPercentage}% share`}
+            value={fmtCurrency(Math.round(stats.amazon_revenue))}
             icon={ShoppingCart}
-            description={`${amazonPercentage}% of total`}
+            description={`${amazonPct}% of total`}
             variant="blue"
           />
           <StatsCard
             title="Blinkit Sales"
-            value={stats.blinkit_revenue > 0 ? `₹${Math.round(stats.blinkit_revenue).toLocaleString()}` : `${blinkitPercentage}% share`}
+            value={fmtCurrency(Math.round(stats.blinkit_revenue))}
             icon={Package}
-            description={`${blinkitPercentage}% of total`}
+            description={`${blinkitPct}% of total`}
             variant="yellow"
           />
           <StatsCard
@@ -264,27 +301,17 @@ export default function SalesOverviewPage() {
               <ResponsiveContainer width="100%" height={320}>
                 <BarChart data={filterMonthly(monthlyData, filterMode, customStart, customEnd)}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                  <XAxis
-                    dataKey="month"
-                    tick={{ fill: '#6b7280', fontSize: 12 }}
-                    axisLine={{ stroke: '#e5e7eb' }}
-                  />
+                  <XAxis dataKey="month" tick={{ fill: '#6b7280', fontSize: 12 }} axisLine={{ stroke: '#e5e7eb' }} />
                   <YAxis
                     tick={{ fill: '#6b7280', fontSize: 12 }}
                     axisLine={{ stroke: '#e5e7eb' }}
-                    tickFormatter={(value) => `${value / 1000}k`}
+                    tickFormatter={(v) => `${(v / 1000).toLocaleString('en-IN')}k`}
                   />
                   <Tooltip
-                    contentStyle={{
-                      backgroundColor: '#fff',
-                      border: '1px solid #e5e7eb',
-                      borderRadius: '8px',
-                      padding: '8px'
-                    }}
-                    formatter={(value: number | undefined) => [`${value?.toLocaleString() ?? '0'}`, '']}
+                    contentStyle={{ backgroundColor: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '8px' }}
+                    formatter={(value: number | undefined) => [`${Number(value ?? 0).toLocaleString('en-IN')}`, '']}
                   />
-                  <Legend />
-                  <Bar dataKey="Amazon" fill="#60a5fa" radius={[8, 8, 0, 0]} />
+                  <Bar dataKey="Amazon"  fill="#60a5fa" radius={[8, 8, 0, 0]} />
                   <Bar dataKey="Blinkit" fill="#fbbf24" radius={[8, 8, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
@@ -297,49 +324,42 @@ export default function SalesOverviewPage() {
               <CardTitle className="text-base font-medium">Channel Distribution</CardTitle>
             </CardHeader>
             <CardContent>
-              {(() => {
-                const filteredDist = filterMonthly(monthlyData, filterMode, customStart, customEnd);
-                const distTotal = filteredDist.reduce((s: number, r: any) => s + (r.Amazon || 0) + (r.Blinkit || 0), 0);
-                const distAmz = filteredDist.reduce((s: number, r: any) => s + (r.Amazon || 0), 0);
-                const distBlk = filteredDist.reduce((s: number, r: any) => s + (r.Blinkit || 0), 0);
-                const distChannelData = [
-                  { name: 'Amazon', value: distTotal > 0 ? Math.round((distAmz / distTotal) * 100) : 0, color: '#60a5fa' },
-                  { name: 'Blinkit', value: distTotal > 0 ? Math.round((distBlk / distTotal) * 100) : 0, color: '#fbbf24' },
-                ];
-                const renderLabel = ({ cx, cy, midAngle, outerRadius, name, value }: any) => {
-                  const RADIAN = Math.PI / 180;
-                  const radius = outerRadius + 28;
-                  const x = cx + radius * Math.cos(-midAngle * RADIAN);
-                  const y = cy + radius * Math.sin(-midAngle * RADIAN);
-                  return (
-                    <text x={x} y={y} fill={name === 'Amazon' ? '#3b82f6' : '#f59e0b'}
-                      textAnchor={x > cx ? 'start' : 'end'} dominantBaseline="central" fontSize={13} fontWeight={500}>
-                      {`${name}: ${value}%`}
-                    </text>
-                  );
-                };
-                return (
-                  <ResponsiveContainer width="100%" height={320}>
-                    <PieChart margin={{ top: 20, right: 40, bottom: 20, left: 40 }}>
-                      <Pie
-                        data={distChannelData}
-                        cx="50%"
-                        cy="55%"
-                        labelLine={false}
-                        label={renderLabel}
-                        outerRadius={95}
-                        dataKey="value"
-                      >
-                        {distChannelData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={entry.color} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(value) => `${value}%`} />
-                      <Legend />
-                    </PieChart>
-                  </ResponsiveContainer>
-                );
-              })()}
+              <ResponsiveContainer width="100%" height={220}>
+                <PieChart>
+                  <Pie
+                    data={channelData}
+                    cx="50%"
+                    cy="50%"
+                    outerRadius={85}
+                    dataKey="value"
+                  />
+                  <Tooltip formatter={(value) => `${value}%`} />
+                </PieChart>
+              </ResponsiveContainer>
+
+              {/* Custom legend chips */}
+              <div className="flex flex-col gap-2 mt-1 px-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="w-3 h-3 rounded-full bg-blue-400 shrink-0" />
+                    <span className="text-sm font-medium text-blue-700">Amazon</span>
+                    <span className="text-xs text-muted-foreground">({amazonPct}%)</span>
+                  </div>
+                  <span className="text-sm font-semibold text-slate-700">{fmtCurrency(Math.round(stats.amazon_revenue))}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="w-3 h-3 rounded-full bg-yellow-400 shrink-0" />
+                    <span className="text-sm font-medium text-yellow-700">Blinkit</span>
+                    <span className="text-xs text-muted-foreground">({blinkitPct}%)</span>
+                  </div>
+                  <span className="text-sm font-semibold text-slate-700">{fmtCurrency(Math.round(stats.blinkit_revenue))}</span>
+                </div>
+                <div className="border-t pt-2 mt-1 flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground font-medium">Total Revenue</span>
+                  <span className="text-sm font-bold text-slate-800">{fmtCurrency(Math.round(totalRevenue))}</span>
+                </div>
+              </div>
             </CardContent>
           </Card>
         </div>
@@ -369,11 +389,9 @@ export default function SalesOverviewPage() {
                       onClick={() => setProductChannel(ch)}
                       className={`px-2.5 py-1 text-xs font-medium rounded transition-colors capitalize ${
                         productChannel === ch
-                          ? ch === 'amazon'
-                            ? 'bg-blue-600 text-white'
-                            : ch === 'blinkit'
-                            ? 'bg-yellow-500 text-white'
-                            : 'bg-primary text-primary-foreground'
+                          ? ch === 'amazon'  ? 'bg-blue-600 text-white'
+                          : ch === 'blinkit' ? 'bg-yellow-500 text-white'
+                          : 'bg-primary text-primary-foreground'
                           : 'text-muted-foreground hover:text-foreground'
                       }`}
                     >
@@ -388,12 +406,13 @@ export default function SalesOverviewPage() {
                     className="h-8"
                     onClick={() => exportToCSV(
                       filteredTopProducts.map(p => ({
-                        'Rank': p.rank,
-                        'Product': p.name,
-                        'SKU': p.sku,
-                        'Amazon Units': p.amazon,
-                        'Blinkit Qty': p.blinkit,
-                        'Total': p.total,
+                        'Rank':            p.rank,
+                        'Product':         p.name,
+                        'SKU':             p.sku,
+                        'Amazon Units':    p.amazon,
+                        'Blinkit Qty':     p.blinkit,
+                        'Total Units':     p.total,
+                        'Total Revenue': Math.round((p.amazonRevenue || 0) + (p.blinkitRevenue || 0)),
                       })),
                       'sales_overview_top_products'
                     )}

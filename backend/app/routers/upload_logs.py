@@ -161,29 +161,6 @@ async def get_upload_log_details(
     return log.to_dict()
 
 
-@router.delete("/{log_id}")
-async def delete_upload_log(
-    log_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Delete a specific upload log entry.
-    Admin/Manager only.
-    """
-    if current_user.Role not in ["Admin", "Manager"]:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    log = db.query(UploadLog).filter(UploadLog.Id == log_id).first()
-    if not log:
-        raise HTTPException(status_code=404, detail="Upload log not found")
-
-    db.delete(log)
-    db.commit()
-
-    return {"success": True, "message": f"Upload log {log_id} deleted"}
-
-
 @router.delete("/cleanup")
 async def cleanup_old_upload_logs(
     days: int = Query(180, ge=30, description="Delete logs older than N days"),
@@ -206,3 +183,26 @@ async def cleanup_old_upload_logs(
         "message": f"Deleted {deleted_count} upload logs older than {days} days",
         "deletedCount": deleted_count
     }
+
+
+@router.delete("/{log_id}")
+async def delete_upload_log(
+    log_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete a specific upload log entry.
+    Admin/Manager only.
+    """
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    log = db.query(UploadLog).filter(UploadLog.Id == log_id).first()
+    if not log:
+        raise HTTPException(status_code=404, detail="Upload log not found")
+
+    db.delete(log)
+    db.commit()
+
+    return {"success": True, "message": f"Upload log {log_id} deleted"}

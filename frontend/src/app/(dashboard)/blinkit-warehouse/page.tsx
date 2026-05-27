@@ -388,8 +388,8 @@ export default function BlinkitWarehousePage() {
                                 </CardHeader>
                                 <CardContent>
                                   <div className="max-h-48 overflow-y-auto space-y-2">
-                                    {feUploadResults.uploadedWarehouses.map((warehouse: any, index: number) => (
-                                      <div key={index} className="flex items-center justify-between p-2 bg-green-50 rounded text-sm">
+                                    {feUploadResults.uploadedWarehouses.map((warehouse: any) => (
+                                      <div key={warehouse.warehouseCode} className="flex items-center justify-between p-2 bg-green-50 rounded text-sm">
                                         <span className="font-medium">{warehouse.warehouseName}</span>
                                         <span className="text-muted-foreground">{warehouse.warehouseCode}</span>
                                       </div>
@@ -410,8 +410,8 @@ export default function BlinkitWarehousePage() {
                                 </CardHeader>
                                 <CardContent>
                                   <div className="max-h-48 overflow-y-auto space-y-2">
-                                    {feUploadResults.skippedWarehouses.map((warehouse: any, index: number) => (
-                                      <div key={index} className="p-2 bg-yellow-50 rounded text-sm">
+                                    {feUploadResults.skippedWarehouses.map((warehouse: any) => (
+                                      <div key={warehouse.warehouseCode} className="p-2 bg-yellow-50 rounded text-sm">
                                         <div className="flex items-center justify-between">
                                           <span className="font-medium">{warehouse.warehouseName}</span>
                                           <span className="text-muted-foreground">{warehouse.warehouseCode}</span>
@@ -435,8 +435,8 @@ export default function BlinkitWarehousePage() {
                                 </CardHeader>
                                 <CardContent>
                                   <div className="max-h-48 overflow-y-auto space-y-2">
-                                    {feUploadResults.errors.map((error: any, index: number) => (
-                                      <div key={index} className="p-2 bg-red-50 rounded text-sm">
+                                    {feUploadResults.errors.map((error: any) => (
+                                      <div key={`fe-error-${error.row}`} className="p-2 bg-red-50 rounded text-sm">
                                         <div className="flex items-center justify-between">
                                           <span className="font-medium">Row {error.row}</span>
                                           <span className="text-red-600 text-xs">{error.error}</span>
@@ -803,8 +803,8 @@ export default function BlinkitWarehousePage() {
                                 </CardHeader>
                                 <CardContent>
                                   <div className="max-h-48 overflow-y-auto space-y-2">
-                                    {beUploadResults.uploadedWarehouses.map((warehouse: any, index: number) => (
-                                      <div key={index} className="flex items-center justify-between p-2 bg-green-50 rounded text-sm">
+                                    {beUploadResults.uploadedWarehouses.map((warehouse: any) => (
+                                      <div key={warehouse.warehouseCode} className="flex items-center justify-between p-2 bg-green-50 rounded text-sm">
                                         <span className="font-medium">{warehouse.warehouseName}</span>
                                         <span className="text-muted-foreground">{warehouse.warehouseCode}</span>
                                       </div>
@@ -825,8 +825,8 @@ export default function BlinkitWarehousePage() {
                                 </CardHeader>
                                 <CardContent>
                                   <div className="max-h-48 overflow-y-auto space-y-2">
-                                    {beUploadResults.skippedWarehouses.map((warehouse: any, index: number) => (
-                                      <div key={index} className="p-2 bg-yellow-50 rounded text-sm">
+                                    {beUploadResults.skippedWarehouses.map((warehouse: any) => (
+                                      <div key={warehouse.warehouseCode} className="p-2 bg-yellow-50 rounded text-sm">
                                         <div className="flex items-center justify-between">
                                           <span className="font-medium">{warehouse.warehouseName}</span>
                                           <span className="text-muted-foreground">{warehouse.warehouseCode}</span>
@@ -850,8 +850,8 @@ export default function BlinkitWarehousePage() {
                                 </CardHeader>
                                 <CardContent>
                                   <div className="max-h-48 overflow-y-auto space-y-2">
-                                    {beUploadResults.errors.map((error: any, index: number) => (
-                                      <div key={index} className="p-2 bg-red-50 rounded text-sm">
+                                    {beUploadResults.errors.map((error: any) => (
+                                      <div key={`be-error-${error.row}`} className="p-2 bg-red-50 rounded text-sm">
                                         <div className="flex items-center justify-between">
                                           <span className="font-medium">Row {error.row}</span>
                                           <span className="text-red-600 text-xs">{error.error}</span>

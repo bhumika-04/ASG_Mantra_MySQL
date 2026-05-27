@@ -25,6 +25,7 @@ import { Input } from '@/components/ui/input';
 import { Plus, Pencil, Trash2, Eye, EyeOff } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '@/lib/api';
+import { fmtDate } from '@/lib/format';
 
 interface User {
   id: string;
@@ -72,11 +73,7 @@ export default function UserManagementPage() {
         email: user.email,
         role: user.role as User['role'],
         status: (user.is_active ? 'active' : 'inactive') as 'active' | 'inactive',
-        created: new Date(user.created_at).toLocaleDateString('en-US', {
-          month: 'numeric',
-          day: 'numeric',
-          year: 'numeric'
-        }),
+        created: fmtDate(user.created_at),
       }));
 
       setUsers(transformedUsers);

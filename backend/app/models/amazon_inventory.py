@@ -81,6 +81,7 @@ class AmazonInventoryData(Base):
             "modelNumber": self.ModelNumber,
             "sellableOnHandUnits": self.SellableOnHandUnits,
             "unsellableOnHandUnits": self.UnsellableOnHandUnits,
+            "inTransitQuantity": self.InTransitQuantity,
             "openPurchaseOrderQuantity": self.OpenPurchaseOrderQuantity,
             "netShippedGMS": float(self.NetShippedGMS) if self.NetShippedGMS else None,
             "createdAt": self.CreatedAt.isoformat() if self.CreatedAt else None,
