@@ -30,7 +30,6 @@ frontend/out/
 frontend/build/
 frontend/.env
 frontend/.env.local
-frontend/.env.production
 frontend/coverage/
 frontend/.pnp
 frontend/.pnp.*
@@ -43,8 +42,8 @@ frontend/.yarn/*
 # ===========================
 # Root-level env files
 # ===========================
-.env
-.env.*
+/.env
+/.env.*
 
 # ===========================
 # ===========================
