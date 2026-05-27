@@ -143,6 +143,8 @@ npm run dev
 
 App runs at: `http://localhost:3000`
 
+> **Production:** [https://asg-mantra.vercel.app](https://asg-mantra.vercel.app)
+
 ---
 
 ## Features
