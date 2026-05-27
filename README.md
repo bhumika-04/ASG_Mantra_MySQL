@@ -1,164 +1,139 @@
-# ASG Mantra Sales Dashboard
+# ASG Mantra — Inventory & Analytics Platform
 
-Multi-channel sales analytics dashboard for Amazon and Blinkit channels with inventory management, purchase order tracking, and real-time reporting.
+A full-stack inventory management and analytics dashboard for **ASG Mantra**, consolidating stock, sales, and purchase order data across Amazon and Blinkit channels via their distributors — **R&K Inventory** (Amazon) and **Eagle Network** (Blinkit).
 
-## 📋 Table of Contents
+---
 
-- [Project Overview](#project-overview)
-- [Features](#features)
+## Table of Contents
+
+- [Overview](#overview)
 - [Tech Stack](#tech-stack)
 - [Project Structure](#project-structure)
-- [Getting Started](#getting-started)
-- [Database Setup](#database-setup)
-- [Gap Solutions](#gap-solutions)
-- [API Documentation](#api-documentation)
-- [Authentication & Authorization](#-authentication--authorization)
-- [Permission-Based Access Control](#-permission-based-access-control)
-- [Deployment](#deployment)
+- [Setup](#setup)
+- [Features](#features)
+- [API Endpoints](#api-endpoints)
+- [Roles & Permissions](#roles--permissions)
+- [Data Sources & File Formats](#data-sources--file-formats)
+- [Upload Flow](#upload-flow)
 
 ---
 
-## 🎯 Project Overview
+## Overview
 
-ASG Mantra Sales Dashboard is a full-stack analytics application designed to manage and analyze sales data from multiple e-commerce channels (Amazon and Blinkit). The system addresses real-world data challenges by implementing gap solutions that align with actual file formats and business requirements.
-
-### Key Capabilities
-
-- **Multi-Channel Sales Tracking**: Separate analytics for Amazon (aggregated) and Blinkit (transactional) data
-- **Inventory Management**: Channel-based stock tracking with low-stock alerts
-- **Purchase Order Management**: Track POs from creation to delivery
-- **User Management**: Role-based access control (Admin, Manager, Distributors)
-- **File Upload Processing**: Automated data ingestion from CSV/Excel files
-- **Real-Time Dashboard**: KPIs, charts, and insights
-
----
-
-## ✨ Features
-
-### Frontend (Next.js 16)
-- **Dashboard**: Revenue, transactions, channel distribution, trends
-- **Sales Analytics**: Separate pages for Amazon and Blinkit with custom metrics
-- **Inventory Dispatch**: Real-time stock levels by channel
-- **Purchase Order Tracking**: Overview and detailed PO management
-- **User Management**: CRUD operations for users and roles
-- **Product Catalog**: Master product list with cross-channel mapping
-- **Responsive UI**: Modern design with Tailwind CSS and Shadcn components
-
-### Backend (FastAPI)
-- **RESTful API**: Complete CRUD operations for all entities
-- **Authentication**: JWT-based auth with bcrypt password hashing
-- **Database ORM**: SQLAlchemy models for MSSQL Server
-- **File Processing**: Pandas-based CSV/Excel upload handling
-- **Role-Based Access**: Admin, Manager, Amazon-distributor, Blinkit-distributor
-- **API Documentation**: Auto-generated Swagger UI
-
----
-
-## 🛠️ Tech Stack
-
-### Frontend
-- **Framework**: Next.js 16 (App Router)
-- **Language**: TypeScript
-- **Styling**: Tailwind CSS
-- **UI Components**: Shadcn UI, Radix UI
-- **Charts**: Recharts
-- **HTTP Client**: Fetch API
-- **State Management**: React Hooks
-
-### Backend
-- **Framework**: FastAPI
-- **Language**: Python 3.9+
-- **Database**: Microsoft SQL Server
-- **ORM**: SQLAlchemy
-- **Authentication**: JWT (python-jose), bcrypt (passlib)
-- **File Processing**: Pandas, openpyxl
-- **Validation**: Pydantic
-
-### Database
-- **RDBMS**: Microsoft SQL Server
-- **Schema Version**: 2.0.0 (aligned with data reality)
-- **Features**: Triggers, stored procedures, computed columns, indexes
-
----
-
-## 📁 Project Structure
+The platform provides a unified view across the supply chain:
 
 ```
-indus-techginia/
-├── frontend/                    # Next.js frontend application
-│   ├── src/
-│   │   ├── app/                # App router pages
-│   │   │   ├── (dashboard)/    # Protected dashboard routes
-│   │   │   ├── auth/           # Authentication pages
-│   │   │   └── layout.tsx      # Root layout
-│   │   ├── components/         # Reusable components
-│   │   │   ├── ui/            # Shadcn UI components
-│   │   │   └── ProtectedRoute.tsx
-│   │   └── lib/               # Utilities and API client
-│   ├── public/                # Static assets
-│   ├── package.json
-│   └── tailwind.config.ts
-│
-├── backend/                    # FastAPI backend application
+ASG Warehouse → Distributor (Eagle / R&K) → Channel (Blinkit / Amazon)
+```
+
+Key capabilities:
+- Track **packed/unpacked ASG stock** with date snapshots
+- Monitor **Amazon inventory, sales, and POs** (PDF + CSV upload)
+- Monitor **Blinkit inventory** (FE dark stores + BE hubs), **sales, and POs**
+- Track **Eagle Network** distributor stock across 4 regional warehouses (DL, MH, KT, WB)
+- **Purchase Order lifecycle** from creation through fulfilment
+- Role-based access for Admin, Manager, and Viewer roles
+- Audit trail of all user actions with 60-day auto-retention
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js 14 (App Router), TypeScript, Tailwind CSS, shadcn/ui, Recharts |
+| Backend | FastAPI, SQLAlchemy ORM, Python 3.11+ |
+| Database | Microsoft SQL Server (MSSQL) via `pyodbc` |
+| Auth | JWT-based with role-based access control |
+| PDF Parsing | pdfplumber (Amazon PO PDFs, Eagle stock PDFs) |
+| File Processing | Pandas, openpyxl (CSV/XLSX uploads) |
+
+---
+
+## Project Structure
+
+```
+ASG_Mantra/
+├── backend/
 │   ├── app/
-│   │   ├── models/            # SQLAlchemy ORM models
-│   │   │   ├── sales.py       # ✅ OrderId NULLABLE for Amazon
-│   │   │   ├── inventory.py   # ✅ Channel-based model
-│   │   │   ├── purchase_order.py
-│   │   │   ├── product.py
-│   │   │   ├── warehouse.py
-│   │   │   ├── user.py
-│   │   │   ├── alert.py
-│   │   │   ├── notification.py
-│   │   │   └── audit_log.py
-│   │   ├── routers/           # API endpoints
-│   │   │   ├── auth.py        # Login/logout
-│   │   │   ├── dashboard.py   # KPI stats
-│   │   │   ├── sales.py       # Sales CRUD + analytics
-│   │   │   ├── inventory.py   # Inventory management
+│   │   ├── models/              # SQLAlchemy ORM models
+│   │   ├── routers/             # FastAPI route handlers
+│   │   │   ├── amazon_data.py   # Amazon sales, inventory, PO upload
+│   │   │   ├── blinkit_data.py  # Blinkit sales, inventory, PO upload
 │   │   │   ├── purchase_orders.py
-│   │   │   ├── products.py
-│   │   │   ├── users.py
-│   │   │   ├── warehouses.py
-│   │   │   ├── alerts.py
-│   │   │   └── uploads.py     # File upload processing
-│   │   ├── utils/             # Helper utilities
-│   │   │   ├── auth.py        # JWT handling
-│   │   │   ├── security.py    # Password hashing
-│   │   │   └── dependencies.py
-│   │   ├── config.py          # Configuration
-│   │   └── database.py        # DB connection
-│   ├── main.py                # FastAPI app entry
-│   ├── requirements.txt
-│   └── .env.example
+│   │   │   ├── dashboard.py
+│   │   │   ├── inventory.py
+│   │   │   ├── notifications.py
+│   │   │   ├── audit_logs.py
+│   │   │   └── upload_logs.py
+│   │   ├── schemas/             # Pydantic schemas
+│   │   ├── services/            # PDF parsers
+│   │   │   ├── amazon_pdf_parser.py
+│   │   │   └── eagle_pdf_parser.py
+│   │   └── utils/               # Audit logging, auth dependencies
+│   ├── main.py                  # App entry, startup tasks, audit cleanup loop
+│   └── requirements.txt
 │
-├── database/                   # SQL scripts
-│   ├── schema-updated.sql     # ✅ USE THIS - Aligned with data reality
-│   ├── schema.sql             # ⚠️ Old version
-│   └── seed-data.sql          # Sample data
+├── frontend/
+│   ├── src/
+│   │   ├── app/(dashboard)/     # All dashboard pages (Next.js App Router)
+│   │   ├── components/          # Shared UI components + shadcn primitives
+│   │   ├── contexts/            # AuthContext, FilterContext (global date filter)
+│   │   ├── lib/                 # API client (api.ts), navigation, utilities
+│   │   └── types/               # Route permission definitions
+│   └── package.json
 │
-└── README.md                   # This file
+├── database/
+│   ├── Script.sql               # Full DB creation script
+│   └── CleanUp.sql              # Reset script for test runs
+│
+└── README.md
 ```
 
 ---
 
-## 🚀 Getting Started
+## Setup
 
 ### Prerequisites
 
-- **Node.js**: 18+ and npm
-- **Python**: 3.9+
-- **Database**: Microsoft SQL Server 2019+ or Azure SQL Database
-- **Tools**: VS Code (recommended), SQL Server Management Studio (SSMS) or Azure Data Studio
+- Python 3.11+
+- Node.js 18+ and npm
+- Microsoft SQL Server (Express or full edition)
+- ODBC Driver 17 for SQL Server
 
-### 1. Clone the Repository
+### Database
+
+1. Open SSMS or Azure Data Studio
+2. Run `database/Script.sql` to create `TechGenia_Analytics` database and all tables
+3. Default admin is created automatically: `admin@techgenia.com` / `Admin@123`
+
+### Backend
 
 ```bash
-git clone https://github.com/Bhumika-Indas/ASG-Mantra.git
-cd ASG-Mantra
+cd backend
+python -m venv venv
+venv\Scripts\activate        # Windows
+pip install -r requirements.txt
 ```
 
-### 2. Setup Frontend
+Create `backend/.env`:
+```env
+DATABASE_URL=mssql+pyodbc://localhost\SQLEXPRESS/TechGenia_Analytics?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes
+SECRET_KEY=your-secret-key-minimum-32-chars
+ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=480
+```
+
+Start the server:
+```bash
+python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
+
+> **Note (Windows):** Uvicorn hot reload can be unreliable on Windows. Do a full stop + restart after editing backend files.
+
+API docs available at: `http://localhost:8000/docs`
+
+### Frontend
 
 ```bash
 cd frontend
@@ -166,526 +141,125 @@ npm install
 npm run dev
 ```
 
-Frontend runs on: http://localhost:3000
-
-### 3. Setup Backend
-
-```bash
-cd backend
-
-# Create virtual environment
-python -m venv venv
-
-# Activate virtual environment
-# Windows:
-venv\Scripts\activate
-# Mac/Linux:
-source venv/bin/activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure environment
-copy .env.example .env
-# Edit .env with your database credentials
-
-# Run backend
-python -m uvicorn app.main:app --reload
-```
-
-Backend runs on: http://localhost:8000
-
-API Docs: http://localhost:8000/api/docs
+App runs at: `http://localhost:3000`
 
 ---
 
-## 🗄️ Database Setup
+## Features
 
-### Step 1: Create Database
-
-**IMPORTANT**: Use `database/schema-updated.sql` (not `schema.sql`) - it has all gap solutions implemented.
-
-```sql
--- Connect to MSSQL Server using SSMS or Azure Data Studio
--- Open: database/schema-updated.sql
--- Execute all statements
-```
-
-This creates:
-- 9 tables (Users, Products, Inventory, Sales, PurchaseOrders, Warehouses, Alerts, Notifications, AuditLogs)
-- Indexes for performance
-- Foreign key constraints
-- Computed columns (NetRevenue)
-
-### Step 2: Add Sample Data (Optional)
-
-```sql
--- Open: database/seed-data.sql
--- Execute all statements
-```
-
-Sample data includes:
-- Admin user (check file for credentials)
-- 10 products
-- Inventory records
-- 7 warehouses
-- Sample sales and PO data
-
-### Step 3: Configure Backend .env
-
-```env
-# Database Connection
-DB_SERVER=your-server.database.windows.net
-DB_PORT=1433
-DB_NAME=ASG Mantra_Analytics
-DB_USER=your_username
-DB_PASSWORD=your_password
-DB_DRIVER=ODBC Driver 18 for SQL Server
-
-# JWT Configuration
-SECRET_KEY=generate-a-random-secret-key-minimum-32-characters
-ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=30
-
-# CORS
-ALLOWED_ORIGINS=http://localhost:3000
-
-# App Config
-DEBUG=True
-PORT=8000
-```
-
-**Generate SECRET_KEY:**
-```python
-import secrets
-print(secrets.token_urlsafe(32))
-```
-
----
-
-## 🔧 Gap Solutions Implemented
-
-The application addresses 6 critical gaps between frontend expectations and actual data file formats:
-
-### GAP 1: Amazon Order Count ✅
-**Problem**: Amazon sales files have NO Order IDs (product-day aggregates)
-
-**Solution**:
-- `Sales.OrderId` is NULLABLE in database and model
-- Frontend displays "Total Transactions" instead of "Total Orders" for Amazon
-- Blinkit still shows "Total Orders" (has real Order IDs)
-
-### GAP 2: Customer Analytics ✅
-**Problem**: Amazon files have ZERO customer information
-
-**Solution**:
-- Customer fields (City, State, PaymentMode) are NULLABLE
-- Only populated for Blinkit sales
-- Frontend ready to add customer widgets for Blinkit only (future)
-
-### GAP 3: Packed/Unpacked Inventory ✅
-**Problem**: Source files only have Available + Reserved (no packed/unpacked concept)
-
-**Solution**:
-- Inventory model is channel-based: `(ProductId, Channel, CurrentStock)`
-- One record per product per channel (Amazon/Blinkit separate)
-- Frontend shows: Amazon Stock | Blinkit Stock | Total Stock
-
-### GAP 4: Profit Metrics ✅
-**Problem**: No cost price or consistent commission data in files
-
-**Solution**:
-- Schema includes `Commission` and `NetRevenue` fields for future
-- Frontend doesn't show profit/margin widgets yet (Phase 1)
-- Will be enabled when cost data is added (Phase 2)
-
-### GAP 5: PO Status Auto-Updates ✅
-**Problem**: PO PDFs are static, no real-time tracking
-
-**Solution**:
-- Manual status updates via API: `PUT /api/purchase-orders/{id}/status`
-- Status options: Pending, Shipped, Delivered, Partial, Received, Cancelled
-- Future: Auto-delay flagging for overdue POs
-
-### GAP 6: Hub Stock vs Channel Stock ✅
-**Problem**: Risk of mixing distributor hub stock with channel inventory
-
-**Solution**:
-- Strict separation: Inventory table ONLY has Amazon + Blinkit channel stock
-- Hub stock tracked separately (optional future table)
-- Frontend shows only channel inventory
-
----
-
-## 📚 API Documentation
-
-### Authentication
-
-**POST** `/api/auth/login`
-```json
-{
-  "email": "admin@techgenia.com",
-  "password": "Admin@123"
-}
-```
-
-Returns JWT token for authenticated requests.
-
-### Dashboard Stats
-
-**GET** `/api/dashboard/stats`
-
-Returns:
-```json
-{
-  "totalRevenue": 1500000,
-  "totalOrders": 450,
-  "amazonRevenue": 900000,
-  "blinkitRevenue": 600000,
-  "lowStockCount": 12
-}
-```
-
-### Sales Analytics
-
-**GET** `/api/sales/analytics?days=30&channel=Amazon`
-
-Returns sales summary, top products, daily trend, and channel breakdown.
+### Dashboard
+- KPI cards: Total SKUs, Packed Qty, Unpacked Qty, Pending POs, Low Stock count
+- Monthly sales trend chart (Amazon + Blinkit combined)
+- Top products by revenue
+- Low inventory alert panel
 
 ### Inventory
+- Cross-channel stock view per product: ASG (packed / unpacked) + Amazon + Blinkit (FE dark store / BE hub)
+- **Snapshot date picker** — highlights dates that have uploaded data with green dots; latest snapshot shown in blue
+- Filter by channel (Amazon / Blinkit) and stock status
+- Export to CSV
 
-**GET** `/api/inventory?channel=Amazon&lowStockOnly=true&page=1&pageSize=50`
-
-List inventory with filtering, search, and pagination.
-
-**PUT** `/api/inventory/{id}`
-
-Update stock levels.
+### Sales Analytics
+- Amazon sales: total units, revenue, active ASINs, monthly growth
+- Blinkit sales: qty sold, MRP revenue, active items, monthly growth
+- Daily trend chart, top products table
+- Global date range filter (header) applies to all chart and KPI data
 
 ### Purchase Orders
+- Amazon: PDF upload → auto-parse line items → preview → confirm
+- Blinkit: CSV/PDF upload → preview → confirm
+- Duplicate PO detection before confirm
+- Status update per PO and per line item
+- PO overview (paginated, with search, status and date filters)
+- PO Lifecycle page with status funnel KPIs
 
-**GET** `/api/purchase-orders/amazon?status=Pending&page=1`
+### Distributors
+- Eagle Network weekly stock report upload (XLSX)
+- Per-region stock view (DL, MH, KT, WB)
+- Download CSV template for data entry
 
-List Amazon POs with filtering.
-
-**PUT** `/api/purchase-orders/{id}/status`
-
-Update PO status manually.
-
-### File Uploads
-
-**POST** `/api/uploads/amazon/sales` (multipart/form-data)
-
-Upload Amazon sales CSV file for processing.
-
-**POST** `/api/uploads/blinkit/inventory`
-
-Upload Blinkit inventory Excel file.
+### Administration
+- User management (create, edit, deactivate)
+- Role management with permission badges
+- Activity log (audit trail — Admin/Manager only)
+- Upload history log
+- Notifications with unread badge in header (polled every 60s)
+- Audit logs auto-deleted after 60 days via background task
 
 ---
 
-## 🔒 Authentication & Authorization
+## API Endpoints
 
-### Roles
+| Prefix | Purpose |
+|---|---|
+| `POST /api/auth/login` | Authenticate, returns JWT |
+| `GET /api/dashboard/inventory-stats` | Dashboard KPIs |
+| `GET /api/dashboard/charts` | Sales trend + top products |
+| `/api/upload/amazon-data/...` | Amazon sales, inventory, PO upload/confirm |
+| `/api/upload/blinkit-data/...` | Blinkit sales, inventory, PO upload/confirm |
+| `/api/purchase-orders/amazon` | Amazon PO list (paginated) |
+| `/api/purchase-orders/blinkit` | Blinkit PO list (paginated) |
+| `/api/purchase-orders/amazon/stats` | Amazon PO status counts |
+| `/api/purchase-orders/amazon/states` | Distinct ship-to states |
+| `/api/purchase-orders/amazon/overview` | Aggregated Amazon PO overview |
+| `/api/inventory/dispatch-overview` | Cross-channel inventory per product |
+| `/api/inventory/low-stock` | Products below threshold |
+| `/api/notifications` | Notification CRUD, mark-as-read |
+| `/api/audit-logs` | Activity log (Admin/Manager) |
+| `/api/upload-logs` | Upload history |
+| `/api/users` | User CRUD |
+| `/api/roles` | Role management |
+
+---
+
+## Roles & Permissions
 
 | Role | Access |
-|------|--------|
-| **admin** | Full access to all features |
-| **manager** | View all, manage inventory/POs, no user management |
-| **amazon-distributor** | Amazon channel only |
-| **blinkit-distributor** | Blinkit channel only |
+|---|---|
+| **Admin** | Full access — all pages including user management, role management, audit logs |
+| **Manager** | All data pages, uploads, audit logs — no user/role management |
+| **Viewer** | Read-only access to dashboard, sales, inventory, POs |
 
-### Protected Routes
-
-Frontend uses `ProtectedRoute` component to guard dashboard pages. Backend uses `get_current_user` dependency to verify JWT tokens.
+Route-level permissions are defined in `frontend/src/types/route-permissions.ts`.
 
 ---
 
-## 📊 Implementation Status
+## Data Sources & File Formats
 
-| Component | Status |
-|-----------|--------|
-| Database Schema | ✅ 100% Complete |
-| Backend Models | ✅ 100% Complete (5 models updated) |
-| Backend API Routers | ✅ 100% Complete (8 routers) |
-| Frontend Pages | ✅ 100% Complete (13 pages) |
-| Frontend Labels | ✅ 100% Complete (Gap-aligned) |
-| Mock Data Removal | ✅ 100% Complete |
-| Gap Solutions | ✅ 100% Implemented (All 6 gaps) |
+All Amazon CSV files have a **metadata row on line 1** that is skipped on upload (`skiprows=1`). Row 2 is the actual header.
 
----
+| File Pattern | Channel | Type | Notes |
+|---|---|---|---|
+| `Sales_DD.MM.YY.csv` | Amazon | Sales | ASIN, Product Title, Ordered Units, Revenue |
+| `Inventory_DD.MM.YY.csv` (Format A) | Amazon | Inventory | No Model Number — products get placeholder SKU |
+| `Inventory_DD.MM.YY.csv` (Format B) | Amazon | Inventory | Has Model Number — creates products with ASG SKU |
+| `sales_DD.MM.YY.csv` (lowercase) | Blinkit | Sales | item_id, city, date, qty_sold, mrp |
+| `Blinkit_Inventory Report_*.csv` | Blinkit | Inventory | Aggregated by item_id across facilities |
+| `RK Inventory & Sale Report.xlsx` | Amazon/R&K | Distributor | Multi-sheet, ASIN, SKU, Sellable, DRR |
+| `STOCK & SALE REPORT.xlsx` | Internal | ASG Stock | 3 sheets: SALE REPORT, SALE DATA, STOCK REPORT |
 
-## 🚢 Deployment
-
-### Live URLs
-
-| Service | URL |
-|---------|-----|
-| **Frontend** | https://asg-mantra.vercel.app |
-| **Backend API** | https://asgmantra.indusanalytics.co.in |
-| **API Docs** | https://asgmantra.indusanalytics.co.in/api/docs |
-
-### Frontend (Vercel)
-
-Deployed via Vercel — connected to GitHub repo (`Bhumika-Indas/ASG-Mantra`), root directory `frontend`.
-
-Environment variable set in Vercel dashboard:
-- `NEXT_PUBLIC_API_URL=https://asgmantra.indusanalytics.co.in`
-
-Auto-deploys on every push to `main`.
-
-### Backend
-
-Hosted at `https://asgmantra.indusanalytics.co.in` (IndusAnalytics server).
-
-Backend `.env` must include the Vercel frontend in CORS:
-```env
-ALLOWED_ORIGINS=http://localhost:3000,https://asg-mantra.vercel.app
-```
+**Recommended upload order for Amazon:**
+1. Inventory Format B files (creates products with proper ASG SKU)
+2. Sales files (links to existing products)
+3. PO PDFs
+4. Inventory Format A (product already exists, SKU not overwritten)
 
 ---
 
-## 🐛 Troubleshooting
+## Upload Flow
 
-### Frontend
+All data uploads use a **2-step preview → confirm** pattern:
 
-**Issue**: Module not found errors
-```bash
-cd frontend
-rm -rf node_modules package-lock.json
-npm install
-```
+1. **Preview** — file is parsed and validated; returns `validRows`, `newProducts`, `duplicateWarning`, `poSummary` — nothing is written to the database
+2. **Confirm** — user reviews the preview and submits; data is written to the database
 
-**Issue**: API calls fail with CORS error
-- Check backend CORS settings in `app/main.py`
-- Ensure frontend URL is in `ALLOWED_ORIGINS` env var
-
-### Backend
-
-**Issue**: Database connection fails
-- Verify SQL Server is running
-- Check firewall allows connections
-- Confirm credentials in `.env` are correct
-- Test connection: `sqlcmd -S your-server -U username -P password`
-
-**Issue**: JWT token errors
-- Ensure `SECRET_KEY` is set in `.env` (minimum 32 characters)
-- Check token hasn't expired (default: 30 minutes)
-
-### Database
-
-**Issue**: OrderId constraint violation
-- If using old schema, drop and recreate with `schema-updated.sql`
-- Old schema has `OrderId NOT NULL` (incompatible with Amazon data)
-
-**Issue**: Inventory unique constraint error
-- New schema uses `(ProductId, Channel, WarehouseId)` unique constraint
-- Old schema was different - use `schema-updated.sql`
+Duplicate detection:
+- Sales/Inventory: checks if the same report date already exists
+- PO CSV: checks each PO number against existing records
+- PO PDF: checks PO number before parsing
 
 ---
 
-## 🔐 Permission-Based Access Control
+## License
 
-### Overview
-
-The application now includes a comprehensive permission-based access control system where roles have specific permissions stored in the database, and these permissions control what users can see and do.
-
-### Setup Instructions
-
-#### 1. Seed Default Roles
-
-Run the seeder script to create default roles with permissions:
-
-```bash
-cd backend
-python scripts/seed_roles.py
-```
-
-This creates these default roles:
-
-| Role | Permissions | Description |
-|------|-------------|-------------|
-| **Admin** | All 10 permissions | Full system access |
-| **Manager** | 8 permissions | Manage products & inventory (no user/role management) |
-| **Amazon Distributor** | 4 permissions | View Amazon data (dashboard, Amazon, sales, reports) |
-| **Blinkit Distributor** | 4 permissions | View Blinkit data (dashboard, Blinkit, sales, reports) |
-
-#### 2. Available Permissions
-
-| Permission ID | Name | Description |
-|--------------|------|-------------|
-| `view-dashboard` | View Dashboard | Access to main dashboard |
-| `view-amazon` | View Amazon | Access to Amazon dashboards and PO |
-| `view-blinkit` | View Blinkit | Access to Blinkit dashboards and PO |
-| `view-sales` | View Sales | Access to sales reports |
-| `view-analytics` | View Analytics | Access to analytics dashboard |
-| `manage-products` | Manage Products | Create and edit products |
-| `manage-inventory` | Manage Inventory | Update stock levels |
-| `manage-users` | Manage Users | Create and manage user accounts |
-| `manage-roles` | Manage Roles | Create and manage roles |
-| `view-reports` | View Reports | Access to all reports |
-
-### Backend Usage
-
-#### Method 1: Require Specific Permissions
-
-```python
-from app.utils.dependencies import require_permissions
-
-@router.post("/products")
-async def create_product(
-    product_data: ProductCreate,
-    current_user: User = Depends(require_permissions(["manage-products"]))
-):
-    # Only users with 'manage-products' permission can access
-    return {"message": "Product created"}
-```
-
-#### Method 2: Get User Permissions
-
-```python
-from app.utils.dependencies import get_user_permissions
-
-@router.get("/dashboard")
-async def get_dashboard(
-    permissions: list[str] = Depends(get_user_permissions),
-    db: Session = Depends(get_db)
-):
-    data = {"basic": "info"}
-
-    if "view-analytics" in permissions:
-        data["analytics"] = get_analytics_data(db)
-
-    return data
-```
-
-### Frontend Usage
-
-#### Using the `usePermissions` Hook
-
-```typescript
-import { usePermissions, PERMISSIONS } from '@/hooks/usePermissions';
-
-function ProductManagement() {
-  const { hasPermission, hasAnyPermission, isAdmin } = usePermissions();
-
-  return (
-    <div>
-      {/* Check single permission */}
-      {hasPermission(PERMISSIONS.MANAGE_PRODUCTS) && (
-        <Button onClick={createProduct}>Create Product</Button>
-      )}
-
-      {/* Check if user has ANY of these permissions */}
-      {hasAnyPermission([PERMISSIONS.VIEW_AMAZON, PERMISSIONS.VIEW_BLINKIT]) && (
-        <ChannelSelector />
-      )}
-    </div>
-  );
-}
-```
-
-#### Using `ProtectedRoute` with Permissions
-
-```typescript
-import { ProtectedRoute } from '@/components/ProtectedRoute';
-import { PERMISSIONS } from '@/hooks/usePermissions';
-
-// Protect page with specific permissions
-<ProtectedRoute requiredPermissions={[PERMISSIONS.MANAGE_USERS]}>
-  <UserManagementPage />
-</ProtectedRoute>
-
-// User must have ANY permission
-<ProtectedRoute
-  requiredPermissions={[PERMISSIONS.VIEW_AMAZON, PERMISSIONS.VIEW_BLINKIT]}
-  requireAll={false}
->
-  <SalesDashboard />
-</ProtectedRoute>
-
-// Traditional role-based (still works)
-<ProtectedRoute allowedRoles={['admin', 'manager']}>
-  <ReportsPage />
-</ProtectedRoute>
-```
-
-### Managing Roles and Permissions
-
-#### Via UI (Admin Only)
-
-1. Navigate to [http://localhost:3000/role-management](http://localhost:3000/role-management)
-2. Click "Add Role" to create a new role
-3. Enter role name and description
-4. Select permissions from the checkbox list
-5. Click "Create Role"
-
-**Note**: System roles (Admin) are locked and cannot be edited or deleted.
-
-#### Via Database Script
-
-Edit `backend/scripts/seed_roles.py` to add custom roles:
-
-```python
-{
-    "name": "Sales Analyst",
-    "description": "View sales data and analytics",
-    "permissions": [
-        "view-dashboard",
-        "view-sales",
-        "view-analytics",
-        "view-reports",
-    ],
-    "is_locked": False,
-}
-```
-
-Then run: `python backend/scripts/seed_roles.py`
-
-### Files Modified
-
-#### Backend
-- `backend/app/routers/auth.py` - Returns user permissions on login
-- `backend/app/utils/dependencies.py` - Permission checking functions (`require_permissions`, `get_user_permissions`)
-- `backend/app/schemas/user.py` - UserResponse includes permissions array
-- `backend/scripts/seed_roles.py` - Database seeder script for roles
-
-#### Frontend
-- `frontend/src/hooks/usePermissions.ts` - Permission checking hook with PERMISSIONS constants
-- `frontend/src/types/auth.ts` - User type includes permissions
-- `frontend/src/components/ProtectedRoute.tsx` - Enhanced with permission-based access
-
----
-
-## 📝 Next Steps
-
-1. **Create Database**: Run `database/schema-updated.sql`
-2. **Add Sample Data**: Run `database/seed-data.sql`
-3. **Seed Roles & Permissions**: Run `python backend/scripts/seed_roles.py` (creates Admin, Manager, and Distributor roles)
-4. **Configure .env**: Update backend environment variables
-5. **Test Backend**: Start backend and verify API docs load
-6. **Test Frontend**: Start frontend and login with sample user
-7. **Upload Files**: Use upload endpoints to import your real data
-8. **Manage Roles**: Navigate to `/role-management` to create custom roles with specific permissions
-
----
-
-## 📄 License
-
-Proprietary - ASG Mantra Analytics
-
----
-
-## 🤝 Support
-
-For issues or questions:
-1. Check this README
-2. Review API documentation at `/api/docs`
-3. Check database schema comments in `schema-updated.sql`
-4. Review gap solutions section above
-
----
-
-**Last Updated**: 2026-02-02
-**Schema Version**: 2.0.0
-**Status**: ✅ Production Ready - All Gaps Solved
+Proprietary — ASG Mantra / Indus Analytics
