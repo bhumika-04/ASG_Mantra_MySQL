@@ -80,6 +80,7 @@ interface POItem {
   state: string;
   shipTo: string;
   delivery: string;
+  po_expiry: string;
   status: string;
 }
 
@@ -197,13 +198,16 @@ function BlinkitPOPageContent() {
         ordered_qty: po.quantity,
         accepted_qty: po.accepted_qty ?? null,
         mapped_sku: po.asg_sku || po.asgSku || '',
-        pending_qty: Math.max(0, (po.quantity || 0) - (po.received_quantity || 0)),
+        pending_qty: po.accepted_qty != null
+          ? Math.max(0, (po.quantity || 0) - po.accepted_qty)
+          : Math.max(0, (po.quantity || 0) - (po.received_quantity || 0)),
         unit_cost: po.unit_price ?? null,
         total_cost: po.total_amount ?? null,
         city: po.ship_to_city || '—',
         state: po.ship_to_state || '—',
         shipTo: po.ship_to_name || '—',
         delivery: po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : '-',
+        po_expiry: po.po_expiry_date ? fmtDate(po.po_expiry_date) : '-',
         status: po.status || 'Created',
       }));
       setPoData(transformedPOs);
@@ -402,11 +406,19 @@ function BlinkitPOPageContent() {
     },
     {
       id: 'delivery',
-      header: 'Delivery',
+      header: 'Expected Delivery',
       accessorKey: 'delivery',
+      width: 130,
+      minWidth: 110,
+      cell: (row) => <span className="text-muted-foreground">{row.delivery}</span>,
+    },
+    {
+      id: 'poExpiry',
+      header: 'PO Expiry',
+      accessorKey: 'po_expiry',
       width: 110,
       minWidth: 90,
-      cell: (row) => <span className="text-muted-foreground">{row.delivery}</span>,
+      cell: (row) => <span className="text-muted-foreground">{row.po_expiry}</span>,
     },
     {
       id: 'status',
@@ -594,7 +606,8 @@ function BlinkitPOPageContent() {
                     'City': p.city,
                     'State': p.state,
                     'Ship To': p.shipTo,
-                    'Delivery': p.delivery,
+                    'Expected Delivery': p.delivery,
+                    'PO Expiry': p.po_expiry,
                     'Status': p.status,
                   })),
                   'blinkit_po'

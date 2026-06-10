@@ -84,7 +84,8 @@ export default function AmazonPOOverviewPage() {
           po_number: po.po_number,
           po_date: po.order_date ? fmtDate(po.order_date) : 'N/A',
           orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
-          po_expiry: po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : 'N/A',
+          po_expiry: po.po_cancellation_date ? fmtDate(po.po_cancellation_date)
+            : po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : 'N/A',
           products: po.item_count,
           totalQty: po.total_qty,
           status: po.status || 'Created',

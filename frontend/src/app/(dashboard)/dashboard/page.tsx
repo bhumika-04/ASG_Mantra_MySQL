@@ -1,7 +1,7 @@
 ﻿'use client';
 
 import { useState, useEffect } from 'react';
-import { useFilter, computeDateRange } from '@/contexts/FilterContext';
+import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -80,7 +80,7 @@ interface TopProduct {
 interface ChartData {
   monthly_sales: MonthlySalesItem[];
   top_products: TopProduct[];
-  is_weekly: boolean;
+  granularity: 'daily' | 'weekly' | 'monthly';
 }
 
 
@@ -91,8 +91,8 @@ function stripBrand(name: string): string {
     .trim();
 }
 
-function formatPeriodLabel(p: string, isWeekly: boolean): string {
-  if (isWeekly && p.length === 10) {
+function formatPeriodLabel(p: string, granularity: 'daily' | 'weekly' | 'monthly'): string {
+  if ((granularity === 'daily' || granularity === 'weekly') && p.length === 10) {
     const d = new Date(p + 'T00:00:00');
     return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
   }
@@ -101,8 +101,23 @@ function formatPeriodLabel(p: string, isWeekly: boolean): string {
   return d.toLocaleDateString('en-IN', { month: 'short', year: '2-digit' });
 }
 
+function fmtRangeDate(iso: string): string {
+  const [year, m, d] = iso.split('-');
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${parseInt(d)} ${months[parseInt(m) - 1]} ${year}`;
+}
+
 export default function DashboardPage() {
   const { filterMode, customStart, customEnd } = useFilter();
+
+  const dateRangeLabel = (() => {
+    if (filterMode === 'all') return null;
+    const { start_date, end_date } = computeDateRange(filterMode as FilterMode, customStart, customEnd);
+    if (start_date && end_date) return `${fmtRangeDate(start_date)} – ${fmtRangeDate(end_date)}`;
+    if (start_date) return `From ${fmtRangeDate(start_date)}`;
+    return null;
+  })();
+
   const [topProductsChannel, setTopProductsChannel] = useState('all');
   const [isChartLoading, setIsChartLoading] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
@@ -126,7 +141,7 @@ export default function DashboardPage() {
   });
   const [lowInventoryItems, setLowInventoryItems] = useState<LowInventoryItem[]>([]);
   const [lowStockCounts, setLowStockCounts] = useState({ critical: 0, low: 0 });
-  const [chartData, setChartData] = useState<ChartData>({ monthly_sales: [], top_products: [], is_weekly: false });
+  const [chartData, setChartData] = useState<ChartData>({ monthly_sales: [], top_products: [], granularity: 'monthly' });
 
   // Fetch stats & low stock once on mount
   useEffect(() => {
@@ -161,7 +176,7 @@ export default function DashboardPage() {
         setChartData({
           monthly_sales: charts.monthly_sales || [],
           top_products: charts.top_products || [],
-          is_weekly: charts.is_weekly || false,
+          granularity: charts.granularity || 'monthly',
         });
       })
       .catch((err: any) => console.error('Chart fetch error:', err))
@@ -236,9 +251,14 @@ export default function DashboardPage() {
             {/* 1. Sales Performance - Area Chart */}
             <Card>
               <CardHeader className="pb-2">
-                <CardTitle className="text-base font-medium">
-                  {chartData.is_weekly ? 'Weekly' : 'Monthly'} Sales Performance
-                </CardTitle>
+                <div className="flex items-start justify-between gap-2">
+                  <CardTitle className="text-base font-medium">
+                    {chartData.granularity === 'daily' ? 'Daily' : chartData.granularity === 'weekly' ? 'Weekly' : 'Monthly'} Sales Performance
+                  </CardTitle>
+                  {dateRangeLabel && (
+                    <span className="text-xs text-muted-foreground whitespace-nowrap shrink-0">{dateRangeLabel}</span>
+                  )}
+                </div>
               </CardHeader>
               <CardContent>
                 <ResponsiveContainer width="100%" height={240}>
@@ -254,9 +274,9 @@ export default function DashboardPage() {
                       </linearGradient>
                     </defs>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                    <XAxis dataKey="month" tick={{ fill: '#6b7280', fontSize: 11 }} tickFormatter={(v) => formatPeriodLabel(v, chartData.is_weekly)} />
+                    <XAxis dataKey="month" tick={{ fill: '#6b7280', fontSize: 11 }} tickFormatter={(v) => formatPeriodLabel(v, chartData.granularity)} />
                     <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
-                    <Tooltip labelFormatter={(v) => formatPeriodLabel(v, chartData.is_weekly)} formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString('en-IN')}`, '']} />
+                    <Tooltip labelFormatter={(v) => formatPeriodLabel(v, chartData.granularity)} formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString('en-IN')}`, '']} />
                     <Legend />
                     <Area type="monotone" dataKey="Amazon" stroke="#60a5fa" strokeWidth={2} fillOpacity={1} fill="url(#colorAmazon)" />
                     <Area type="monotone" dataKey="Blinkit" stroke="#fbbf24" strokeWidth={2} fillOpacity={1} fill="url(#colorBlinkit)" />
@@ -268,15 +288,20 @@ export default function DashboardPage() {
             {/* 2. Platform Sales Comparison - Bar Chart */}
             <Card>
               <CardHeader className="pb-2">
-                <CardTitle className="text-base font-medium">Platform Sales Comparison</CardTitle>
+                <div className="flex items-start justify-between gap-2">
+                  <CardTitle className="text-base font-medium">Platform Sales Comparison</CardTitle>
+                  {dateRangeLabel && (
+                    <span className="text-xs text-muted-foreground whitespace-nowrap shrink-0">{dateRangeLabel}</span>
+                  )}
+                </div>
               </CardHeader>
               <CardContent>
                 <ResponsiveContainer width="100%" height={240}>
                   <BarChart data={chartData.monthly_sales}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                    <XAxis dataKey="month" tick={{ fill: '#6b7280', fontSize: 11 }} tickFormatter={(v) => formatPeriodLabel(v, chartData.is_weekly)} />
+                    <XAxis dataKey="month" tick={{ fill: '#6b7280', fontSize: 11 }} tickFormatter={(v) => formatPeriodLabel(v, chartData.granularity)} />
                     <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
-                    <Tooltip labelFormatter={(v) => formatPeriodLabel(v, chartData.is_weekly)} formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString('en-IN')}`, '']} />
+                    <Tooltip labelFormatter={(v) => formatPeriodLabel(v, chartData.granularity)} formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString('en-IN')}`, '']} />
                     <Legend />
                     <Bar dataKey="Amazon" fill="#60a5fa" radius={[4, 4, 0, 0]} />
                     <Bar dataKey="Blinkit" fill="#fbbf24" radius={[4, 4, 0, 0]} />

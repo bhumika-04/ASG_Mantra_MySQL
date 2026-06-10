@@ -4,7 +4,7 @@ Handles purchase order lifecycle, creation, and tracking
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, func
+from sqlalchemy import desc, func, literal
 from typing import Optional
 from datetime import datetime, date
 import re
@@ -75,10 +75,31 @@ _CITY_KEYWORDS = [
     'Khurja', 'Hapur', 'Pilkhuwa', 'Greater Noida', 'Bahadurgarh',
 ]
 
+# Hub city → state for Eagle Network warehouses whose addresses omit the state name
+_HUB_CITY_STATE = {
+    'kundli': 'Haryana', 'sonipat': 'Haryana', 'manesar': 'Haryana',
+    'bahadurgarh': 'Haryana', 'rai': 'Haryana', 'bawal': 'Haryana',
+    'bhiwandi': 'Maharashtra', 'palghar': 'Maharashtra', 'vasai': 'Maharashtra',
+    'panvel': 'Maharashtra', 'khopoli': 'Maharashtra', 'navi mumbai': 'Maharashtra',
+    'bhosari': 'Maharashtra', 'pune': 'Maharashtra', 'nagpur': 'Maharashtra',
+    'bommasandra': 'Karnataka', 'whitefield': 'Karnataka', 'hosur': 'Karnataka',
+    'tumkur': 'Karnataka', 'oragadam': 'Tamil Nadu', 'sriperumbudur': 'Tamil Nadu',
+    'haridwar': 'Uttarakhand', 'roorkee': 'Uttarakhand', 'rudrapur': 'Uttarakhand',
+    'pantnagar': 'Uttarakhand', 'kashipur': 'Uttarakhand',
+}
 
-def _blk_city_state(address: Optional[str], ship_to_name: Optional[str], gstin: Optional[str]):
+# Eagle Network PO number prefix → state (most reliable fallback)
+_EAGLE_PREFIX_STATE = {
+    'EH': 'Haryana', 'EK': 'Karnataka', 'ED': 'Delhi',
+    'EM': 'Maharashtra', 'EW': 'West Bengal', 'EP': 'Punjab',
+    'EU': 'Uttar Pradesh', 'ER': 'Rajasthan', 'ET': 'Tamil Nadu',
+}
+
+
+def _blk_city_state(address: Optional[str], ship_to_name: Optional[str], gstin: Optional[str], po_number: Optional[str] = None):
     """Derive city and state for a Blinkit PO row.
-    Priority: (1) parse full address, (2) GSTIN prefix for state, (3) keyword scan of name/address.
+    Priority: (1) parse full address, (2) GSTIN prefix, (3) keyword scan,
+              (4) hub city → state lookup, (5) Eagle PO number prefix.
     """
     city = None
     state = None
@@ -97,7 +118,7 @@ def _blk_city_state(address: Optional[str], ship_to_name: Optional[str], gstin: 
             if state:
                 break
 
-    # 2. GSTIN prefix → state (most reliable for state when address is missing/ambiguous)
+    # 2. GSTIN prefix → state
     if not state and gstin and len(gstin) >= 2:
         state = _GSTIN_STATE.get(gstin[:2].zfill(2))
 
@@ -114,6 +135,22 @@ def _blk_city_state(address: Optional[str], ship_to_name: Optional[str], gstin: 
                 if s.lower() in combined.lower():
                     state = s
                     break
+
+    # 4. Hub city → state (for warehouse addresses that omit the state name)
+    if not state and city:
+        state = _HUB_CITY_STATE.get(city.lower())
+    if not state and combined:
+        for hub, hub_state in _HUB_CITY_STATE.items():
+            if hub in combined.lower():
+                if not city:
+                    city = hub.title()
+                state = hub_state
+                break
+
+    # 5. Eagle PO number prefix → state (most reliable final fallback)
+    if not state and po_number and len(po_number) >= 2:
+        prefix = po_number[:2].upper()
+        state = _EAGLE_PREFIX_STATE.get(prefix)
 
     return city, state
 
@@ -141,6 +178,7 @@ async def get_amazon_po_overview(
         func.count(AmazonPOItemData.Id).label('item_count'),
         func.sum(AmazonPOItemData.QuantityRequested).label('total_qty'),
         func.min(AmazonPOItemData.ExpectedDate).label('expected_delivery_date'),
+        func.min(AmazonPOItemData.CancellationDate).label('po_cancellation_date'),
     ).join(AmazonPOItemData, AmazonPOItemData.POId == AmazonPOData.Id)
 
     if search:
@@ -164,6 +202,7 @@ async def get_amazon_po_overview(
         AmazonPOData.ShipToLocationCode,
     )
 
+
     # Single pass: subquery + COUNT(*) OVER() avoids a second GROUP BY round-trip
     offset = (page - 1) * page_size
     subq = query.subquery()
@@ -183,6 +222,7 @@ async def get_amazon_po_overview(
             "po_number": r.po_number,
             "order_date": r.order_date.isoformat() if r.order_date else None,
             "expected_delivery_date": r.expected_delivery_date.isoformat() if r.expected_delivery_date else None,
+            "po_cancellation_date": r.po_cancellation_date.isoformat() if r.po_cancellation_date else None,
             "status": r.status or 'Created',
             "ship_to_city": r.ship_to_city,
             "ship_to_state": r.ship_to_state,
@@ -203,8 +243,11 @@ async def get_amazon_po_stats(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Return per-status counts and totals for Amazon POs (optionally date-filtered)."""
-    q = db.query(AmazonPOData)
+    """Return per-status PO counts and totals for Amazon POs (optionally date-filtered).
+    Counts at PO level by POStatus so metrics match the overview grid and update when status changes.
+    """
+    effective_status = func.coalesce(AmazonPOData.POStatus, literal('Created'))
+    q = db.query(effective_status, func.count(AmazonPOData.Id))
     if start_date:
         try:
             q = q.filter(AmazonPOData.OrderedOnDate >= datetime.strptime(start_date, "%Y-%m-%d").date())
@@ -215,9 +258,10 @@ async def get_amazon_po_stats(
             q = q.filter(AmazonPOData.OrderedOnDate <= datetime.strptime(end_date, "%Y-%m-%d").date())
         except ValueError:
             pass
-    rows = q.with_entities(AmazonPOData.POStatus, func.count(AmazonPOData.Id)).group_by(AmazonPOData.POStatus).all()
+    rows = q.group_by(AmazonPOData.POStatus).all()
     status_counts = {(r[0] or 'Created'): r[1] for r in rows}
-    items_q = db.query(func.sum(AmazonPOItemData.QuantityRequested)).join(AmazonPOData, AmazonPOItemData.POId == AmazonPOData.Id)
+    items_q = db.query(func.sum(AmazonPOItemData.QuantityRequested)) \
+        .join(AmazonPOData, AmazonPOItemData.POId == AmazonPOData.Id)
     if start_date:
         try:
             items_q = items_q.filter(AmazonPOData.OrderedOnDate >= datetime.strptime(start_date, "%Y-%m-%d").date())
@@ -276,7 +320,8 @@ async def get_amazon_purchase_orders(
         )
 
     if status:
-        query = query.filter(AmazonPOData.POStatus == status)
+        eff = func.coalesce(AmazonPOItemData.ItemStatus, AmazonPOData.POStatus, literal('Created'))
+        query = query.filter(eff == status)
 
     if state:
         query = query.filter(AmazonPOData.ShipToState == state)
@@ -354,6 +399,7 @@ async def get_amazon_purchase_orders(
             "amazon_id": item.ASIN,
             "order_date": po.OrderedOnDate.isoformat() if po and po.OrderedOnDate else None,
             "expected_delivery_date": expected_date,
+            "po_cancellation_date": item.CancellationDate.isoformat() if item.CancellationDate else None,
             "quantity": qty_requested,
             "accepted_quantity": item.AcceptedQuantity,
             "received_quantity": item.QuantityReceived or 0,
@@ -401,6 +447,7 @@ async def get_blinkit_po_overview(
         BlinkitPOData.ShipToAddress.label('ship_to_address'),
         BlinkitPOData.ShipToGSTIN.label('ship_to_gstin'),
         BlinkitPOData.ExpectedDeliveryDate.label('expected_delivery_date'),
+        BlinkitPOData.POExpiryDate.label('po_expiry_date'),
         func.count(BlinkitPOItemData.Id).label('item_count'),
         func.sum(BlinkitPOItemData.QTY).label('total_qty'),
     ).join(BlinkitPOItemData, BlinkitPOItemData.POId == BlinkitPOData.Id)
@@ -424,6 +471,7 @@ async def get_blinkit_po_overview(
         BlinkitPOData.Id, BlinkitPOData.PONumber, BlinkitPOData.PODate,
         BlinkitPOData.Status, BlinkitPOData.ShipToName, BlinkitPOData.ShipToAddress,
         BlinkitPOData.ShipToGSTIN, BlinkitPOData.ExpectedDeliveryDate,
+        BlinkitPOData.POExpiryDate,
     )
 
     # Single pass: subquery + COUNT(*) OVER() avoids a second GROUP BY round-trip
@@ -438,12 +486,13 @@ async def get_blinkit_po_overview(
 
     items = []
     for r in rows_with_count:
-        city, state = _blk_city_state(r.ship_to_address, r.ship_to_name, r.ship_to_gstin)
+        city, state = _blk_city_state(r.ship_to_address, r.ship_to_name, r.ship_to_gstin, r.po_number)
         items.append({
             "po_id": r.po_id,
             "po_number": r.po_number,
             "order_date": r.order_date.isoformat() if r.order_date else None,
             "expected_delivery_date": r.expected_delivery_date.isoformat() if r.expected_delivery_date else None,
+            "po_expiry_date": r.po_expiry_date.isoformat() if r.po_expiry_date else None,
             "status": r.status or 'Created',
             "ship_to_name": r.ship_to_name,
             "ship_to_city": city,
@@ -463,8 +512,11 @@ async def get_blinkit_po_stats(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Return per-status counts and totals for Blinkit POs (optionally date-filtered)."""
-    q = db.query(BlinkitPOData)
+    """Return per-status PO counts and totals for Blinkit POs (optionally date-filtered).
+    Counts at PO level by Status so metrics match the overview grid and update when status changes.
+    """
+    effective_status = func.coalesce(BlinkitPOData.Status, literal('Created'))
+    q = db.query(effective_status, func.count(BlinkitPOData.Id))
     if start_date:
         try:
             q = q.filter(BlinkitPOData.PODate >= datetime.strptime(start_date, "%Y-%m-%d").date())
@@ -475,9 +527,10 @@ async def get_blinkit_po_stats(
             q = q.filter(BlinkitPOData.PODate <= datetime.strptime(end_date, "%Y-%m-%d").date())
         except ValueError:
             pass
-    rows = q.with_entities(BlinkitPOData.Status, func.count(BlinkitPOData.Id)).group_by(BlinkitPOData.Status).all()
+    rows = q.group_by(BlinkitPOData.Status).all()
     status_counts = {(r[0] or 'Created'): r[1] for r in rows}
-    items_q = db.query(func.sum(BlinkitPOItemData.QTY)).join(BlinkitPOData, BlinkitPOItemData.POId == BlinkitPOData.Id)
+    items_q = db.query(func.sum(BlinkitPOItemData.QTY)) \
+        .join(BlinkitPOData, BlinkitPOItemData.POId == BlinkitPOData.Id)
     if start_date:
         try:
             items_q = items_q.filter(BlinkitPOData.PODate >= datetime.strptime(start_date, "%Y-%m-%d").date())
@@ -518,7 +571,8 @@ async def get_blinkit_purchase_orders(
         )
 
     if status:
-        query = query.filter(BlinkitPOData.Status == status)
+        eff = func.coalesce(BlinkitPOItemData.ItemStatus, BlinkitPOData.Status, literal('Created'))
+        query = query.filter(eff == status)
 
     if start_date:
         try:
@@ -602,7 +656,8 @@ async def get_blinkit_purchase_orders(
         ship_to_name = po.ShipToName if po else None
         ship_to_address = po.ShipToAddress if po else None
         ship_to_gstin = po.ShipToGSTIN if po else None
-        city, state = _blk_city_state(ship_to_address, ship_to_name, ship_to_gstin)
+        po_num = item.PONumber if item.PONumber else (po.PONumber if po else None)
+        city, state = _blk_city_state(ship_to_address, ship_to_name, ship_to_gstin, po_num)
 
         items.append({
             "id": item.Id,
@@ -614,6 +669,7 @@ async def get_blinkit_purchase_orders(
             "blinkit_id": blinkit_id,
             "order_date": po.PODate.isoformat() if po and po.PODate else None,
             "expected_delivery_date": po.ExpectedDeliveryDate.isoformat() if po and po.ExpectedDeliveryDate else None,
+            "po_expiry_date": po.POExpiryDate.isoformat() if po and po.POExpiryDate else None,
             "quantity": qty,
             "accepted_qty": item.AcceptedQty,
             "received_quantity": 0,

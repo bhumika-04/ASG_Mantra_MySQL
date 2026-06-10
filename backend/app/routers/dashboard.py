@@ -106,11 +106,40 @@ async def get_dashboard_charts(
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
 
-    # Determine granularity: weekly if range <= 31 days, monthly otherwise
-    use_weekly = bool(s_date and e_date and (e_date - s_date).days <= 31)
+    # Determine granularity: daily ≤31 days, weekly ≤90 days, monthly otherwise
+    if s_date and e_date:
+        _days = (e_date - s_date).days
+        if _days <= 31:
+            granularity = 'daily'
+        elif _days <= 90:
+            granularity = 'weekly'
+        else:
+            granularity = 'monthly'
+    else:
+        granularity = 'monthly'
 
     try:
-        if use_weekly:
+        if granularity == 'daily':
+            # Daily grouping: YYYY-MM-DD labels
+            amz_rows = db.execute(text("""
+                SELECT CONVERT(varchar(10), ReportDate, 120) AS period, SUM(OrderedRevenue) AS revenue
+                FROM AmazonSales
+                WHERE ReportDate IS NOT NULL AND ReportDate BETWEEN :start AND :end
+                GROUP BY CONVERT(varchar(10), ReportDate, 120)
+                ORDER BY period
+            """), {"start": s_date, "end": e_date}).fetchall()
+            amazon_by_period = {row[0]: float(row[1] or 0) for row in amz_rows}
+
+            blk_rows = db.execute(text("""
+                SELECT CONVERT(varchar(10), SaleDate, 120) AS period, SUM(MRP) AS revenue
+                FROM BlinkitSales
+                WHERE SaleDate IS NOT NULL AND SaleDate BETWEEN :start AND :end
+                GROUP BY CONVERT(varchar(10), SaleDate, 120)
+                ORDER BY period
+            """), {"start": s_date, "end": e_date}).fetchall()
+            blinkit_by_period = {row[0]: float(row[1] or 0) for row in blk_rows}
+
+        elif granularity == 'weekly':
             # Weekly grouping: group by Monday of each week, label as YYYY-MM-DD
             amz_rows = db.execute(text("""
                 SELECT
@@ -243,7 +272,7 @@ async def get_dashboard_charts(
         "amazon_products":  amazon_product_data,
         "blinkit_products": blinkit_product_data,
         "top_products":     overall_product_data,
-        "is_weekly":        use_weekly,
+        "granularity":      granularity,
     }
 
 

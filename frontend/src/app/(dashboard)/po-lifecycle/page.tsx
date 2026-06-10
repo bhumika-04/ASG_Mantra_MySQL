@@ -60,7 +60,7 @@ const toRow = (po: any, channel: string): PurchaseOrder => ({
   city: po.ship_to_city || '-',
   hub: po.ship_to_location_code || po.ship_to_name || '-',
   courier: '-',
-  tat: '-',
+  tat: po.tat != null ? `${po.tat}d` : '-',
   status: po.status || 'Created',
 });
 
@@ -253,7 +253,7 @@ export default function POLifecyclePage() {
     },
     {
       id: 'dispatchDate',
-      header: 'Dispatch Date',
+      header: 'PO Creation Date',
       accessorKey: 'dispatchDate',
       sortable: true,
       width: 140,
@@ -541,7 +541,7 @@ export default function POLifecyclePage() {
                       'PO Number': o.po_number,
                       'Channel': o.channel,
                       'Quantity': o.quantity,
-                      'Dispatch Date': o.dispatchDate,
+                      'PO Creation Date': o.dispatchDate,
                       'Expected Date': o.expectedDate,
                       'State': o.state,
                       'City': o.city,

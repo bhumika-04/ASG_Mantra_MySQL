@@ -20,6 +20,8 @@ import {
   Calendar,
   X,
   Download,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
@@ -72,6 +74,7 @@ export default function DistributorPage() {
   const [search, setSearch] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
 
   // Preview state
   const [isPreviewing, setIsPreviewing] = useState(false);
@@ -265,6 +268,7 @@ export default function DistributorPage() {
     setUploadResult(null);
     setDuplicateWarning(null);
     setColumnWarnings([]);
+    setUploadOpen(false);
   };
 
   return (
@@ -309,14 +313,26 @@ export default function DistributorPage() {
         {/* Upload + Filter + Data */}
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-base font-medium flex items-center gap-2">
-              <Building2 className="h-4 w-4 text-yellow-500" />
-              Eagle Network Weekly Stock
-            </CardTitle>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-base font-medium flex items-center gap-2">
+                <Building2 className="h-4 w-4 text-yellow-500" />
+                Eagle Network Weekly Stock
+              </CardTitle>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs gap-1.5"
+                onClick={() => setUploadOpen(o => !o)}
+              >
+                <Upload className="h-3.5 w-3.5" />
+                Upload Report
+                {uploadOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+              </Button>
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            {/* File Upload or Preview */}
-            {previewRows === null ? (
+            {/* Collapsible Upload Section — upload dropzone hidden when collapsed; preview always visible once file selected */}
+            {(uploadOpen || previewRows !== null) && (previewRows === null ? (
               <div className="border border-dashed border-gray-200 rounded-lg p-4">
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex items-center gap-2">
@@ -441,7 +457,7 @@ export default function DistributorPage() {
                   </Button>
                 </div>
               </div>
-            )}
+            ) )}
 
             {/* Filter bar — search + view options */}
             <FilterBar

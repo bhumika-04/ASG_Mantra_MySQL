@@ -139,7 +139,9 @@ function AmazonPOPageContent() {
     setIsSaving(true);
     try {
       const result = await api.purchaseOrders.updateAmazonItemAcceptedQty(actionRow.id, qty) as any;
-      setPoData(prev => prev.map(p => p.id === actionRow.id ? { ...p, accepted_qty: qty } : p));
+      setPoData(prev => prev.map(p => p.id === actionRow.id
+        ? { ...p, accepted_qty: qty, pending_qty: Math.max(0, p.ordered_qty - qty) }
+        : p));
       if (result?.inventory_deducted > 0) {
         if (result.inventory_shortfall > 0) {
           toast.warning(`Accepted qty set to ${qty}. Deducted ${result.inventory_deducted} from inventory. Shortfall: ${result.inventory_shortfall} units.`);
@@ -232,10 +234,13 @@ function AmazonPOPageContent() {
         accepted_qty: po.accepted_quantity ?? null,
         mapped_sku: po.asg_sku || po.asgSku || '',
         received_qty: po.received_quantity || 0,
-        pending_qty: Math.max(0, (po.quantity || 0) - (po.received_quantity || 0)),
+        pending_qty: po.accepted_quantity != null
+          ? Math.max(0, (po.quantity || 0) - po.accepted_quantity)
+          : Math.max(0, (po.quantity || 0) - (po.received_quantity || 0)),
         unit_cost: po.unit_price ?? null,
         total_cost: po.total_amount ?? null,
-        po_expiry: po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : '-',
+        po_expiry: po.po_cancellation_date ? fmtDate(po.po_cancellation_date)
+          : po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : '-',
         status: po.status || 'Created',
         city: po.ship_to_city || '—',
         state: po.ship_to_state || '—',

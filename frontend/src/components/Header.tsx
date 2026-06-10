@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { useEffect, useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
-import { useFilter, FILTER_OPTIONS } from '@/contexts/FilterContext';
+import { useFilter, FILTER_OPTIONS, computeDateRange } from '@/contexts/FilterContext';
 import api from '@/lib/api';
 import { SidebarTrigger } from '@/components/ui/sidebar';
 import {
@@ -64,6 +64,20 @@ export function Header() {
   const showFilter = FILTER_PAGES.includes(pathname);
   const currentLabel = FILTER_OPTIONS.find(o => o.value === filterMode)?.label ?? 'All Time';
 
+  const dateRangeLabel = (() => {
+    if (filterMode === 'all' || filterMode === 'custom') return null;
+    const { start_date, end_date } = computeDateRange(filterMode, customStart, customEnd);
+    if (!start_date && !end_date) return null;
+    const fmt = (iso: string) => {
+      const [, m, d] = iso.split('-');
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return `${parseInt(d)} ${months[parseInt(m) - 1]}`;
+    };
+    if (start_date && end_date) return `${fmt(start_date)} – ${fmt(end_date)}`;
+    if (start_date) return `From ${fmt(start_date)}`;
+    return null;
+  })();
+
   const handleLogout = async () => {
     await logout();
     router.push('/');
@@ -116,6 +130,13 @@ export function Header() {
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
+
+            {/* Date range label for non-custom modes */}
+            {dateRangeLabel && filterMode !== 'custom' && (
+              <span className="text-xs text-muted-foreground whitespace-nowrap hidden sm:inline">
+                {dateRangeLabel}
+              </span>
+            )}
 
             {/* Custom date inputs shown inline when custom is selected */}
             {filterMode === 'custom' && (
