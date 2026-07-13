@@ -4,7 +4,7 @@ Handles purchase order lifecycle, creation, and tracking
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, func, literal
+from sqlalchemy import and_, desc, func, literal, text
 from typing import Optional
 from datetime import datetime, date
 import re
@@ -25,6 +25,24 @@ from app.utils.audit import log_audit, notify
 import time as _time
 
 router = APIRouter()
+
+_TERMINAL_STATUSES = {'Delivered', 'Received', 'Cancelled', 'Closed', 'Expired'}
+_PENDING_STATUSES  = {'Created', 'Packed', 'Dispatched', 'In Transit', 'Delayed'}
+_EXPIRY_DAYS = 15  # PO is auto-shown as Expired when expiry date is this many days past
+# Statuses that block auto-expiry: terminal ones plus in-progress shipped statuses —
+# a dispatched/in-transit PO is actively being fulfilled and should not flip to Expired
+# just because the ship-window end date passed.
+_NO_EXPIRY_OVERRIDE = _TERMINAL_STATUSES | {'Dispatched', 'In Transit'}
+
+def _eff_status(base: Optional[str], expiry_date=None) -> str:
+    """Compute display status: applies auto-expiry on top of the stored/derived status."""
+    s = base or 'Created'
+    if s not in _NO_EXPIRY_OVERRIDE and expiry_date:
+        # Normalize datetime.datetime → datetime.date (pyodbc can return either for DATE columns)
+        exp = expiry_date.date() if hasattr(expiry_date, 'date') else expiry_date
+        if (date.today() - exp).days >= _EXPIRY_DAYS:
+            return 'Expired'
+    return s
 
 # Cache latest inventory date for 5 minutes — avoids one DB round-trip per PO page load
 _inv_date_cache: dict = {"value": None, "ts": 0.0}
@@ -98,31 +116,68 @@ _EAGLE_PREFIX_STATE = {
 
 def _blk_city_state(address: Optional[str], ship_to_name: Optional[str], gstin: Optional[str], po_number: Optional[str] = None):
     """Derive city and state for a Blinkit PO row.
-    Priority: (1) parse full address, (2) GSTIN prefix, (3) keyword scan,
-              (4) hub city → state lookup, (5) Eagle PO number prefix.
+    Priority: (1) parse normalised address parts, (2) GSTIN prefix,
+              (3) keyword scan, (4) hub city → state lookup,
+              (5) Eagle PO number prefix.
+    Handles multi-line addresses (newlines → commas) and trailing
+    "PIN India" / "PIN\nIndia" patterns common in Blinkit PDFs.
     """
     city = None
     state = None
 
-    # 1. Parse structured address (City, State - PINCODE)
+    # 1. Parse structured address
     if address:
-        clean = re.sub(r'[-\s]*\d{6}\s*$', '', address.strip()).strip(' ,')
-        parts = [p.strip() for p in clean.split(',') if p.strip()]
+        # Normalise newlines/tabs to commas so multi-line PDF addresses
+        # are treated the same as comma-separated ones
+        norm = re.sub(r'[\r\n\t]+', ', ', address.strip())
+        # Strip trailing country name variants (India, INDIA, etc.)
+        norm = re.sub(r'[,\s]*\bIndia\b[,.\s]*$', '', norm, flags=re.IGNORECASE).strip(' ,')
+        # Strip trailing 6-digit PIN (now that "India" is gone)
+        norm = re.sub(r'[-\s]*\d{6}\s*$', '', norm).strip(' ,')
+
+        parts = [p.strip() for p in norm.split(',') if p.strip()]
+
+        # Scan backward for a state name embedded in any part
         for i in range(len(parts) - 1, -1, -1):
             for s in _INDIAN_STATES:
                 if s.lower() in parts[i].lower():
                     state = s
-                    if i > 0:
+                    # City may be in the same segment (e.g. "Gurgaon Haryana")
+                    # or in the immediately preceding segment
+                    for kw in _CITY_KEYWORDS:
+                        if kw.lower() in parts[i].lower():
+                            city = kw
+                            break
+                    if not city and i > 0:
                         city = parts[i - 1].strip()
                     break
             if state:
                 break
 
+        # After stripping PIN+India the last part often IS the city
+        # (e.g. "... BUILDING E/8, Thane" → last part "Thane")
+        if not city and parts:
+            for kw in _CITY_KEYWORDS:
+                if kw.lower() in parts[-1].lower():
+                    city = kw
+                    break
+
+        # Scan remaining parts from end toward start for hub city keywords
+        # (handles "VILLAGE-TALUKA BHIWANDI ..., Thane" where Bhiwandi is mid-address)
+        if not city and len(parts) >= 2:
+            for p in reversed(parts):
+                for kw in _CITY_KEYWORDS:
+                    if kw.lower() in p.lower():
+                        city = kw
+                        break
+                if city:
+                    break
+
     # 2. GSTIN prefix → state
     if not state and gstin and len(gstin) >= 2:
         state = _GSTIN_STATE.get(gstin[:2].zfill(2))
 
-    # 3. Keyword scan across address + ship_to_name for city and state
+    # 3. Keyword scan across full address + ship_to_name
     combined = ' '.join(filter(None, [address, ship_to_name]))
     if combined:
         if not city:
@@ -136,7 +191,7 @@ def _blk_city_state(address: Optional[str], ship_to_name: Optional[str], gstin: 
                     state = s
                     break
 
-    # 4. Hub city → state (for warehouse addresses that omit the state name)
+    # 4. Hub city → state (warehouse addresses that omit the state name)
     if not state and city:
         state = _HUB_CITY_STATE.get(city.lower())
     if not state and combined:
@@ -171,7 +226,8 @@ async def get_amazon_po_overview(
         AmazonPOData.Id.label('po_id'),
         AmazonPOData.PONumber.label('po_number'),
         AmazonPOData.OrderedOnDate.label('order_date'),
-        AmazonPOData.POStatus.label('status'),
+        AmazonPOData.POStatus.label('po_header_status'),
+        func.max(AmazonPOItemData.ItemStatus).label('max_item_status'),
         AmazonPOData.ShipToCity.label('ship_to_city'),
         AmazonPOData.ShipToState.label('ship_to_state'),
         AmazonPOData.ShipToLocationCode.label('ship_to_location_code'),
@@ -179,27 +235,44 @@ async def get_amazon_po_overview(
         func.sum(AmazonPOItemData.QuantityRequested).label('total_qty'),
         func.min(AmazonPOItemData.ExpectedDate).label('expected_delivery_date'),
         func.min(AmazonPOItemData.CancellationDate).label('po_cancellation_date'),
+        AmazonPOData.ShipWindowEndDate.label('ship_window_end_date'),
+        AmazonPOData.DispatchDate.label('dispatch_date'),
+        AmazonPOData.Courier.label('courier'),
     ).join(AmazonPOItemData, AmazonPOItemData.POId == AmazonPOData.Id)
 
     if search:
         query = query.filter(AmazonPOData.PONumber.ilike(f"%{search}%"))
     if status:
-        query = query.filter(AmazonPOData.POStatus == status)
-    if start_date:
-        try:
-            query = query.filter(AmazonPOData.OrderedOnDate >= datetime.strptime(start_date, "%Y-%m-%d").date())
-        except ValueError:
-            pass
-    if end_date:
-        try:
-            query = query.filter(AmazonPOData.OrderedOnDate <= datetime.strptime(end_date, "%Y-%m-%d").date())
-        except ValueError:
-            pass
+        if status == 'Expired':
+            # 'Expired' is computed — never stored in DB; raw SQL mirrors stats CTE logic exactly
+            _ov = "','".join(sorted(_NO_EXPIRY_OVERRIDE))
+            query = query.having(text(
+                f"COALESCE(AmazonPO.POStatus, MAX(AmazonPOItem.ItemStatus), 'Created') NOT IN ('{_ov}') "
+                f"AND AmazonPO.ShipWindowEndDate IS NOT NULL "
+                f"AND DATEDIFF(day, AmazonPO.ShipWindowEndDate, GETDATE()) >= {_EXPIRY_DAYS}"
+            ))
+        else:
+            query = query.having(
+                func.coalesce(AmazonPOData.POStatus, func.max(AmazonPOItemData.ItemStatus), literal('Created')) == status
+            )
+    # Skip date filter when searching by PO number — the PO may predate the active range
+    if not search:
+        if start_date:
+            try:
+                query = query.filter(AmazonPOData.OrderedOnDate >= datetime.strptime(start_date, "%Y-%m-%d").date())
+            except ValueError:
+                pass
+        if end_date:
+            try:
+                query = query.filter(AmazonPOData.OrderedOnDate <= datetime.strptime(end_date, "%Y-%m-%d").date())
+            except ValueError:
+                pass
 
     query = query.group_by(
         AmazonPOData.Id, AmazonPOData.PONumber, AmazonPOData.OrderedOnDate,
         AmazonPOData.POStatus, AmazonPOData.ShipToCity, AmazonPOData.ShipToState,
-        AmazonPOData.ShipToLocationCode,
+        AmazonPOData.ShipToLocationCode, AmazonPOData.ShipWindowEndDate,
+        AmazonPOData.DispatchDate, AmazonPOData.Courier,
     )
 
 
@@ -217,13 +290,19 @@ async def get_amazon_po_overview(
     for r in rows_with_count:
         location_parts = [r.ship_to_location_code, r.ship_to_city, r.ship_to_state]
         location = ', '.join(p for p in location_parts if p) or '—'
+        # ShipWindowEndDate = last day Amazon expects shipment — treat as PO expiry for Amazon
+        eff_status = _eff_status(r.po_header_status or r.max_item_status, r.ship_window_end_date)
         items.append({
             "po_id": r.po_id,
             "po_number": r.po_number,
             "order_date": r.order_date.isoformat() if r.order_date else None,
             "expected_delivery_date": r.expected_delivery_date.isoformat() if r.expected_delivery_date else None,
             "po_cancellation_date": r.po_cancellation_date.isoformat() if r.po_cancellation_date else None,
-            "status": r.status or 'Created',
+            "ship_window_end_date": r.ship_window_end_date.isoformat() if r.ship_window_end_date else None,
+            "dispatch_date": r.dispatch_date.isoformat() if r.dispatch_date else None,
+            "courier": r.courier,
+            "status": eff_status,
+            "po_status": r.po_header_status,
             "ship_to_city": r.ship_to_city,
             "ship_to_state": r.ship_to_state,
             "ship_to_location_code": r.ship_to_location_code,
@@ -246,38 +325,71 @@ async def get_amazon_po_stats(
     """Return per-status PO counts and totals for Amazon POs (optionally date-filtered).
     Counts at PO level by POStatus so metrics match the overview grid and update when status changes.
     """
-    effective_status = func.coalesce(AmazonPOData.POStatus, literal('Created'))
-    q = db.query(effective_status, func.count(AmazonPOData.Id))
+    where_clauses = []
+    params: dict = {}
     if start_date:
         try:
-            q = q.filter(AmazonPOData.OrderedOnDate >= datetime.strptime(start_date, "%Y-%m-%d").date())
+            datetime.strptime(start_date, "%Y-%m-%d")
+            where_clauses.append("OrderedOnDate >= :start_date")
+            params["start_date"] = start_date
         except ValueError:
             pass
     if end_date:
         try:
-            q = q.filter(AmazonPOData.OrderedOnDate <= datetime.strptime(end_date, "%Y-%m-%d").date())
+            datetime.strptime(end_date, "%Y-%m-%d")
+            where_clauses.append("OrderedOnDate <= :end_date")
+            params["end_date"] = end_date
         except ValueError:
             pass
-    rows = q.group_by(AmazonPOData.POStatus).all()
-    status_counts = {(r[0] or 'Created'): r[1] for r in rows}
-    items_q = db.query(func.sum(AmazonPOItemData.QuantityRequested)) \
-        .join(AmazonPOData, AmazonPOItemData.POId == AmazonPOData.Id)
-    if start_date:
-        try:
-            items_q = items_q.filter(AmazonPOData.OrderedOnDate >= datetime.strptime(start_date, "%Y-%m-%d").date())
-        except ValueError:
-            pass
-    if end_date:
-        try:
-            items_q = items_q.filter(AmazonPOData.OrderedOnDate <= datetime.strptime(end_date, "%Y-%m-%d").date())
-        except ValueError:
-            pass
-    total_units = items_q.scalar() or 0
+    amz_where_sql = ("WHERE p." + " AND p.".join(where_clauses)) if where_clauses else ""
+    # Single query: status counts + total units via CTE to avoid two round-trips
+    rows = db.execute(text(f"""
+        WITH base AS (
+            SELECT
+                CASE
+                    WHEN COALESCE(p.POStatus, agg.max_status, 'Created')
+                         NOT IN ('Delivered','Received','Cancelled','Closed','Expired','Dispatched','In Transit')
+                     AND p.ShipWindowEndDate IS NOT NULL
+                     AND DATEDIFF(day, p.ShipWindowEndDate, GETDATE()) >= {_EXPIRY_DAYS}
+                    THEN 'Expired'
+                    ELSE COALESCE(p.POStatus, agg.max_status, 'Created')
+                END AS eff_status,
+                COALESCE(units.total_qty, 0) AS total_qty
+            FROM AmazonPO p
+            LEFT JOIN (
+                SELECT POId, MAX(ItemStatus) AS max_status
+                FROM AmazonPOItem GROUP BY POId
+            ) agg ON agg.POId = p.Id
+            LEFT JOIN (
+                SELECT POId, SUM(QuantityRequested) AS total_qty
+                FROM AmazonPOItem GROUP BY POId
+            ) units ON units.POId = p.Id
+            {amz_where_sql}
+        )
+        SELECT eff_status, COUNT(*) AS cnt, SUM(total_qty) AS total_qty
+        FROM base
+        GROUP BY eff_status
+    """), params).fetchall()
+    status_counts = {r[0]: r[1] for r in rows}
+    total_units = int(sum(r[2] or 0 for r in rows))
     return {
         "status_counts": status_counts,
         "total_pos": sum(status_counts.values()),
-        "total_units": int(total_units),
+        "total_units": total_units,
     }
+
+
+@router.get("/carriers")
+async def get_carriers(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Return distinct carrier names used across Amazon and Blinkit POs."""
+    amz = {r[0] for r in db.query(AmazonPOData.Courier)
+           .filter(AmazonPOData.Courier.isnot(None), AmazonPOData.Courier != '').distinct().all()}
+    blk = {r[0] for r in db.query(BlinkitPOData.Courier)
+           .filter(BlinkitPOData.Courier.isnot(None), BlinkitPOData.Courier != '').distinct().all()}
+    return {"carriers": sorted(amz | blk)}
 
 
 @router.get("/amazon/states")
@@ -320,8 +432,16 @@ async def get_amazon_purchase_orders(
         )
 
     if status:
-        eff = func.coalesce(AmazonPOItemData.ItemStatus, AmazonPOData.POStatus, literal('Created'))
-        query = query.filter(eff == status)
+        if status == 'Expired':
+            _ov = "','".join(sorted(_NO_EXPIRY_OVERRIDE))
+            query = query.filter(text(
+                f"COALESCE(AmazonPOItem.ItemStatus, AmazonPO.POStatus, 'Created') NOT IN ('{_ov}') "
+                f"AND AmazonPO.ShipWindowEndDate IS NOT NULL "
+                f"AND DATEDIFF(day, AmazonPO.ShipWindowEndDate, GETDATE()) >= {_EXPIRY_DAYS}"
+            ))
+        else:
+            eff = func.coalesce(AmazonPOItemData.ItemStatus, AmazonPOData.POStatus, literal('Created'))
+            query = query.filter(eff == status)
 
     if state:
         query = query.filter(AmazonPOData.ShipToState == state)
@@ -382,11 +502,14 @@ async def get_amazon_purchase_orders(
         expected_date = item.ExpectedDate.isoformat() if item.ExpectedDate else None
 
         po_header_status = (po.POStatus if po else None) or 'Created'
-        item_status = item.ItemStatus or po_header_status
+        # Terminal PO-header status (Delivered, Cancelled, etc.) overrides item-level status,
+        # matching the overview page which prioritises the PO header.
+        effective_base = po_header_status if po_header_status in _TERMINAL_STATUSES else (item.ItemStatus or po_header_status)
+        item_status = _eff_status(effective_base, po.ShipWindowEndDate if po else None)
         is_delayed = bool(
             item.ExpectedDate
             and item.ExpectedDate < today
-            and po_header_status not in ('Received', 'Delivered', 'Cancelled', 'Closed')
+            and item_status not in _TERMINAL_STATUSES
         )
 
         items.append({
@@ -400,6 +523,9 @@ async def get_amazon_purchase_orders(
             "order_date": po.OrderedOnDate.isoformat() if po and po.OrderedOnDate else None,
             "expected_delivery_date": expected_date,
             "po_cancellation_date": item.CancellationDate.isoformat() if item.CancellationDate else None,
+            "ship_window_end_date": po.ShipWindowEndDate.isoformat() if po and po.ShipWindowEndDate else None,
+            "dispatch_date": po.DispatchDate.isoformat() if po and po.DispatchDate else None,
+            "courier": po.Courier if po else None,
             "quantity": qty_requested,
             "accepted_quantity": item.AcceptedQuantity,
             "received_quantity": item.QuantityReceived or 0,
@@ -442,12 +568,17 @@ async def get_blinkit_po_overview(
         BlinkitPOData.Id.label('po_id'),
         BlinkitPOData.PONumber.label('po_number'),
         BlinkitPOData.PODate.label('order_date'),
-        BlinkitPOData.Status.label('status'),
+        BlinkitPOData.Status.label('po_header_status'),
+        func.max(BlinkitPOItemData.ItemStatus).label('max_item_status'),
         BlinkitPOData.ShipToName.label('ship_to_name'),
         BlinkitPOData.ShipToAddress.label('ship_to_address'),
         BlinkitPOData.ShipToGSTIN.label('ship_to_gstin'),
+        BlinkitPOData.ShipToCity.label('ship_to_city'),
+        BlinkitPOData.ShipToState.label('ship_to_state'),
         BlinkitPOData.ExpectedDeliveryDate.label('expected_delivery_date'),
         BlinkitPOData.POExpiryDate.label('po_expiry_date'),
+        BlinkitPOData.DispatchDate.label('dispatch_date'),
+        BlinkitPOData.Courier.label('courier'),
         func.count(BlinkitPOItemData.Id).label('item_count'),
         func.sum(BlinkitPOItemData.QTY).label('total_qty'),
     ).join(BlinkitPOItemData, BlinkitPOItemData.POId == BlinkitPOData.Id)
@@ -455,23 +586,36 @@ async def get_blinkit_po_overview(
     if search:
         query = query.filter(BlinkitPOData.PONumber.ilike(f"%{search}%"))
     if status:
-        query = query.filter(BlinkitPOData.Status == status)
-    if start_date:
-        try:
-            query = query.filter(BlinkitPOData.PODate >= datetime.strptime(start_date, "%Y-%m-%d").date())
-        except ValueError:
-            pass
-    if end_date:
-        try:
-            query = query.filter(BlinkitPOData.PODate <= datetime.strptime(end_date, "%Y-%m-%d").date())
-        except ValueError:
-            pass
+        if status == 'Expired':
+            _ov = "','".join(sorted(_NO_EXPIRY_OVERRIDE))
+            query = query.having(text(
+                f"COALESCE(BlinkitPO.Status, MAX(BlinkitPOItem.ItemStatus), 'Created') NOT IN ('{_ov}') "
+                f"AND BlinkitPO.POExpiryDate IS NOT NULL "
+                f"AND DATEDIFF(day, BlinkitPO.POExpiryDate, GETDATE()) >= {_EXPIRY_DAYS}"
+            ))
+        else:
+            query = query.having(
+                func.coalesce(BlinkitPOData.Status, func.max(BlinkitPOItemData.ItemStatus), literal('Created')) == status
+            )
+    # Skip date filter when searching by PO number — the PO may predate the active range
+    if not search:
+        if start_date:
+            try:
+                query = query.filter(BlinkitPOData.PODate >= datetime.strptime(start_date, "%Y-%m-%d").date())
+            except ValueError:
+                pass
+        if end_date:
+            try:
+                query = query.filter(BlinkitPOData.PODate <= datetime.strptime(end_date, "%Y-%m-%d").date())
+            except ValueError:
+                pass
 
     query = query.group_by(
         BlinkitPOData.Id, BlinkitPOData.PONumber, BlinkitPOData.PODate,
         BlinkitPOData.Status, BlinkitPOData.ShipToName, BlinkitPOData.ShipToAddress,
-        BlinkitPOData.ShipToGSTIN, BlinkitPOData.ExpectedDeliveryDate,
-        BlinkitPOData.POExpiryDate,
+        BlinkitPOData.ShipToGSTIN, BlinkitPOData.ShipToCity, BlinkitPOData.ShipToState,
+        BlinkitPOData.ExpectedDeliveryDate,
+        BlinkitPOData.POExpiryDate, BlinkitPOData.DispatchDate, BlinkitPOData.Courier,
     )
 
     # Single pass: subquery + COUNT(*) OVER() avoids a second GROUP BY round-trip
@@ -486,14 +630,26 @@ async def get_blinkit_po_overview(
 
     items = []
     for r in rows_with_count:
-        city, state = _blk_city_state(r.ship_to_address, r.ship_to_name, r.ship_to_gstin, r.po_number)
+        city = r.ship_to_city or None
+        state = r.ship_to_state or None
+        if not city or not state:
+            _city, _state = _blk_city_state(r.ship_to_address, r.ship_to_name, r.ship_to_gstin, r.po_number)
+            city = city or _city
+            state = state or _state
+        eff_status = _eff_status(
+            r.po_header_status or r.max_item_status,
+            r.po_expiry_date,
+        )
         items.append({
             "po_id": r.po_id,
             "po_number": r.po_number,
             "order_date": r.order_date.isoformat() if r.order_date else None,
             "expected_delivery_date": r.expected_delivery_date.isoformat() if r.expected_delivery_date else None,
             "po_expiry_date": r.po_expiry_date.isoformat() if r.po_expiry_date else None,
-            "status": r.status or 'Created',
+            "dispatch_date": r.dispatch_date.isoformat() if r.dispatch_date else None,
+            "courier": r.courier,
+            "status": eff_status,
+            "po_status": r.po_header_status,
             "ship_to_name": r.ship_to_name,
             "ship_to_city": city,
             "ship_to_state": state,
@@ -515,37 +671,57 @@ async def get_blinkit_po_stats(
     """Return per-status PO counts and totals for Blinkit POs (optionally date-filtered).
     Counts at PO level by Status so metrics match the overview grid and update when status changes.
     """
-    effective_status = func.coalesce(BlinkitPOData.Status, literal('Created'))
-    q = db.query(effective_status, func.count(BlinkitPOData.Id))
+    blk_where = []
+    blk_params: dict = {}
     if start_date:
         try:
-            q = q.filter(BlinkitPOData.PODate >= datetime.strptime(start_date, "%Y-%m-%d").date())
+            datetime.strptime(start_date, "%Y-%m-%d")
+            blk_where.append("PODate >= :start_date")
+            blk_params["start_date"] = start_date
         except ValueError:
             pass
     if end_date:
         try:
-            q = q.filter(BlinkitPOData.PODate <= datetime.strptime(end_date, "%Y-%m-%d").date())
+            datetime.strptime(end_date, "%Y-%m-%d")
+            blk_where.append("PODate <= :end_date")
+            blk_params["end_date"] = end_date
         except ValueError:
             pass
-    rows = q.group_by(BlinkitPOData.Status).all()
-    status_counts = {(r[0] or 'Created'): r[1] for r in rows}
-    items_q = db.query(func.sum(BlinkitPOItemData.QTY)) \
-        .join(BlinkitPOData, BlinkitPOItemData.POId == BlinkitPOData.Id)
-    if start_date:
-        try:
-            items_q = items_q.filter(BlinkitPOData.PODate >= datetime.strptime(start_date, "%Y-%m-%d").date())
-        except ValueError:
-            pass
-    if end_date:
-        try:
-            items_q = items_q.filter(BlinkitPOData.PODate <= datetime.strptime(end_date, "%Y-%m-%d").date())
-        except ValueError:
-            pass
-    total_units = items_q.scalar() or 0
+    blk_where_sql = ("WHERE p." + " AND p.".join(blk_where)) if blk_where else ""
+    # Single query: status counts + total units via CTE to avoid two round-trips
+    rows = db.execute(text(f"""
+        WITH base AS (
+            SELECT
+                CASE
+                    WHEN COALESCE(p.Status, agg.max_status, 'Created')
+                         NOT IN ('Delivered','Received','Cancelled','Closed','Expired','Dispatched','In Transit')
+                     AND p.POExpiryDate IS NOT NULL
+                     AND DATEDIFF(day, p.POExpiryDate, GETDATE()) >= {_EXPIRY_DAYS}
+                    THEN 'Expired'
+                    ELSE COALESCE(p.Status, agg.max_status, 'Created')
+                END AS eff_status,
+                COALESCE(units.total_qty, 0) AS total_qty
+            FROM BlinkitPO p
+            LEFT JOIN (
+                SELECT POId, MAX(ItemStatus) AS max_status
+                FROM BlinkitPOItem GROUP BY POId
+            ) agg ON agg.POId = p.Id
+            LEFT JOIN (
+                SELECT POId, SUM(QTY) AS total_qty
+                FROM BlinkitPOItem GROUP BY POId
+            ) units ON units.POId = p.Id
+            {blk_where_sql}
+        )
+        SELECT eff_status, COUNT(*) AS cnt, SUM(total_qty) AS total_qty
+        FROM base
+        GROUP BY eff_status
+    """), blk_params).fetchall()
+    status_counts = {r[0]: r[1] for r in rows}
+    total_units = int(sum(r[2] or 0 for r in rows))
     return {
         "status_counts": status_counts,
         "total_pos": sum(status_counts.values()),
-        "total_units": int(total_units),
+        "total_units": total_units,
     }
 
 
@@ -571,8 +747,16 @@ async def get_blinkit_purchase_orders(
         )
 
     if status:
-        eff = func.coalesce(BlinkitPOItemData.ItemStatus, BlinkitPOData.Status, literal('Created'))
-        query = query.filter(eff == status)
+        if status == 'Expired':
+            _ov = "','".join(sorted(_NO_EXPIRY_OVERRIDE))
+            query = query.filter(text(
+                f"COALESCE(BlinkitPOItem.ItemStatus, BlinkitPO.Status, 'Created') NOT IN ('{_ov}') "
+                f"AND BlinkitPO.POExpiryDate IS NOT NULL "
+                f"AND DATEDIFF(day, BlinkitPO.POExpiryDate, GETDATE()) >= {_EXPIRY_DAYS}"
+            ))
+        else:
+            eff = func.coalesce(BlinkitPOItemData.ItemStatus, BlinkitPOData.Status, literal('Created'))
+            query = query.filter(eff == status)
 
     if start_date:
         try:
@@ -646,18 +830,26 @@ async def get_blinkit_purchase_orders(
         gap = max(0, qty - packed_qty)
 
         po_header_status = (po.Status if po else None) or 'Created'
-        item_status = item.ItemStatus or po_header_status
+        # Terminal PO-header status (Delivered, Cancelled, etc.) overrides item-level status,
+        # matching the overview page which prioritises the PO header.
+        effective_base = po_header_status if po_header_status in _TERMINAL_STATUSES else (item.ItemStatus or po_header_status)
+        item_status = _eff_status(effective_base, po.POExpiryDate if po else None)
         is_delayed = bool(
             po and po.ExpectedDeliveryDate
             and po.ExpectedDeliveryDate < today
-            and po_header_status not in ('Received', 'Delivered', 'Cancelled', 'Closed')
+            and item_status not in _TERMINAL_STATUSES
         )
 
         ship_to_name = po.ShipToName if po else None
         ship_to_address = po.ShipToAddress if po else None
         ship_to_gstin = po.ShipToGSTIN if po else None
         po_num = item.PONumber if item.PONumber else (po.PONumber if po else None)
-        city, state = _blk_city_state(ship_to_address, ship_to_name, ship_to_gstin, po_num)
+        city = (po.ShipToCity if po else None) or None
+        state = (po.ShipToState if po else None) or None
+        if not city or not state:
+            _city, _state = _blk_city_state(ship_to_address, ship_to_name, ship_to_gstin, po_num)
+            city = city or _city
+            state = state or _state
 
         items.append({
             "id": item.Id,
@@ -670,9 +862,11 @@ async def get_blinkit_purchase_orders(
             "order_date": po.PODate.isoformat() if po and po.PODate else None,
             "expected_delivery_date": po.ExpectedDeliveryDate.isoformat() if po and po.ExpectedDeliveryDate else None,
             "po_expiry_date": po.POExpiryDate.isoformat() if po and po.POExpiryDate else None,
+            "dispatch_date": po.DispatchDate.isoformat() if po and po.DispatchDate else None,
+            "courier": po.Courier if po else None,
             "quantity": qty,
             "accepted_qty": item.AcceptedQty,
-            "received_quantity": 0,
+            "received_quantity": item.ReceivedQty if item.ReceivedQty is not None else 0,
             "packed_qty": packed_qty,
             "gap": gap,
             "unit_price": float(item.UnitBaseCost) if item.UnitBaseCost else 0.0,
@@ -739,7 +933,18 @@ async def get_all_purchase_orders(
                 AmazonPOItemData.ASIN.ilike(f"%{search}%")
             )
         if status:
-            aq = aq.filter(AmazonPOData.POStatus == status)
+            if status == 'Expired':
+                aq = aq.filter(
+                    and_(
+                        func.coalesce(AmazonPOItemData.ItemStatus, AmazonPOData.POStatus, literal('Created')).notin_(
+                            list(_NO_EXPIRY_OVERRIDE)
+                        ),
+                        AmazonPOData.ShipWindowEndDate.isnot(None),
+                        func.datediff(text('day'), AmazonPOData.ShipWindowEndDate, func.current_timestamp()) >= _EXPIRY_DAYS
+                    )
+                )
+            else:
+                aq = aq.filter(func.coalesce(AmazonPOItemData.ItemStatus, AmazonPOData.POStatus, literal('Created')) == status)
         if start:
             aq = aq.filter(AmazonPOData.OrderedOnDate >= start)
         if end:
@@ -747,10 +952,10 @@ async def get_all_purchase_orders(
 
         for item in aq.all():
             po = item.po
-            po_status = (po.POStatus if po else None) or 'Created'
+            po_status = _eff_status(item.ItemStatus or (po.POStatus if po else None), po.ShipWindowEndDate if po else None)
             is_delayed = bool(
                 item.ExpectedDate and item.ExpectedDate < today
-                and po_status not in ('Received', 'Delivered', 'Cancelled', 'Closed')
+                and po_status not in _TERMINAL_STATUSES
             )
             hub = None
             if po:
@@ -787,7 +992,18 @@ async def get_all_purchase_orders(
                 BlinkitPOItemData.ItemCode.ilike(f"%{search}%")
             )
         if status:
-            bq = bq.filter(BlinkitPOData.Status == status)
+            if status == 'Expired':
+                bq = bq.filter(
+                    and_(
+                        func.coalesce(BlinkitPOItemData.ItemStatus, BlinkitPOData.Status, literal('Created')).notin_(
+                            list(_NO_EXPIRY_OVERRIDE)
+                        ),
+                        BlinkitPOData.POExpiryDate.isnot(None),
+                        func.datediff(text('day'), BlinkitPOData.POExpiryDate, func.current_timestamp()) >= _EXPIRY_DAYS
+                    )
+                )
+            else:
+                bq = bq.filter(func.coalesce(BlinkitPOItemData.ItemStatus, BlinkitPOData.Status, literal('Created')) == status)
         if start:
             bq = bq.filter(BlinkitPOData.PODate >= start)
         if end:
@@ -795,10 +1011,10 @@ async def get_all_purchase_orders(
 
         for item in bq.all():
             po = item.po
-            po_status = (po.Status if po else None) or 'Created'
+            po_status = _eff_status(item.ItemStatus or (po.Status if po else None), po.POExpiryDate if po else None)
             is_delayed = bool(
                 po and po.ExpectedDeliveryDate and po.ExpectedDeliveryDate < today
-                and po_status not in ('Received', 'Delivered', 'Cancelled', 'Closed')
+                and po_status not in _TERMINAL_STATUSES
             )
             hub = (po.ShipToName if po else None) or None
             tat = None
@@ -1033,6 +1249,30 @@ async def update_amazon_po_status(
     old_status = item.ItemStatus
     item.ItemStatus = status_data.status
 
+    # Auto-fill received/accepted qty when item marked Delivered/Received (only if not already recorded)
+    if status_data.status in ('Delivered', 'Received'):
+        if item.QuantityReceived is None:
+            item.QuantityReceived = item.QuantityRequested or 0
+        if item.AcceptedQuantity is None:
+            item.AcceptedQuantity = item.QuantityRequested or 0
+    elif status_data.status == 'Cancelled':
+        # Preserve existing partial-receipt data; only zero if nothing was recorded yet
+        if item.QuantityReceived is None:
+            item.QuantityReceived = 0
+        if item.AcceptedQuantity is None:
+            item.AcceptedQuantity = 0
+
+    # Cascade to PO header only when ALL items (including unset ones) are terminal
+    po = db.query(AmazonPOData).filter(AmazonPOData.Id == item.POId).first()
+    if po:
+        all_statuses = [i.ItemStatus for i in po.items]
+        if all_statuses and all(s in _TERMINAL_STATUSES for s in all_statuses):
+            sibling_statuses = set(all_statuses)
+            if sibling_statuses == {'Cancelled'}:
+                po.POStatus = 'Cancelled'
+            elif 'Received' in sibling_statuses or 'Delivered' in sibling_statuses:
+                po.POStatus = 'Delivered'
+
     log_audit(db, current_user.Id, "STATUS_CHANGE", "AmazonPOItem", str(item.Id),
               old_values={"itemStatus": old_status},
               new_values={"itemStatus": status_data.status})
@@ -1062,6 +1302,30 @@ async def update_blinkit_po_status(
     old_status = item.ItemStatus
     item.ItemStatus = status_data.status
 
+    # Auto-fill received/accepted qty when item marked Delivered/Received (only if not already recorded)
+    if status_data.status in ('Delivered', 'Received'):
+        if item.ReceivedQty is None:
+            item.ReceivedQty = int(item.QTY or 0)
+        if item.AcceptedQty is None:
+            item.AcceptedQty = int(item.QTY or 0)
+    elif status_data.status == 'Cancelled':
+        # Preserve existing partial-receipt data; only zero if nothing was recorded yet
+        if item.ReceivedQty is None:
+            item.ReceivedQty = 0
+        if item.AcceptedQty is None:
+            item.AcceptedQty = 0
+
+    # Cascade to PO header only when ALL items (including unset ones) are terminal
+    po = db.query(BlinkitPOData).filter(BlinkitPOData.Id == item.POId).first()
+    if po:
+        all_statuses = [i.ItemStatus for i in po.items]
+        if all_statuses and all(s in _TERMINAL_STATUSES for s in all_statuses):
+            sibling_statuses = set(all_statuses)
+            if sibling_statuses == {'Cancelled'}:
+                po.Status = 'Cancelled'
+            elif 'Received' in sibling_statuses or 'Delivered' in sibling_statuses:
+                po.Status = 'Delivered'
+
     log_audit(db, current_user.Id, "STATUS_CHANGE", "BlinkitPOItem", str(item.Id),
               old_values={"itemStatus": old_status},
               new_values={"itemStatus": status_data.status})
@@ -1090,6 +1354,21 @@ async def update_amazon_po_header_status(
 
     old_status = po.POStatus
     po.POStatus = status_data.status
+
+    # Auto-manage item quantities based on new PO status.
+    if status_data.status in ('Delivered', 'Received'):
+        for item in po.items:
+            if item.QuantityReceived is None:
+                item.QuantityReceived = item.QuantityRequested or 0
+            if item.AcceptedQuantity is None:
+                item.AcceptedQuantity = item.QuantityRequested or 0
+    elif status_data.status == 'Cancelled':
+        for item in po.items:
+            if item.QuantityReceived is None:
+                item.QuantityReceived = 0
+            if item.AcceptedQuantity is None:
+                item.AcceptedQuantity = 0
+
     log_audit(db, current_user.Id, "STATUS_CHANGE", "AmazonPO", str(po.Id),
               old_values={"poStatus": old_status},
               new_values={"poStatus": status_data.status})
@@ -1120,6 +1399,21 @@ async def update_blinkit_po_header_status(
 
     old_status = po.Status
     po.Status = status_data.status
+
+    # Auto-manage item quantities based on new PO status.
+    if status_data.status in ('Delivered', 'Received'):
+        for item in po.items:
+            if item.ReceivedQty is None:
+                item.ReceivedQty = int(item.QTY or 0)
+            if item.AcceptedQty is None:
+                item.AcceptedQty = int(item.QTY or 0)
+    elif status_data.status == 'Cancelled':
+        for item in po.items:
+            if item.ReceivedQty is None:
+                item.ReceivedQty = 0
+            if item.AcceptedQty is None:
+                item.AcceptedQty = 0
+
     log_audit(db, current_user.Id, "STATUS_CHANGE", "BlinkitPO", str(po.Id),
               old_values={"status": old_status},
               new_values={"status": status_data.status})
@@ -1355,6 +1649,280 @@ async def update_blinkit_item_accepted_qty(
             "inventory_deducted": inventory_result.get("deducted", 0),
             "inventory_shortfall": inventory_result.get("shortfall", 0),
         }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/blinkit-item/{item_id}/received-qty")
+async def update_blinkit_item_received_qty(
+    item_id: int,
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Set ReceivedQty on a Blinkit PO line item."""
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    item = db.query(BlinkitPOItemData).filter(BlinkitPOItemData.Id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Blinkit PO item not found")
+
+    received_qty = body.get("received_qty")
+    if received_qty is None:
+        raise HTTPException(status_code=422, detail="received_qty is required")
+
+    old_val = item.ReceivedQty or 0
+    new_val = int(received_qty)
+    item.ReceivedQty = new_val
+    log_audit(db, current_user.Id, "UPDATE", "BlinkitPOItem", str(item_id),
+              old_values={"receivedQty": old_val},
+              new_values={"receivedQty": new_val})
+    try:
+        db.commit()
+        return {"success": True, "received_qty": item.ReceivedQty}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/amazon-po/{po_id}/courier")
+async def update_amazon_po_courier(
+    po_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Set or clear the courier on an Amazon PO header."""
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    po = db.query(AmazonPOData).filter(AmazonPOData.Id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Amazon PO not found")
+
+    old_val = po.Courier
+    po.Courier = payload.get("courier") or None
+    log_audit(db, current_user.Id, "UPDATE", "AmazonPO", str(po.Id),
+              old_values={"courier": old_val},
+              new_values={"courier": po.Courier})
+    try:
+        db.commit()
+        return {"success": True, "courier": po.Courier}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/blinkit-po/{po_id}/courier")
+async def update_blinkit_po_courier(
+    po_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Set or clear the courier on a Blinkit PO header."""
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    po = db.query(BlinkitPOData).filter(BlinkitPOData.Id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Blinkit PO not found")
+
+    old_val = po.Courier
+    po.Courier = payload.get("courier") or None
+    log_audit(db, current_user.Id, "UPDATE", "BlinkitPO", str(po.Id),
+              old_values={"courier": old_val},
+              new_values={"courier": po.Courier})
+    try:
+        db.commit()
+        return {"success": True, "courier": po.Courier}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/amazon-po/{po_id}/dispatch-date")
+async def update_amazon_po_dispatch_date(
+    po_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Set or clear the dispatch date on an Amazon PO header."""
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    po = db.query(AmazonPOData).filter(AmazonPOData.Id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Amazon PO not found")
+
+    raw = payload.get("dispatch_date")
+    old_val = po.DispatchDate.isoformat() if po.DispatchDate else None
+    if raw:
+        try:
+            po.DispatchDate = datetime.strptime(raw, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=422, detail="dispatch_date must be YYYY-MM-DD")
+    else:
+        po.DispatchDate = None
+
+    new_val = po.DispatchDate.isoformat() if po.DispatchDate else None
+    log_audit(db, current_user.Id, "UPDATE", "AmazonPO", str(po.Id),
+              old_values={"dispatchDate": old_val},
+              new_values={"dispatchDate": new_val})
+    try:
+        db.commit()
+        return {"success": True, "dispatch_date": new_val}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/blinkit-po/{po_id}/dispatch-date")
+async def update_blinkit_po_dispatch_date(
+    po_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Set or clear the dispatch date on a Blinkit PO header."""
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    po = db.query(BlinkitPOData).filter(BlinkitPOData.Id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Blinkit PO not found")
+
+    raw = payload.get("dispatch_date")
+    old_val = po.DispatchDate.isoformat() if po.DispatchDate else None
+    if raw:
+        try:
+            po.DispatchDate = datetime.strptime(raw, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=422, detail="dispatch_date must be YYYY-MM-DD")
+    else:
+        po.DispatchDate = None
+
+    new_val = po.DispatchDate.isoformat() if po.DispatchDate else None
+    log_audit(db, current_user.Id, "UPDATE", "BlinkitPO", str(po.Id),
+              old_values={"dispatchDate": old_val},
+              new_values={"dispatchDate": new_val})
+    try:
+        db.commit()
+        return {"success": True, "dispatch_date": new_val}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/amazon-item/{item_id}/expected-date")
+async def update_amazon_item_expected_date(
+    item_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Set or clear the expected delivery date on an Amazon PO item."""
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    item = db.query(AmazonPOItemData).filter(AmazonPOItemData.Id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Amazon PO item not found")
+
+    raw = payload.get("expected_date")
+    old_val = item.ExpectedDate.isoformat() if item.ExpectedDate else None
+    if raw:
+        try:
+            item.ExpectedDate = datetime.strptime(raw, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=422, detail="expected_date must be YYYY-MM-DD")
+    else:
+        item.ExpectedDate = None
+
+    new_val = item.ExpectedDate.isoformat() if item.ExpectedDate else None
+    log_audit(db, current_user.Id, "UPDATE", "AmazonPOItem", str(item.Id),
+              old_values={"expectedDate": old_val},
+              new_values={"expectedDate": new_val})
+    try:
+        db.commit()
+        return {"success": True, "expected_date": new_val}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/blinkit-po/{po_id}/expected-delivery-date")
+async def update_blinkit_po_expected_delivery_date(
+    po_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Set or clear the expected delivery date on a Blinkit PO header."""
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    po = db.query(BlinkitPOData).filter(BlinkitPOData.Id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Blinkit PO not found")
+
+    raw = payload.get("expected_delivery_date")
+    old_val = po.ExpectedDeliveryDate.isoformat() if po.ExpectedDeliveryDate else None
+    if raw:
+        try:
+            po.ExpectedDeliveryDate = datetime.strptime(raw, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=422, detail="expected_delivery_date must be YYYY-MM-DD")
+    else:
+        po.ExpectedDeliveryDate = None
+
+    new_val = po.ExpectedDeliveryDate.isoformat() if po.ExpectedDeliveryDate else None
+    log_audit(db, current_user.Id, "UPDATE", "BlinkitPO", str(po.Id),
+              old_values={"expectedDeliveryDate": old_val},
+              new_values={"expectedDeliveryDate": new_val})
+    try:
+        db.commit()
+        return {"success": True, "expected_delivery_date": new_val}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/blinkit-po/{po_id}/expiry-date")
+async def update_blinkit_po_expiry_date(
+    po_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Set or clear the PO expiry date on a Blinkit PO header."""
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+    po = db.query(BlinkitPOData).filter(BlinkitPOData.Id == po_id).first()
+    if not po:
+        raise HTTPException(status_code=404, detail="Blinkit PO not found")
+
+    raw = payload.get("expiry_date")
+    old_val = po.POExpiryDate.isoformat() if po.POExpiryDate else None
+    if raw:
+        try:
+            po.POExpiryDate = datetime.strptime(raw, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=422, detail="expiry_date must be YYYY-MM-DD")
+    else:
+        po.POExpiryDate = None
+
+    new_val = po.POExpiryDate.isoformat() if po.POExpiryDate else None
+    log_audit(db, current_user.Id, "UPDATE", "BlinkitPO", str(po.Id),
+              old_values={"poExpiryDate": old_val},
+              new_values={"poExpiryDate": new_val})
+    try:
+        db.commit()
+        return {"success": True, "expiry_date": new_val}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))

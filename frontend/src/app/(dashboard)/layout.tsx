@@ -6,6 +6,7 @@ import { Header } from '@/components/Header';
 import { FilterProvider } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { Toaster } from 'sonner';
+import { SessionWarningDialog } from '@/components/SessionWarningDialog';
 
 export default function DashboardLayout({
   children,
@@ -25,6 +26,7 @@ export default function DashboardLayout({
               </main>
             </div>
             <Toaster position="top-right" richColors />
+            <SessionWarningDialog />
           </div>
         </FilterProvider>
       </SidebarProvider>

@@ -1,14 +1,14 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useFilter, computeDateRange, computeGrowthPrevPeriod, FilterMode } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { TrendingUp, Package, TrendingDown, BarChart2, Search, RefreshCw, DollarSign } from 'lucide-react';
+import { TrendingUp, Package, TrendingDown, BarChart2, RefreshCw, DollarSign, Search, X, Download } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { DataGrid, useDataGrid, ViewOptionsButton } from '@/components/ui/data-grid';
+import { exportToCSV } from '@/lib/export';
 import {
   AreaChart,
   Area,
@@ -34,7 +34,7 @@ interface AmazonProduct {
 const PAGE_SIZE = 50;
 
 export default function AmazonSalesPage() {
-  const { filterMode, customStart, customEnd } = useFilter();
+  const { filterMode, customStart, customEnd, globalSearch } = useFilter();
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [stats, setStats] = useState({
@@ -46,15 +46,16 @@ export default function AmazonSalesPage() {
   });
   const [dailyTrend, setDailyTrend] = useState<any[]>([]);
   const [fetchError, setFetchError] = useState<string | null>(null);
-  const [hasLoaded, setHasLoaded] = useState(false);
+  const hasLoadedRef = useRef(false);
+  const fetchSeqRef = useRef(0);
 
   // Products grid state
   const [products, setProducts] = useState<AmazonProduct[]>([]);
   const [productsTotal, setProductsTotal] = useState(0);
   const [productsTotalPages, setProductsTotalPages] = useState(1);
   const [productsPage, setProductsPage] = useState(1);
-  const [productsSearch, setProductsSearch] = useState('');
   const [isProductsLoading, setIsProductsLoading] = useState(false);
+  const [gridSearch, setGridSearch] = useState('');
 
   const gridState = useDataGrid<AmazonProduct>([
     {
@@ -100,10 +101,50 @@ export default function AmazonSalesPage() {
   ], 'amazon-sales');
 
   const getDateParams = useCallback(() => {
-    if (filterMode === 'all') return {};
-    const { start_date, end_date } = computeDateRange(filterMode as FilterMode, customStart, customEnd);
-    return { ...(start_date ? { start_date } : {}), ...(end_date ? { end_date } : {}) };
+    const current = filterMode === 'all' ? {} : computeDateRange(filterMode as FilterMode, customStart, customEnd);
+    const prev = computeGrowthPrevPeriod(filterMode as FilterMode, customStart, customEnd);
+    return {
+      ...(current.start_date ? { start_date: current.start_date } : {}),
+      ...(current.end_date ? { end_date: current.end_date } : {}),
+      ...(prev.start_date ? { prev_start_date: prev.start_date } : {}),
+      ...(prev.end_date ? { prev_end_date: prev.end_date } : {}),
+    };
   }, [filterMode, customStart, customEnd]);
+
+  const fetchAnalytics = useCallback(async (asin: string = '') => {
+    const seq = ++fetchSeqRef.current;
+    try {
+      setFetchError(null);
+      if (!hasLoadedRef.current) {
+        setIsLoading(true);
+      } else {
+        setIsRefreshing(true);
+      }
+      const dateParams = getDateParams();
+      const analytics = await (api as any).amazonSalesData.getAnalytics({
+        ...dateParams,
+        ...(asin ? { asin } : {}),
+      }) as any;
+      if (fetchSeqRef.current !== seq) return;
+      setStats({
+        total_units: analytics.summary?.total_units || 0,
+        total_revenue: analytics.summary?.total_revenue || 0,
+        active_products: analytics.summary?.active_products || 0,
+        monthly_growth: analytics.summary?.monthly_growth || 0,
+        total_records_all_time: analytics.summary?.total_records_all_time || 0,
+      });
+      setDailyTrend(analytics.daily_trend || []);
+      hasLoadedRef.current = true;
+    } catch (error: any) {
+      if (fetchSeqRef.current !== seq) return;
+      setFetchError(error?.message || String(error));
+    } finally {
+      if (fetchSeqRef.current === seq) {
+        setIsLoading(false);
+        setIsRefreshing(false);
+      }
+    }
+  }, [getDateParams]);
 
   const fetchProducts = useCallback(async (page = 1, search = '') => {
     setIsProductsLoading(true);
@@ -124,44 +165,16 @@ export default function AmazonSalesPage() {
     }
   }, [getDateParams]);
 
+  // Analytics + grid: re-run when date range or global search changes
   useEffect(() => {
-    const fetchAnalytics = async () => {
-      try {
-        setFetchError(null);
-        if (!hasLoaded) {
-          setIsLoading(true);
-        } else {
-          setIsRefreshing(true);
-        }
-        const dateParams = getDateParams();
-        const analytics = await (api as any).amazonSalesData.getAnalytics(
-          Object.keys(dateParams).length ? dateParams : { days: 1825 }
-        ) as any;
-        setStats({
-          total_units: analytics.summary?.total_units || 0,
-          total_revenue: analytics.summary?.total_revenue || 0,
-          active_products: analytics.summary?.active_products || 0,
-          monthly_growth: analytics.summary?.monthly_growth || 0,
-          total_records_all_time: analytics.summary?.total_records_all_time || 0,
-        });
-        setDailyTrend(analytics.daily_trend || []);
-        setHasLoaded(true);
-      } catch (error: any) {
-        setFetchError(error?.message || String(error));
-      } finally {
-        setIsLoading(false);
-        setIsRefreshing(false);
-      }
-    };
-    setProductsPage(1);
-    fetchAnalytics();
-    fetchProducts(1, productsSearch);
-  }, [fetchProducts, getDateParams]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (filterMode === 'custom' && !customStart) return;
+    fetchAnalytics(globalSearch);
+  }, [fetchAnalytics, globalSearch, filterMode, customStart, customEnd]);
 
-  const handleProductSearch = () => {
+  useEffect(() => {
     setProductsPage(1);
-    fetchProducts(1, productsSearch);
-  };
+    fetchProducts(1, globalSearch);
+  }, [fetchProducts, globalSearch]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const growth = stats.monthly_growth;
 
@@ -200,10 +213,25 @@ export default function AmazonSalesPage() {
           <StatsCard title="Total Revenue" value={`₹${Math.round(stats.total_revenue).toLocaleString('en-IN')}`} icon={DollarSign} description="MRP-based revenue" variant="blue" />
           <StatsCard title="Active Products" value={stats.active_products.toString()} icon={BarChart2} description="Distinct ASINs" variant="blue" />
           <StatsCard
-            title="Monthly Growth"
+            title="Period Growth"
             value={`${growth >= 0 ? '+' : ''}${growth.toFixed(1)}%`}
             icon={growth >= 0 ? TrendingUp : TrendingDown}
-            description="vs previous 30-day period"
+            description={(() => {
+              switch (filterMode) {
+                case 'this_week': return 'vs last complete week';
+                case 'last_week': return 'vs the week prior';
+                case 'this_month': return 'vs same days last month';
+                case 'last_month': return 'vs the month before';
+                case 'this_year': return 'vs same period last year';
+                case 'last_year': return 'vs year before last';
+                case '3months': return 'vs prior 3 months';
+                case '6months': return 'vs prior 6 months';
+                case '1month': return 'vs prior 30 days';
+                case '1year': return 'vs prior year';
+                case 'custom': return 'vs equivalent prior period';
+                default: return 'vs prior 30 days';
+              }
+            })()}
             trend={{ value: growth, isPositive: growth >= 0 }}
             variant="blue"
           />
@@ -212,7 +240,9 @@ export default function AmazonSalesPage() {
         {/* Daily Sales Trend Chart */}
         <Card>
           <CardHeader>
-            <CardTitle>Daily Sales Trend</CardTitle>
+            <CardTitle>
+              Daily Sales Trend{globalSearch ? ` — ${globalSearch}` : ''}
+            </CardTitle>
           </CardHeader>
           <CardContent>
             {dailyTrend.length > 0 ? (
@@ -254,19 +284,42 @@ export default function AmazonSalesPage() {
                 All Products ({productsTotal.toLocaleString('en-IN')})
               </CardTitle>
               <div className="flex items-center gap-2">
-                <div className="flex gap-1">
-                  <Input
-                    placeholder="Search by product or ASIN..."
-                    value={productsSearch}
-                    onChange={(e) => setProductsSearch(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleProductSearch()}
-                    className="h-9 w-56 text-sm"
+                {/* Grid search */}
+                <div className="relative">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+                  <input
+                    type="text"
+                    placeholder="Search products…"
+                    value={gridSearch}
+                    onChange={e => setGridSearch(e.target.value.replace(/^\s+/, ''))}
+                    onKeyDown={e => { if (e.key === 'Enter') { setProductsPage(1); fetchProducts(1, gridSearch.trim() || globalSearch); } }}
+                    className="h-8 pl-8 pr-7 text-xs border border-border rounded-md bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 w-44"
                   />
-                  <Button variant="outline" size="sm" onClick={handleProductSearch}>
-                    <Search className="h-4 w-4" />
-                  </Button>
+                  {gridSearch && (
+                    <button onClick={() => { setGridSearch(''); setProductsPage(1); fetchProducts(1, globalSearch); }} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                 </div>
-                <Button variant="outline" size="sm" onClick={() => { setProductsPage(1); fetchProducts(1, productsSearch); }}>
+                {/* Export */}
+                {products.length > 0 && (
+                  <Button variant="outline" size="sm" className="h-8" onClick={() => exportToCSV(
+                    products.map(p => ({
+                      'Product Name': p.productTitle,
+                      'ASIN': p.asin,
+                      'SKU': p.sku,
+                      'Total Units': p.totalUnits,
+                      'Revenue (₹)': Math.round(p.totalRevenue),
+                      'First Sale': p.firstSale || '',
+                      'Last Sale': p.lastSale || '',
+                    })),
+                    'amazon_sales_products'
+                  )}>
+                    <Download className="h-4 w-4 mr-1.5" />
+                    Export
+                  </Button>
+                )}
+                <Button variant="outline" size="sm" onClick={() => { setProductsPage(1); fetchProducts(1, gridSearch.trim() || globalSearch); }}>
                   <RefreshCw className="h-4 w-4" />
                 </Button>
                 <ViewOptionsButton
@@ -299,11 +352,11 @@ export default function AmazonSalesPage() {
                 <div className="flex items-center justify-between pt-2">
                   <p className="text-sm text-gray-500">{productsTotal.toLocaleString('en-IN')} products</p>
                   <div className="flex items-center gap-2">
-                    <Button variant="outline" size="sm" onClick={() => { const p = Math.max(1, productsPage - 1); setProductsPage(p); fetchProducts(p, productsSearch); }} disabled={productsPage === 1}>
+                    <Button variant="outline" size="sm" onClick={() => { const p = Math.max(1, productsPage - 1); setProductsPage(p); fetchProducts(p, gridSearch.trim() || globalSearch); }} disabled={productsPage === 1}>
                       Previous
                     </Button>
                     <span className="text-sm text-gray-500">Page {productsPage} of {productsTotalPages}</span>
-                    <Button variant="outline" size="sm" onClick={() => { const p = Math.min(productsTotalPages, productsPage + 1); setProductsPage(p); fetchProducts(p, productsSearch); }} disabled={productsPage === productsTotalPages}>
+                    <Button variant="outline" size="sm" onClick={() => { const p = Math.min(productsTotalPages, productsPage + 1); setProductsPage(p); fetchProducts(p, gridSearch.trim() || globalSearch); }} disabled={productsPage === productsTotalPages}>
                       Next
                     </Button>
                   </div>

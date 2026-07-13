@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
@@ -9,8 +9,10 @@ import { Badge } from '@/components/ui/badge';
 import { DataGrid, GridColumn, useDataGrid, ViewOptionsButton } from '@/components/ui/data-grid';
 import { FilterBar } from '@/components/ui/filter-bar';
 import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { exportToCSV } from '@/lib/export';
 import { fmtDate } from '@/lib/format';
+import { toast } from 'sonner';
 import {
   Package,
   FileText,
@@ -21,10 +23,13 @@ import {
   CheckCircle2,
   XCircle,
   Download,
+  Pencil,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useRouter } from 'next/navigation';
 import api from '@/lib/api';
+
+const STATUS_OPTIONS = ['Created', 'Dispatched', 'In Transit', 'Delivered', 'Delayed', 'Cancelled'];
 
 interface PurchaseOrder {
   id: number;
@@ -33,8 +38,10 @@ interface PurchaseOrder {
   channel: string;
   quantity: number;
   dispatchDate: string;
+  actualDispatch: string;
   expectedDate: string;
   expectedDateRaw: string | null;
+  expiryDateRaw: string | null;
   orderDateRaw: string | null;
   state: string;
   city: string;
@@ -44,32 +51,66 @@ interface PurchaseOrder {
   status: string;
 }
 
+const NO_EXPIRY_OVERRIDE = new Set(['Delivered', 'Received', 'Cancelled', 'Closed', 'Expired', 'Dispatched', 'In Transit']);
+function effStatus(base: string, expiryISO: string | null): string {
+  if (NO_EXPIRY_OVERRIDE.has(base)) return base;
+  if (!expiryISO) return base;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return (today.getTime() - new Date(expiryISO + 'T00:00:00').getTime()) / 86400000 >= 15 ? 'Expired' : base;
+}
+function getPoRowClass(status: string, expiryISO: string | null): string | undefined {
+  if (['Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit'].includes(status)) return undefined;
+  if (!expiryISO) return undefined;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const d = Math.ceil((new Date(expiryISO + 'T00:00:00').getTime() - today.getTime()) / 86400000);
+  if (d <= 7)  return 'bg-red-50 dark:bg-red-950/20';
+  if (d <= 15) return 'bg-yellow-50 dark:bg-yellow-950/20';
+  return undefined;
+}
+function getPoRowBgColor(status: string, expiryISO: string | null): string | undefined {
+  if (['Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit'].includes(status)) return undefined;
+  if (!expiryISO) return undefined;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const d = Math.ceil((new Date(expiryISO + 'T00:00:00').getTime() - today.getTime()) / 86400000);
+  if (d <= 7)  return 'rgb(254,242,242)';
+  if (d <= 15) return 'rgb(254,252,232)';
+  return undefined;
+}
+
 const PAGE_SIZE = 50;
 
-const toRow = (po: any, channel: string): PurchaseOrder => ({
-  id: po.po_id,
-  po_id: po.po_id,
-  po_number: po.po_number,
-  channel,
-  quantity: po.total_qty || 0,
-  dispatchDate: po.order_date ? fmtDate(po.order_date) : '-',
-  expectedDate: po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : '-',
-  expectedDateRaw: po.expected_delivery_date || null,
-  orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
-  state: po.ship_to_state || '-',
-  city: po.ship_to_city || '-',
-  hub: po.ship_to_location_code || po.ship_to_name || '-',
-  courier: '-',
-  tat: po.tat != null ? `${po.tat}d` : '-',
-  status: po.status || 'Created',
-});
+const toRow = (po: any, channel: string): PurchaseOrder => {
+  const expiryISO = channel === 'Amazon'
+    ? (po.ship_window_end_date ? po.ship_window_end_date.slice(0, 10) : null)
+    : (po.po_expiry_date ? po.po_expiry_date.slice(0, 10) : null);
+  return {
+    id: po.po_id,
+    po_id: po.po_id,
+    po_number: po.po_number,
+    channel,
+    quantity: po.total_qty || 0,
+    dispatchDate: po.order_date ? fmtDate(po.order_date) : '-',
+    actualDispatch: po.dispatch_date ? fmtDate(po.dispatch_date) : '-',
+    expectedDate: po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : '-',
+    expectedDateRaw: po.expected_delivery_date || null,
+    expiryDateRaw: expiryISO,
+    orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
+    state: po.ship_to_state || '-',
+    city: po.ship_to_city || '-',
+    hub: channel === 'Amazon'
+      ? (po.ship_to_location_code || po.ship_to_city || '-')
+      : (po.ship_to_city || '-'),
+    courier: po.courier || '-',
+    tat: po.tat != null ? `${po.tat}d` : '-',
+    status: effStatus(po.status || 'Created', expiryISO),
+  };
+};
 
 export default function POLifecyclePage() {
   const router = useRouter();
-  const { filterMode, customStart, customEnd } = useFilter();
+  const { filterMode, customStart, customEnd, channel, globalSearch, setGlobalSearchRaw } = useFilter();
+  const [gridSearch, setGridSearch] = useState('');
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
-  const [poSearch, setPoSearch] = useState('');
-  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(1);
   const [allOrders, setAllOrders] = useState<PurchaseOrder[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -80,18 +121,44 @@ export default function POLifecyclePage() {
     amazon: { status_counts: {} as Record<string, number>, total_pos: 0, total_units: 0 },
     blinkit: { status_counts: {} as Record<string, number>, total_pos: 0, total_units: 0 },
   });
+  const [refreshKey, setRefreshKey] = useState(0);
+  const fetchSeqRef = useRef(0);
+
+  // Status edit dialog
+  const [statusDialogRow, setStatusDialogRow] = useState<PurchaseOrder | null>(null);
+  const [statusInput, setStatusInput] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  const handleSaveStatus = async () => {
+    if (!statusDialogRow || statusInput === statusDialogRow.status) { setStatusDialogRow(null); return; }
+    setIsSaving(true);
+    try {
+      if (statusDialogRow.channel === 'Amazon') {
+        await api.purchaseOrders.updateAmazonPOStatus(statusDialogRow.po_id, { status: statusInput });
+      } else {
+        await api.purchaseOrders.updateBlinkitPOStatus(statusDialogRow.po_id, { status: statusInput });
+      }
+      setRefreshKey(k => k + 1);
+      toast.success(`Status updated to ${statusInput}`);
+      setStatusDialogRow(null);
+    } catch {
+      toast.error('Failed to update status');
+    } finally {
+      setIsSaving(false);
+    }
+  };
 
   // Debounce search: reset to page 1 when search changes
+
+  // Sync global channel filter → local filters.channel (drives grid showAmazon/showBlinkit)
   useEffect(() => {
-    const t = setTimeout(() => {
-      setDebouncedSearch(poSearch);
-      setPage(1);
-    }, 400);
-    return () => clearTimeout(t);
-  }, [poSearch]);
+    setFilters(prev => ({ ...prev, channel }));
+    setPage(1);
+  }, [channel]);
 
   // Fetch date-filtered KPI stats — re-runs when global filter changes
   useEffect(() => {
+    if (filterMode === 'custom' && !customStart) return;
     const fetchStats = async () => {
       try {
         const dateParams = filterMode === 'all' ? {} : (() => {
@@ -109,22 +176,26 @@ export default function POLifecyclePage() {
       }
     };
     fetchStats();
-  }, [filterMode, customStart, customEnd]);
+  }, [filterMode, customStart, customEnd, refreshKey]);
 
   // Fetch paginated grid data (server-side search, status, date, channel filters)
   useEffect(() => {
+    if (filterMode === 'custom' && !customStart) return;
+    const seq = ++fetchSeqRef.current;
     const fetchGrid = async () => {
       try {
         if (page === 1) setIsLoading(true);
         else setIsGridLoading(true);
 
-        const dateParams = filterMode === 'all' ? {} : (() => {
+        const params: any = { page, page_size: PAGE_SIZE };
+        if (globalSearch) {
+          params.search = globalSearch;
+          // PO number search bypasses date filter
+        } else if (filterMode !== 'all') {
           const { start_date, end_date } = computeDateRange(filterMode as FilterMode, customStart, customEnd);
-          return { ...(start_date ? { start_date } : {}), ...(end_date ? { end_date } : {}) };
-        })();
-
-        const params: any = { page, page_size: PAGE_SIZE, ...dateParams };
-        if (debouncedSearch) params.search = debouncedSearch;
+          if (start_date) params.start_date = start_date;
+          if (end_date) params.end_date = end_date;
+        }
         if (filters.status !== 'all') params.status = filters.status;
 
         const showAmazon = filters.channel === 'all' || filters.channel === 'amazon';
@@ -139,6 +210,8 @@ export default function POLifecyclePage() {
             : Promise.resolve({ items: [], total: 0, total_pages: 1 }),
         ]);
 
+        if (fetchSeqRef.current !== seq) return;
+
         setTotalAmazon(showAmazon ? (amazonRes.total || 0) : 0);
         setTotalBlinkit(showBlinkit ? (blinkitRes.total || 0) : 0);
 
@@ -149,36 +222,38 @@ export default function POLifecyclePage() {
         rows.sort((a, b) => (b.orderDateRaw || '').localeCompare(a.orderDateRaw || ''));
         setAllOrders(rows);
       } catch (error) {
+        if (fetchSeqRef.current !== seq) return;
         console.error('Error fetching purchase orders:', error);
       } finally {
-        setIsLoading(false);
-        setIsGridLoading(false);
+        if (fetchSeqRef.current === seq) {
+          setIsLoading(false);
+          setIsGridLoading(false);
+        }
       }
     };
 
     fetchGrid();
-  }, [page, debouncedSearch, filters.channel, filters.status, filterMode, customStart, customEnd]);
+  }, [page, globalSearch, filters.channel, filters.status, filterMode, customStart, customEnd, refreshKey]);
 
-  // Derived stats from stats endpoints (all-time totals, not affected by grid filters)
-  const sc_a = stats.amazon.status_counts || {};
-  const sc_b = stats.blinkit.status_counts || {};
+  // Derived stats from stats endpoints — filtered by global channel
+  const sc_a = channel !== 'blinkit' ? (stats.amazon.status_counts  || {}) : {};
+  const sc_b = channel !== 'amazon'  ? (stats.blinkit.status_counts || {}) : {};
   const merged: Record<string, number> = {};
   [...new Set([...Object.keys(sc_a), ...Object.keys(sc_b)])].forEach(s => {
     merged[s] = (sc_a[s] || 0) + (sc_b[s] || 0);
   });
 
-  const totalPOs = (stats.amazon.total_pos || 0) + (stats.blinkit.total_pos || 0);
-  const totalUnits = (stats.amazon.total_units || 0) + (stats.blinkit.total_units || 0);
+  const totalPOs   = (channel !== 'blinkit' ? stats.amazon.total_pos   || 0 : 0) + (channel !== 'amazon' ? stats.blinkit.total_pos   || 0 : 0);
+  const totalUnits = (channel !== 'blinkit' ? stats.amazon.total_units || 0 : 0) + (channel !== 'amazon' ? stats.blinkit.total_units || 0 : 0);
   const inTransitPOs = merged['In Transit'] || 0;
   const deliveredCount = merged['Delivered'] || 0;
   const delayedCount = merged['Delayed'] || 0;
-  const linkedPOs = totalPOs - (merged['Created'] || 0);
+  const linkedPOs = merged['Created'] || 0;
 
   const createdCount = merged['Created'] || 0;
   const dispatchedCount = merged['Dispatched'] || 0;
   const inTransitCount = merged['In Transit'] || 0;
   const diffLossCount = merged['Diff Loss'] || 0;
-
   const maxCount = Math.max(createdCount, dispatchedCount, inTransitCount, deliveredCount, delayedCount, diffLossCount, 1);
 
   // Hub chart from current page data
@@ -214,6 +289,7 @@ export default function POLifecyclePage() {
       case 'Dispatched': return 'bg-yellow-100 text-yellow-700 border-yellow-200';
       case 'Created':    return 'bg-gray-100 text-gray-700 border-gray-200';
       case 'Delayed':    return 'bg-red-100 text-red-700 border-red-200';
+      case 'Expired':    return 'bg-red-100 text-red-700 border-red-200';
       default:           return 'bg-gray-100 text-gray-700 border-gray-200';
     }
   };
@@ -259,6 +335,19 @@ export default function POLifecyclePage() {
       width: 140,
       minWidth: 120,
       cell: (row) => <span className="text-muted-foreground">{row.dispatchDate}</span>,
+    },
+    {
+      id: 'actualDispatch',
+      header: 'Dispatch Date',
+      accessorKey: 'actualDispatch',
+      sortable: true,
+      width: 140,
+      minWidth: 120,
+      cell: (row) => row.actualDispatch !== '-' ? (
+        <span className="text-emerald-700 font-medium text-sm">{row.actualDispatch}</span>
+      ) : (
+        <span className="text-muted-foreground">—</span>
+      ),
     },
     {
       id: 'expectedDate',
@@ -316,18 +405,38 @@ export default function POLifecyclePage() {
       id: 'status',
       header: 'Status',
       accessorKey: 'status',
-      width: 150,
-      minWidth: 130,
+      width: 170,
+      minWidth: 140,
       align: 'center',
       cell: (row) => (
-        <Badge variant="outline" className={getStatusColor(row.status)}>
-          {row.status}
-        </Badge>
+        <div className="flex items-center justify-center gap-1.5">
+          <Badge variant="outline" className={getStatusColor(row.status)}>
+            {row.status}
+          </Badge>
+          <button
+            onClick={(e) => { e.stopPropagation(); setStatusDialogRow(row); setStatusInput(row.status); }}
+            className="p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
+            title="Change status"
+          >
+            <Pencil className="h-3 w-3" />
+          </button>
+        </div>
       ),
     },
   ];
 
   const gridState = useDataGrid(gridColumns, 'po-lifecycle');
+
+  const displayOrders = gridSearch.trim()
+    ? allOrders.filter(o => {
+        const q = gridSearch.toLowerCase();
+        return (o.po_number || '').toLowerCase().includes(q) ||
+               (o.channel || '').toLowerCase().includes(q) ||
+               (o.hub || '').toLowerCase().includes(q) ||
+               (o.courier || '').toLowerCase().includes(q) ||
+               (o.state || '').toLowerCase().includes(q);
+      })
+    : allOrders;
 
   if (isLoading) {
     return (
@@ -508,16 +617,16 @@ export default function POLifecyclePage() {
           </CardHeader>
           <CardContent>
             <FilterBar
-              searchPlaceholder="Search by PO number... (searches all records)"
-              searchValue={poSearch}
-              onSearchChange={(v) => { setPoSearch(v); }}
               className="mb-4"
+              searchPlaceholder="Search PO, hub, courier, state..."
+              searchValue={gridSearch}
+              onSearchChange={setGridSearch}
             >
               <div className="flex items-center gap-2 ml-auto">
                 <FilterPanel
                   values={filters}
                   onChange={(key, value) => { setFilters(prev => ({ ...prev, [key]: value })); setPage(1); }}
-                  onClear={() => { setFilters(DEFAULT_FILTER_VALUES); setPoSearch(''); setPage(1); }}
+                  onClear={() => { setFilters(DEFAULT_FILTER_VALUES); setGlobalSearchRaw(''); setGridSearch(''); setPage(1); }}
                   showDateRange={filterMode === 'all'}
                   showChannel
                   showStatus
@@ -537,10 +646,11 @@ export default function POLifecyclePage() {
                   size="sm"
                   className="h-9"
                   onClick={() => exportToCSV(
-                    allOrders.map(o => ({
+                    displayOrders.map(o => ({
                       'PO Number': o.po_number,
                       'Channel': o.channel,
                       'Quantity': o.quantity,
+                      'Dispatch Date': o.actualDispatch !== '-' ? o.actualDispatch : '',
                       'PO Creation Date': o.dispatchDate,
                       'Expected Date': o.expectedDate,
                       'State': o.state,
@@ -564,11 +674,13 @@ export default function POLifecyclePage() {
                 <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
                 <p className="mt-3 text-sm text-muted-foreground">Loading orders...</p>
               </div>
-            ) : allOrders.length > 0 ? (
+            ) : displayOrders.length > 0 ? (
               <>
                 <DataGrid
-                  data={allOrders}
+                  data={displayOrders}
                   gridState={gridState}
+                  getRowClass={(row) => getPoRowClass(row.status, row.expiryDateRaw)}
+                  getRowBgColor={(row) => getPoRowBgColor(row.status, row.expiryDateRaw)}
                   onRowClick={(row) => {
                     const path = row.channel === 'Amazon' ? '/amazon-po' : '/blinkit-po';
                     router.push(`${path}?search=${encodeURIComponent(row.po_number)}`);
@@ -577,7 +689,7 @@ export default function POLifecyclePage() {
                 {totalPages > 1 && (
                   <div className="flex items-center justify-between pt-4">
                     <p className="text-sm text-muted-foreground">
-                      Page {page} of {totalPages} &nbsp;·&nbsp; {allOrders.length} shown
+                      Page {page} of {totalPages} &nbsp;·&nbsp; {displayOrders.length} shown
                     </p>
                     <div className="flex items-center gap-2">
                       <Button
@@ -604,7 +716,7 @@ export default function POLifecyclePage() {
               <div className="text-center py-12 text-muted-foreground">
                 <Package className="h-12 w-12 mx-auto mb-4 opacity-50" />
                 <p>No purchase orders found</p>
-                {(debouncedSearch || filters.status !== 'all' || filters.channel !== 'all') && (
+                {(globalSearch || filters.status !== 'all' || filters.channel !== 'all') && (
                   <p className="text-xs mt-1">Try clearing your filters</p>
                 )}
               </div>
@@ -612,6 +724,33 @@ export default function POLifecyclePage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Edit Status Dialog */}
+      <Dialog open={!!statusDialogRow} onOpenChange={(open) => { if (!open) setStatusDialogRow(null); }}>
+        <DialogContent className="sm:max-w-xs">
+          <DialogHeader>
+            <DialogTitle>Change PO Status</DialogTitle>
+          </DialogHeader>
+          <div className="py-2">
+            <p className="text-xs text-muted-foreground mb-2">
+              {statusDialogRow?.channel} · {statusDialogRow?.po_number}
+            </p>
+            <select
+              value={statusInput}
+              onChange={(e) => setStatusInput(e.target.value)}
+              className="w-full border rounded-md px-3 py-2 text-sm bg-background"
+            >
+              {STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setStatusDialogRow(null)}>Cancel</Button>
+            <Button size="sm" onClick={handleSaveStatus} disabled={isSaving}>
+              {isSaving ? 'Saving…' : 'Save'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </ProtectedRoute>
   );
 }

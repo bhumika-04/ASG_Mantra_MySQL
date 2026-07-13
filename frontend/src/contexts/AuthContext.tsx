@@ -11,38 +11,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
+    const storedToken = localStorage.getItem('token');
+    const storedUser  = localStorage.getItem('user');
+
+    if (!storedToken || !storedUser) {
+      setIsLoading(false);
+      return;
+    }
+
+    // Restore session from cache immediately so the UI renders without waiting for the network.
+    try {
+      setUser(JSON.parse(storedUser));
+    } catch {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+    }
+    setIsLoading(false);
+
+    // Validate in background — clears the session if the token has been revoked.
     const validateToken = async () => {
-      const storedToken = localStorage.getItem('token');
-      const storedUser = localStorage.getItem('user');
-
-      if (storedToken && storedUser) {
-        try {
-          // Validate token with backend
-          const response = await fetch(`${API_BASE_URL}/api/auth/me`, {
-            headers: {
-              'Authorization': `Bearer ${storedToken}`,
-            },
-          });
-
-          if (response.ok) {
-            // Token is valid, set user
-            const userData = await response.json();
-            setUser(userData);
-          } else {
-            // Token is invalid, clear storage
-            localStorage.removeItem('token');
-            localStorage.removeItem('user');
-            setUser(null);
-          }
-        } catch (error) {
-          // Error validating token, clear storage
-          console.error('Token validation error:', error);
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/auth/me`, {
+          headers: { 'Authorization': `Bearer ${storedToken}` },
+        });
+        if (!response.ok) {
           localStorage.removeItem('token');
           localStorage.removeItem('user');
           setUser(null);
         }
+      } catch {
+        // Network error — keep the cached user so the page stays usable offline.
       }
-      setIsLoading(false);
     };
 
     validateToken();

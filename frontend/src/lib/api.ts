@@ -88,6 +88,7 @@ export const api = {
       }),
     logout: () => apiFetch('/api/auth/logout', { method: 'POST' }),
     me: () => apiFetch('/api/auth/me'),
+    refresh: () => apiFetch('/api/auth/refresh', { method: 'POST' }),
   },
 
   // Dashboard endpoints
@@ -140,7 +141,7 @@ export const api = {
 
   // Amazon Sales Data analytics (queries AmazonSales table — VendorCSV / RK Excel uploads)
   amazonSalesData: {
-    getAnalytics: (params?: { days?: number; start_date?: string; end_date?: string }) => {
+    getAnalytics: (params?: { days?: number; start_date?: string; end_date?: string; asin?: string }) => {
       const p = Object.fromEntries(Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== ''));
       const query = new URLSearchParams(p as any).toString();
       return apiFetch(`/api/upload/amazon-data/analytics${query ? `?${query}` : ''}`);
@@ -154,7 +155,7 @@ export const api = {
 
   // Blinkit Sales Data analytics (queries BlinkitSales table — daily CSV uploads)
   blinkitSalesData: {
-    getAnalytics: (params?: { days?: number; start_date?: string; end_date?: string }) => {
+    getAnalytics: (params?: { days?: number; start_date?: string; end_date?: string; item_id?: string }) => {
       const p = Object.fromEntries(Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== ''));
       const query = new URLSearchParams(p as any).toString();
       return apiFetch(`/api/upload/blinkit-data/analytics${query ? `?${query}` : ''}`);
@@ -208,6 +209,11 @@ export const api = {
         method: 'PUT',
         body: JSON.stringify({ accepted_qty }),
       }),
+    updateBlinkitItemReceivedQty: (itemId: number, received_qty: number) =>
+      apiFetch(`/api/purchase-orders/blinkit-item/${itemId}/received-qty`, {
+        method: 'PUT',
+        body: JSON.stringify({ received_qty }),
+      }),
     updateAmazonPOStatus: (poId: number, data: any) =>
       apiFetch(`/api/purchase-orders/amazon-po/${poId}/po-status`, {
         method: 'PUT',
@@ -223,6 +229,42 @@ export const api = {
         method: 'PATCH',
         body: JSON.stringify(data),
       }),
+    updateAmazonPOCourier: (poId: number, courier: string | null) =>
+      apiFetch(`/api/purchase-orders/amazon-po/${poId}/courier`, {
+        method: 'PATCH',
+        body: JSON.stringify({ courier }),
+      }),
+    updateBlinkitPOCourier: (poId: number, courier: string | null) =>
+      apiFetch(`/api/purchase-orders/blinkit-po/${poId}/courier`, {
+        method: 'PATCH',
+        body: JSON.stringify({ courier }),
+      }),
+    updateAmazonPODispatchDate: (poId: number, dispatch_date: string | null) =>
+      apiFetch(`/api/purchase-orders/amazon-po/${poId}/dispatch-date`, {
+        method: 'PATCH',
+        body: JSON.stringify({ dispatch_date }),
+      }),
+    updateBlinkitPODispatchDate: (poId: number, dispatch_date: string | null) =>
+      apiFetch(`/api/purchase-orders/blinkit-po/${poId}/dispatch-date`, {
+        method: 'PATCH',
+        body: JSON.stringify({ dispatch_date }),
+      }),
+    updateAmazonItemExpectedDate: (itemId: number, expected_date: string | null) =>
+      apiFetch(`/api/purchase-orders/amazon-item/${itemId}/expected-date`, {
+        method: 'PATCH',
+        body: JSON.stringify({ expected_date }),
+      }),
+    updateBlinkitPOExpectedDeliveryDate: (poId: number, expected_delivery_date: string | null) =>
+      apiFetch(`/api/purchase-orders/blinkit-po/${poId}/expected-delivery-date`, {
+        method: 'PATCH',
+        body: JSON.stringify({ expected_delivery_date }),
+      }),
+    updateBlinkitPOExpiryDate: (poId: number, expiry_date: string | null) =>
+      apiFetch(`/api/purchase-orders/blinkit-po/${poId}/expiry-date`, {
+        method: 'PATCH',
+        body: JSON.stringify({ expiry_date }),
+      }),
+    getCarriers: () => apiFetch('/api/purchase-orders/carriers'),
     getAmazonStates: () => apiFetch('/api/purchase-orders/amazon/states'),
     getAmazon: (params?: any) => {
       const query = new URLSearchParams(params).toString();
@@ -341,6 +383,8 @@ export const api = {
       }),
     sync: () =>
       apiFetch('/api/alerts/sync', { method: 'POST' }),
+    getStats: () =>
+      apiFetch('/api/alerts/stats'),
   },
 
   // User endpoints

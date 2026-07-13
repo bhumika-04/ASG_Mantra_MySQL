@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
-import { fmtDate, fmtCurrency, fmtN } from '@/lib/format';
+import { fmtDate, fmtCurrency, fmtN, toTitleCase } from '@/lib/format';
 
 interface UploadResult {
   success: boolean;
@@ -311,6 +311,10 @@ export default function BlinkitUploadPage() {
   };
 
   const handleCancelPdfPreview = () => setPdfExtractData(null);
+
+  const updatePdfHeader = (field: string, value: string) => {
+    setPdfExtractData(prev => prev ? { ...prev, header: { ...prev.header, [field]: value || null } } : prev);
+  };
 
   const handleUpdatePOHeader = async () => {
     if (!pdfExtractData?.existing_po_id || !pdfExtractData.header) return;
@@ -839,8 +843,22 @@ export default function BlinkitUploadPage() {
                           <span className="font-semibold text-purple-900">{pdfExtractData.item_count} line item(s)</span>
                         </div>
                         <div className="p-3 bg-orange-50 rounded-lg border border-orange-100">
-                          <span className="text-orange-600 block text-xs font-medium">Expected Delivery</span>
-                          <span className="font-semibold text-orange-900">{fmtDate(pdfExtractData.header?.expected_delivery_date)}</span>
+                          <span className={`block text-xs font-medium ${!pdfExtractData.header?.expected_delivery_date ? 'text-orange-500' : 'text-orange-600'}`}>
+                            Expected Delivery{!pdfExtractData.header?.expected_delivery_date ? ' — enter date' : ''}
+                          </span>
+                          {pdfExtractData.header?.expected_delivery_date && (
+                            <span className="block text-sm font-semibold text-orange-900">
+                              {fmtDate(pdfExtractData.header.expected_delivery_date)}
+                            </span>
+                          )}
+                          <input
+                            type="date"
+                            value={pdfExtractData.header?.expected_delivery_date?.slice(0, 10) || ''}
+                            onChange={e => updatePdfHeader('expected_delivery_date', e.target.value)}
+                            className={`w-full bg-transparent text-xs border-0 border-b focus:outline-none py-0.5 ${
+                              pdfExtractData.header?.expected_delivery_date ? 'text-orange-400' : 'text-orange-900'
+                            } ${!pdfExtractData.header?.expected_delivery_date ? 'border-orange-400' : 'border-orange-200'}`}
+                          />
                         </div>
                       </div>
 
@@ -868,18 +886,48 @@ export default function BlinkitUploadPage() {
                               <p className="font-medium truncate text-purple-900">{value || '—'}</p>
                             </div>
                           ))}
-                          {/* Ship To — green/teal */}
+                          {/* Ship To — green/teal (editable) */}
                           <div className="bg-teal-50 border border-teal-100 rounded-lg px-3 py-2">
-                            <span className="text-teal-500 text-xs">Ship To (Name)</span>
-                            <p className="font-medium truncate text-teal-900">{pdfExtractData.header?.ship_to_name || '—'}</p>
+                            <span className={`text-xs ${!pdfExtractData.header?.ship_to_name ? 'text-orange-500 font-medium' : 'text-teal-500'}`}>
+                              Ship To (Name){!pdfExtractData.header?.ship_to_name ? ' — needs input' : ''}
+                            </span>
+                            <input
+                              type="text"
+                              value={pdfExtractData.header?.ship_to_name || ''}
+                              onChange={e => updatePdfHeader('ship_to_name', e.target.value)}
+                              placeholder="Enter ship-to name..."
+                              className={`w-full bg-transparent text-sm font-medium border-0 border-b focus:outline-none py-0.5 text-teal-900 placeholder-teal-300 ${
+                                !pdfExtractData.header?.ship_to_name ? 'border-orange-400 focus:border-orange-500' : 'border-teal-200 focus:border-teal-500'
+                              }`}
+                            />
                           </div>
                           <div className="bg-teal-50 border border-teal-100 rounded-lg px-3 py-2 md:col-span-2">
-                            <span className="text-teal-500 text-xs">Ship To (Address)</span>
-                            <p className="font-medium break-words text-xs text-teal-900">{pdfExtractData.header?.ship_to_address || '—'}</p>
+                            <span className={`text-xs ${!pdfExtractData.header?.ship_to_address ? 'text-orange-500 font-medium' : 'text-teal-500'}`}>
+                              Ship To (Address){!pdfExtractData.header?.ship_to_address ? ' — needs input' : ''}
+                            </span>
+                            <textarea
+                              value={pdfExtractData.header?.ship_to_address || ''}
+                              onChange={e => updatePdfHeader('ship_to_address', e.target.value)}
+                              placeholder="Enter full address..."
+                              rows={2}
+                              className={`w-full bg-transparent text-xs font-medium border-0 border-b focus:outline-none py-0.5 resize-none text-teal-900 placeholder-teal-300 ${
+                                !pdfExtractData.header?.ship_to_address ? 'border-orange-400 focus:border-orange-500' : 'border-teal-200 focus:border-teal-500'
+                              }`}
+                            />
                           </div>
                           <div className="bg-teal-50 border border-teal-100 rounded-lg px-3 py-2">
-                            <span className="text-teal-500 text-xs">Ship To GSTIN</span>
-                            <p className="font-medium truncate text-teal-900">{pdfExtractData.header?.ship_to_gstin || '—'}</p>
+                            <span className={`text-xs ${!pdfExtractData.header?.ship_to_gstin ? 'text-orange-500 font-medium' : 'text-teal-500'}`}>
+                              Ship To GSTIN{!pdfExtractData.header?.ship_to_gstin ? ' — needs input' : ''}
+                            </span>
+                            <input
+                              type="text"
+                              value={pdfExtractData.header?.ship_to_gstin || ''}
+                              onChange={e => updatePdfHeader('ship_to_gstin', e.target.value)}
+                              placeholder="e.g. 27AABCU9603R1ZX"
+                              className={`w-full bg-transparent text-sm font-medium border-0 border-b focus:outline-none py-0.5 text-teal-900 placeholder-teal-300 ${
+                                !pdfExtractData.header?.ship_to_gstin ? 'border-orange-400 focus:border-orange-500' : 'border-teal-200 focus:border-teal-500'
+                              }`}
+                            />
                           </div>
                         </div>
                       </div>
@@ -901,7 +949,7 @@ export default function BlinkitUploadPage() {
                                 <tr key={idx} className={`border-b ${idx % 2 === 0 ? 'bg-white' : 'bg-green-50/30'} hover:bg-green-50`}>
                                   <td className="px-3 py-2 text-gray-500">{item.sno ?? '-'}</td>
                                   <td className="px-3 py-2 font-mono text-blue-700">{item.item_code ?? '-'}</td>
-                                  <td className="px-3 py-2 max-w-[200px] truncate" title={item.item_name}>{item.item_name ?? '-'}</td>
+                                  <td className="px-3 py-2 max-w-[200px] truncate" title={toTitleCase(item.item_name)}>{toTitleCase(item.item_name) ?? '-'}</td>
                                   <td className="px-3 py-2">{item.mrp != null ? fmtCurrency(item.mrp, 2) : '-'}</td>
                                   <td className="px-3 py-2 font-semibold text-green-700">{item.qty != null ? fmtN(item.qty) : '-'}</td>
                                   <td className="px-3 py-2">{item.unit_base_cost != null ? fmtCurrency(item.unit_base_cost, 2) : '-'}</td>

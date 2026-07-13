@@ -65,13 +65,13 @@ interface UploadResult {
 }
 
 export default function DistributorPage() {
-  const { filterMode, customStart, customEnd } = useFilter();
+  const { filterMode, customStart, customEnd, globalSearch } = useFilter();
+  const [gridSearch, setGridSearch] = useState('');
   const [items, setItems] = useState<DistributorStockItem[]>([]);
   const [stats, setStats] = useState({ totalClosingQty: 0, totalDlQty: 0, totalMhQty: 0, totalKtQty: 0, totalWbQty: 0, totalHrQty: 0, totalSkus: 0 });
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-  const [search, setSearch] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -157,6 +157,14 @@ export default function DistributorPage() {
     },
   ], 'distributor-stock');
 
+  const displayItems = gridSearch.trim()
+    ? items.filter(i => {
+        const q = gridSearch.toLowerCase();
+        return (i.itemName || '').toLowerCase().includes(q) ||
+               (i.sku || '').toLowerCase().includes(q);
+      })
+    : items;
+
   const fetchStock = async (p = 1, s = '') => {
     setIsLoading(true);
     try {
@@ -178,17 +186,9 @@ export default function DistributorPage() {
   };
 
   useEffect(() => {
-    fetchStock(page, search);
-  }, [page, filterMode, customStart, customEnd]);
-
-  // Debounce search
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setPage(1);
-      fetchStock(1, search);
-    }, 400);
-    return () => clearTimeout(timer);
-  }, [search]);
+    if (filterMode === 'custom' && !customStart) return;
+    fetchStock(page, globalSearch);
+  }, [page, filterMode, customStart, customEnd, globalSearch]);
 
   const handleDownloadTemplate = () => {
     const headers = ['SKU', 'ITEM', 'Total Stock', 'DL', 'MH', 'KT', 'WB', 'HR'];
@@ -251,7 +251,7 @@ export default function DistributorPage() {
         setSelectedFile(null);
         setReportDate('');
         setPage(1);
-        fetchStock(1, search);
+        fetchStock(1, globalSearch);
       }
     } catch (error: any) {
       toast.error(error.message || 'Upload failed');
@@ -462,15 +462,15 @@ export default function DistributorPage() {
             {/* Filter bar — search + view options */}
             <FilterBar
               searchPlaceholder="Search items..."
-              searchValue={search}
-              onSearchChange={setSearch}
+              searchValue={gridSearch}
+              onSearchChange={setGridSearch}
             >
               <div className="flex items-center gap-2 ml-auto">
                 <Button
                   variant="outline"
                   size="sm"
                   className="h-9"
-                  onClick={() => { setPage(1); fetchStock(1, search); }}
+                  onClick={() => { setPage(1); fetchStock(1, globalSearch); }}
                 >
                   <RefreshCw className="h-4 w-4" />
                 </Button>
@@ -501,7 +501,7 @@ export default function DistributorPage() {
             ) : (
               <>
                 <DataGrid
-                  data={items}
+                  data={displayItems}
                   gridState={gridState}
                   pageSize={PAGE_SIZE}
                 />

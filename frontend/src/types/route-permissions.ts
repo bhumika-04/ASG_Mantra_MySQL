@@ -23,6 +23,8 @@ export const ROUTE_PERMISSIONS: Record<string, UserRole[]> = {
   '/sales-overview': ['Admin', 'Manager', 'Blinkit Distributor', 'Amazon Distributor'],
   '/amazon-sales': ['Admin', 'Manager', 'Amazon Distributor'],
   '/blinkit-sales': ['Admin', 'Manager', 'Blinkit Distributor'],
+  '/amazon-inventory': ['Admin', 'Manager', 'Amazon Distributor'],
+  '/blinkit-inventory': ['Admin', 'Manager', 'Blinkit Distributor'],
 
   // Distributor pages
   '/distributor': ['Admin', 'Manager', 'Blinkit Distributor', 'Amazon Distributor'],

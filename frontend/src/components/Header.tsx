@@ -1,13 +1,14 @@
 'use client';
 
 import { usePathname, useRouter } from 'next/navigation';
-import { Bell, User, LogOut, CalendarDays, ChevronDown, Check } from 'lucide-react';
+import { Bell, User, LogOut, CalendarDays, ChevronDown, Check, Search, X } from 'lucide-react';
 import { Breadcrumb, generateBreadcrumbs } from '@/components/ui/breadcrumb';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { useEffect, useState } from 'react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useFilter, FILTER_OPTIONS, computeDateRange } from '@/contexts/FilterContext';
+import { cn } from '@/lib/utils';
 import api from '@/lib/api';
 import { SidebarTrigger } from '@/components/ui/sidebar';
 import {
@@ -38,11 +39,38 @@ const FILTER_PAGES = [
   '/blinkit-po-overview',
 ];
 
+// Pages where the global search bar is shown
+const SEARCH_PAGES = [
+  '/sales-overview',
+  '/amazon-sales',
+  '/blinkit-sales',
+  '/inventory',
+  '/amazon-inventory',
+  '/blinkit-inventory',
+  '/low-stock-alerts',
+  '/po-lifecycle',
+  '/amazon-po',
+  '/amazon-po-overview',
+  '/blinkit-po',
+  '/blinkit-po-overview',
+  '/distributor',
+];
+
+// Pages where the channel filter is meaningful (multi-channel data)
+const CHANNEL_PAGES = [
+  '/dashboard',
+  '/sales-overview',
+  '/inventory',
+  '/low-stock-alerts',
+  '/po-lifecycle',
+  '/distributor',
+];
+
 export function Header() {
   const pathname = usePathname();
   const router = useRouter();
   const { user, logout } = useAuth();
-  const { filterMode, setFilterMode, customStart, setCustomStart, customEnd, setCustomEnd } = useFilter();
+  const { filterMode, setFilterMode, customStart, setCustomStart, customEnd, setCustomEnd, channel, setChannel, globalSearchRaw, setGlobalSearchRaw } = useFilter();
   const breadcrumbs = generateBreadcrumbs(pathname);
   const [mounted, setMounted] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
@@ -62,6 +90,8 @@ export function Header() {
   }, [mounted, user]);
 
   const showFilter = FILTER_PAGES.includes(pathname);
+  const showChannelFilter = CHANNEL_PAGES.includes(pathname);
+  const showSearch = SEARCH_PAGES.includes(pathname);
   const currentLabel = FILTER_OPTIONS.find(o => o.value === filterMode)?.label ?? 'All Time';
 
   const dateRangeLabel = (() => {
@@ -91,8 +121,76 @@ export function Header() {
         <Breadcrumb items={breadcrumbs} className="hidden md:flex" />
       </div>
 
-      {/* Right: Period filter (when applicable) + Actions */}
+      {/* Centre: Global search */}
+      {showSearch && (
+        <div className="relative hidden sm:flex items-center w-56 lg:w-72">
+          <Search className="absolute left-2.5 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+          <input
+            type="text"
+            placeholder="Search name, SKU…"
+            value={globalSearchRaw}
+            onChange={e => setGlobalSearchRaw(e.target.value.replace(/^\s+/, ''))}
+            className="h-8 w-full pl-8 pr-7 text-xs border border-border rounded-md bg-background text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+          />
+          {globalSearchRaw && (
+            <button
+              onClick={() => setGlobalSearchRaw('')}
+              className="absolute right-2 text-muted-foreground hover:text-foreground"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Right: Channel + Period filter + Actions */}
       <div className="flex items-center gap-2 flex-shrink-0">
+
+        {/* Channel filter — single dropdown button */}
+        {showChannelFilter && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className={cn(
+                  'h-8 gap-1.5 text-xs font-medium pr-2.5',
+                  channel === 'amazon' && 'border-blue-500 text-blue-700 bg-blue-50 hover:bg-blue-100',
+                  channel === 'blinkit' && 'border-yellow-500 text-yellow-700 bg-yellow-50 hover:bg-yellow-100',
+                )}
+              >
+                <span className={cn(
+                  'h-2 w-2 rounded-full flex-shrink-0',
+                  channel === 'amazon' ? 'bg-blue-600' : channel === 'blinkit' ? 'bg-yellow-500' : 'bg-slate-400',
+                )} />
+                Channel
+                {channel !== 'all' && (
+                  <span className="font-semibold">
+                    : {channel === 'amazon' ? 'Amazon' : 'Blinkit'}
+                  </span>
+                )}
+                <ChevronDown className="h-3.5 w-3.5 opacity-50" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-36">
+              {([
+                { value: 'amazon',  label: 'Amazon',  dot: 'bg-blue-600' },
+                { value: 'blinkit', label: 'Blinkit', dot: 'bg-yellow-500' },
+                { value: 'all',     label: 'Both',    dot: 'bg-slate-400' },
+              ] as const).map(opt => (
+                <DropdownMenuItem
+                  key={opt.value}
+                  onClick={() => setChannel(opt.value)}
+                  className="gap-2 cursor-pointer"
+                >
+                  <span className={cn('h-2 w-2 rounded-full flex-shrink-0', opt.dot)} />
+                  <span className="flex-1">{opt.label}</span>
+                  {channel === opt.value && <Check className="h-3.5 w-3.5 text-blue-600" />}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
 
         {/* Single dropdown filter button */}
         {showFilter && (

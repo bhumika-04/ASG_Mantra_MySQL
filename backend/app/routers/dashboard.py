@@ -31,39 +31,54 @@ async def get_inventory_stats(
     round-trips to the remote DB.
     """
     row = db.execute(text("""
+        WITH
+        max_dates AS (
+            SELECT
+                (SELECT MAX(InventoryDate) FROM Inventory)      AS inv_date,
+                (SELECT MAX(ReportDate)    FROM AmazonInventory) AS amz_inv_date,
+                (SELECT MAX(ReportDate)    FROM BlinkitInventory) AS blk_inv_date
+        ),
+        inv_agg AS (
+            SELECT
+                COALESCE(SUM(CurrentStock), 0) AS total_inventory,
+                COALESCE(SUM(PackedQty),    0) AS packed,
+                COALESCE(SUM(UnpackedQty),  0) AS unpacked,
+                COUNT(CASE WHEN CurrentStock = 0 THEN 1 END) AS out_of_stock
+            FROM Inventory i, max_dates m
+            WHERE i.InventoryDate = m.inv_date
+        ),
+        amz_cancel AS (
+            SELECT POId, MIN(CancellationDate) AS min_cancel
+            FROM AmazonPOItem GROUP BY POId
+        )
         SELECT
-          (SELECT COUNT(*)
-           FROM Products WHERE IsActive = 1)                                          AS total_skus,
-          (SELECT COALESCE(SUM(CurrentStock), 0)
-           FROM Inventory
-           WHERE InventoryDate = (SELECT MAX(InventoryDate) FROM Inventory))          AS total_inventory,
-          (SELECT COALESCE(SUM(PackedQty), 0)
-           FROM Inventory
-           WHERE InventoryDate = (SELECT MAX(InventoryDate) FROM Inventory))          AS packed,
-          (SELECT COALESCE(SUM(UnpackedQty), 0)
-           FROM Inventory
-           WHERE InventoryDate = (SELECT MAX(InventoryDate) FROM Inventory))          AS unpacked,
-          (SELECT COUNT(*)
-           FROM Inventory
-           WHERE CurrentStock = 0
-             AND InventoryDate = (SELECT MAX(InventoryDate) FROM Inventory))          AS out_of_stock,
-          (SELECT COUNT(*) FROM Alerts WHERE IsResolved = 0)                          AS low_stock,
-          (SELECT COUNT(DISTINCT PONumber) FROM AmazonPO
-           WHERE POStatus IN ('Created','Packed','Dispatched','In Transit'))
+          (SELECT COUNT(*) FROM Products WHERE IsActive = 1)                         AS total_skus,
+          inv_agg.total_inventory,
+          inv_agg.packed,
+          inv_agg.unpacked,
+          inv_agg.out_of_stock,
+          (SELECT COUNT(*) FROM Alerts WHERE IsResolved = 0)                         AS low_stock,
+          (SELECT COUNT(DISTINCT p.PONumber) FROM AmazonPO p
+           LEFT JOIN amz_cancel ac ON ac.POId = p.Id
+           WHERE p.POStatus IN ('Created','Packed','Dispatched','In Transit')
+             AND NOT (ac.min_cancel IS NOT NULL AND DATEDIFF(day, ac.min_cancel, GETDATE()) >= 15))
           + (SELECT COUNT(DISTINCT PONumber) FROM BlinkitPO
-             WHERE Status IN ('Created','Packed','Dispatched','In Transit'))          AS pending_pos,
+             WHERE Status IN ('Created','Packed','Dispatched','In Transit')
+               AND NOT (POExpiryDate IS NOT NULL AND DATEDIFF(day, POExpiryDate, GETDATE()) >= 15)) AS pending_pos,
           (SELECT COUNT(DISTINCT PONumber) FROM AmazonPO WHERE POStatus = 'Delayed')
           + (SELECT COUNT(DISTINCT PONumber) FROM BlinkitPO WHERE Status = 'Delayed') AS delayed_pos,
-          (SELECT COUNT(DISTINCT PONumber) FROM AmazonPO
-           WHERE POStatus IN ('Created','Packed','Dispatched','In Transit'))          AS amazon_pending,
+          (SELECT COUNT(DISTINCT p.PONumber) FROM AmazonPO p
+           LEFT JOIN amz_cancel ac ON ac.POId = p.Id
+           WHERE p.POStatus IN ('Created','Packed','Dispatched','In Transit')
+             AND NOT (ac.min_cancel IS NOT NULL AND DATEDIFF(day, ac.min_cancel, GETDATE()) >= 15)) AS amazon_pending,
           (SELECT COUNT(DISTINCT PONumber) FROM BlinkitPO
-           WHERE Status IN ('Created','Packed','Dispatched','In Transit'))            AS blinkit_pending,
+           WHERE Status IN ('Created','Packed','Dispatched','In Transit')
+             AND NOT (POExpiryDate IS NOT NULL AND DATEDIFF(day, POExpiryDate, GETDATE()) >= 15))  AS blinkit_pending,
           (SELECT COALESCE(SUM(SellableOnHandUnits), 0)
-           FROM AmazonInventory
-           WHERE ReportDate = (SELECT MAX(ReportDate) FROM AmazonInventory))          AS amazon_inv,
+           FROM AmazonInventory ai, max_dates m WHERE ai.ReportDate = m.amz_inv_date) AS amazon_inv,
           (SELECT COALESCE(SUM(BackendInvQty), 0)
-           FROM BlinkitInventory
-           WHERE ReportDate = (SELECT MAX(ReportDate) FROM BlinkitInventory))         AS blinkit_inv
+           FROM BlinkitInventory bi, max_dates m WHERE bi.ReportDate = m.blk_inv_date) AS blinkit_inv
+        FROM inv_agg, max_dates
     """)).fetchone()
 
     return {
@@ -289,8 +304,18 @@ async def get_product_overview(
     Returns per-product rows: ASG SKU, Product Name, Amazon ASIN, Blinkit ID,
     Amazon Stock, Blinkit Stock, Total Stock, and health status.
     """
+    # Fetch all three latest dates in a single round-trip
+    dates_row = db.execute(text("""
+        SELECT
+            (SELECT MAX(ReportDate)   FROM AmazonInventory)  AS amz_date,
+            (SELECT MAX(ReportDate)   FROM BlinkitInventory) AS blk_date,
+            (SELECT MAX(InventoryDate) FROM Inventory)        AS inv_date
+    """)).fetchone()
+    latest_amz = dates_row.amz_date if dates_row else None
+    latest_blk = dates_row.blk_date if dates_row else None
+    latest_inv = dates_row.inv_date if dates_row else None
+
     # Amazon stock from AmazonInventory table (latest report date)
-    latest_amz = db.query(func.max(AmazonInventoryData.ReportDate)).scalar()
     if latest_amz:
         amazon_inv = (
             db.query(
@@ -313,7 +338,6 @@ async def get_product_overview(
         )
 
     # Blinkit stock from BlinkitInventory table (latest report date)
-    latest_blk = db.query(func.max(BlinkitInventoryData.ReportDate)).scalar()
     if latest_blk:
         blinkit_inv = (
             db.query(
@@ -336,7 +360,6 @@ async def get_product_overview(
         )
 
     # Packed / Unpacked totals from Inventory table (ASG stock only, latest date)
-    latest_inv = db.query(func.max(Inventory.InventoryDate)).scalar()
     packed_sub_q = db.query(
         Inventory.ProductId,
         func.sum(Inventory.PackedQty).label("total_packed"),
@@ -384,10 +407,13 @@ async def get_product_overview(
             )
         )
 
-    total = query.count()
-    query = query.order_by(Product.ProductName)
     offset = (page - 1) * page_size
-    rows = query.offset(offset).limit(page_size).all()
+    rows = (
+        query.add_columns(func.count().over().label('_total'))
+        .order_by(Product.ProductName)
+        .offset(offset).limit(page_size).all()
+    )
+    total = rows[0]._total if rows else 0
 
     items = []
     for row in rows:

@@ -12,6 +12,7 @@ interface SnapshotDatePickerProps {
   onSelect: (date: string) => void;
   onReset: () => void;
   className?: string;
+  label?: string;
 }
 
 const DAYS = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
@@ -40,6 +41,7 @@ export function SnapshotDatePicker({
   onSelect,
   onReset,
   className,
+  label = 'ASG Snapshot Date:',
 }: SnapshotDatePickerProps) {
   const [open, setOpen] = React.useState(false);
 
@@ -100,7 +102,7 @@ export function SnapshotDatePicker({
     <div className={cn('flex flex-wrap items-center gap-3', className)}>
       <div className="flex items-center gap-1.5 text-sm shrink-0">
         <CalendarDays className="h-4 w-4 text-blue-500" />
-        <span className="font-medium text-foreground">ASG Snapshot Date:</span>
+        <span className="font-medium text-foreground">{label}</span>
       </div>
 
       <Popover open={open} onOpenChange={setOpen}>

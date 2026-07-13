@@ -10,7 +10,7 @@ from ..models.user import User
 from ..models.role import Role
 from ..schemas.user import UserLogin, Token, UserResponse
 from ..utils.security import verify_password
-from ..utils.auth import create_access_token, get_current_user
+from ..utils.auth import create_access_token, get_current_user, get_current_user_for_refresh
 
 router = APIRouter()
 
@@ -95,6 +95,39 @@ async def logout(current_user: User = Depends(get_current_user)):
     - In production, add token to blacklist
     """
     return {"message": "Successfully logged out", "status": "success"}
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh_token(current_user: User = Depends(get_current_user_for_refresh), db: Session = Depends(get_db)):
+    """Re-issue a fresh token for the currently authenticated user."""
+    permissions = []
+    role = db.query(Role).filter(Role.Name == current_user.Role).first()
+    if role:
+        import json
+        permissions = json.loads(role.Permissions) if role.Permissions else []
+
+    access_token = create_access_token(
+        data={
+            "user_id": str(current_user.Id),
+            "email": current_user.Email,
+            "role": current_user.Role,
+        }
+    )
+
+    return Token(
+        access_token=access_token,
+        user=UserResponse(
+            id=str(current_user.Id),
+            name=current_user.Name,
+            email=current_user.Email,
+            role=current_user.Role,
+            avatar=current_user.Avatar,
+            isActive=current_user.IsActive,
+            createdAt=current_user.CreatedAt,
+            lastLogin=current_user.LastLogin,
+            permissions=permissions,
+        ),
+    )
 
 
 @router.get("/me", response_model=UserResponse)

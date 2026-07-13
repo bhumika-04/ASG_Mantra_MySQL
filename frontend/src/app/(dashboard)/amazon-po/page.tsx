@@ -38,9 +38,10 @@ import {
   PackagePlus,
   PackageCheck,
   RefreshCw,
+  Calendar,
 } from 'lucide-react';
 import api from '@/lib/api';
-import { fmtDate } from '@/lib/format';
+import { fmtDate, toTitleCase } from '@/lib/format';
 
 // KPI config keyed by DB status name
 const KPI_CONFIG: Record<string, { icon: React.ReactNode; color: string; bg: string; desc: string }> = {
@@ -61,12 +62,40 @@ const BADGE_STYLES: Record<string, string> = {
   'Cancelled':  'bg-gray-50 text-gray-600 border-gray-200',
   'Diff Loss':  'bg-purple-50 text-purple-700 border-purple-200',
   'Closed':     'bg-slate-50 text-slate-600 border-slate-200',
+  'Expired':    'bg-red-50 text-red-700 border-red-200',
 };
 
 const STATUS_OPTIONS = ['Created', 'Dispatched', 'In Transit', 'Delivered', 'Delayed', 'Cancelled'];
 
+const NO_EXPIRY_OVERRIDE = new Set(['Delivered', 'Received', 'Cancelled', 'Closed', 'Expired', 'Dispatched', 'In Transit']);
+function effStatus(base: string, expiryISO: string | null): string {
+  if (NO_EXPIRY_OVERRIDE.has(base)) return base;
+  if (!expiryISO) return base;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return (today.getTime() - new Date(expiryISO + 'T00:00:00').getTime()) / 86400000 >= 15 ? 'Expired' : base;
+}
+function getPoRowClass(status: string, expiryISO: string | null): string | undefined {
+  if (['Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit'].includes(status)) return undefined;
+  if (!expiryISO) return undefined;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const d = Math.ceil((new Date(expiryISO + 'T00:00:00').getTime() - today.getTime()) / 86400000);
+  if (d <= 7)  return 'bg-red-50 dark:bg-red-950/20';
+  if (d <= 15) return 'bg-yellow-50 dark:bg-yellow-950/20';
+  return undefined;
+}
+function getPoRowBgColor(status: string, expiryISO: string | null): string | undefined {
+  if (['Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit'].includes(status)) return undefined;
+  if (!expiryISO) return undefined;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const d = Math.ceil((new Date(expiryISO + 'T00:00:00').getTime() - today.getTime()) / 86400000);
+  if (d <= 7)  return 'rgb(254,242,242)';
+  if (d <= 15) return 'rgb(254,252,232)';
+  return undefined;
+}
+
 interface POItem {
   id: number;
+  po_id: number;
   po_number: string;
   po_date: string;
   orderDateRaw: string | null;
@@ -75,20 +104,34 @@ interface POItem {
   ordered_qty: number;
   accepted_qty: number | null;
   mapped_sku: string;
-  received_qty: number;
+  received_qty: number | null;
   pending_qty: number;
   unit_cost: number | null;
   total_cost: number | null;
   po_expiry: string;
+  expectedDateRaw: string | null;
+  cancellationDateRaw: string | null;
+  shipWindowEndDateRaw: string | null;
+  dispatch_date: string | null;
+  courier: string | null;
   status: string;
+  po_status: string;
   city: string;
   state: string;
 }
 
 function AmazonPOPageContent() {
   const searchParams = useSearchParams();
-  const { filterMode, customStart, customEnd } = useFilter();
-  const [search, setSearch] = useState(searchParams.get('search') || '');
+  const { filterMode, customStart, customEnd, globalSearch, setGlobalSearchRaw } = useFilter();
+  const [gridSearch, setGridSearch] = useState('');
+  // Initialise search bars from URL param when navigating from overview
+  useEffect(() => {
+    const urlParam = searchParams.get('search');
+    if (urlParam) {
+      setGridSearch(urlParam);
+      setGlobalSearchRaw(urlParam);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
   const [poData, setPoData] = useState<POItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -97,13 +140,18 @@ function AmazonPOPageContent() {
   const [total, setTotal] = useState(0);
   const [statsData, setStatsData] = useState<{ status_counts: Record<string, number>; total_pos: number; total_units: number } | null>(null);
   const [allStates, setAllStates] = useState<string[]>([]);
+  const [carriers, setCarriers] = useState<string[]>([]);
+  const [statsKey, setStatsKey] = useState(0);
 
   // Action state
   const [actionRow, setActionRow] = useState<POItem | null>(null);
   const [acceptedQtyInput, setAcceptedQtyInput] = useState('');
   const [receivedQtyInput, setReceivedQtyInput] = useState('');
   const [statusInput, setStatusInput] = useState('');
-  const [actionDialogType, setActionDialogType] = useState<'accepted_qty' | 'received_qty' | 'status' | null>(null);
+  const [dispatchDateInput, setDispatchDateInput] = useState('');
+  const [courierInput, setCourierInput] = useState('');
+  const [actionDialogType, setActionDialogType] = useState<'accepted_qty' | 'received_qty' | 'status' | 'dispatch_date' | 'courier' | 'expected_date' | null>(null);
+  const [expectedDateInput, setExpectedDateInput] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
   const openAcceptedQtyDialog = (row: POItem) => {
@@ -114,14 +162,32 @@ function AmazonPOPageContent() {
 
   const openReceivedQtyDialog = (row: POItem) => {
     setActionRow(row);
-    setReceivedQtyInput(String(row.received_qty));
+    setReceivedQtyInput(row.received_qty != null ? String(row.received_qty) : '');
     setActionDialogType('received_qty');
   };
 
   const openStatusDialog = (row: POItem) => {
     setActionRow(row);
-    setStatusInput(row.status);
+    setStatusInput(row.po_status);
     setActionDialogType('status');
+  };
+
+  const openDispatchDateDialog = (row: POItem) => {
+    setActionRow(row);
+    setDispatchDateInput(row.dispatch_date || '');
+    setActionDialogType('dispatch_date');
+  };
+
+  const openCourierDialog = (row: POItem) => {
+    setActionRow(row);
+    setCourierInput(row.courier || '');
+    setActionDialogType('courier');
+  };
+
+  const openExpectedDateDialog = (row: POItem) => {
+    setActionRow(row);
+    setExpectedDateInput(row.expectedDateRaw || '');
+    setActionDialogType('expected_date');
   };
 
   const closeDialog = () => {
@@ -183,21 +249,78 @@ function AmazonPOPageContent() {
   };
 
   const handleSaveStatus = async () => {
-    if (!actionRow || statusInput === actionRow.status) { closeDialog(); return; }
+    if (!actionRow || statusInput === actionRow.po_status) { closeDialog(); return; }
     const dbStatus = statusInput;
     setIsSaving(true);
     try {
-      await api.purchaseOrders.updateAmazonItemStatus(actionRow.id, { status: dbStatus });
-      setPoData(prev => prev.map(p => p.id === actionRow.id ? { ...p, status: statusInput } : p));
-      // Refresh KPI stats with current date filter
-      const p: Record<string, string> = {};
-      if (effectiveDateFrom) p.start_date = effectiveDateFrom;
-      if (effectiveDateTo) p.end_date = effectiveDateTo;
-      (api.purchaseOrders as any).getAmazonStats(Object.keys(p).length ? p : undefined).then((s: any) => setStatsData(s)).catch(() => {});
+      await api.purchaseOrders.updateAmazonPOStatus(actionRow.po_id, { status: dbStatus });
+      setPoData(prev => prev.map(p => p.po_id === actionRow.po_id
+        ? { ...p, status: effStatus(statusInput, p.shipWindowEndDateRaw), po_status: statusInput }
+        : p));
+      setStatsKey(k => k + 1);
+      setPage(1);
+      fetchAmazonPOs(1, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, filters.state, true);
       toast.success(`Status updated to ${statusInput}`);
       closeDialog();
     } catch {
       toast.error('Failed to update status');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSaveDispatchDate = async () => {
+    if (!actionRow) return;
+    setIsSaving(true);
+    try {
+      const dateVal = dispatchDateInput.trim() || null;
+      await (api.purchaseOrders as any).updateAmazonPODispatchDate(actionRow.po_id, dateVal);
+      setPoData(prev => prev.map(p => p.po_id === actionRow.po_id ? { ...p, dispatch_date: dateVal } : p));
+      toast.success(dateVal ? `Dispatch date set to ${fmtDate(dateVal)}` : 'Dispatch date cleared');
+      closeDialog();
+    } catch {
+      toast.error('Failed to save dispatch date');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSaveCourier = async () => {
+    if (!actionRow) return;
+    setIsSaving(true);
+    try {
+      const val = courierInput.trim() || null;
+      await (api.purchaseOrders as any).updateAmazonPOCourier(actionRow.po_id, val);
+      setPoData(prev => prev.map(p => p.po_id === actionRow.po_id ? { ...p, courier: val } : p));
+      toast.success(val ? `Courier set to "${val}"` : 'Courier cleared');
+      closeDialog();
+    } catch {
+      toast.error('Failed to save courier');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSaveExpectedDate = async () => {
+    if (!actionRow) return;
+    setIsSaving(true);
+    try {
+      const dateVal = expectedDateInput.trim() || null;
+      await (api.purchaseOrders as any).updateAmazonItemExpectedDate(actionRow.id, dateVal);
+      setPoData(prev => prev.map(p => p.id === actionRow.id
+        ? {
+            ...p,
+            expectedDateRaw: dateVal,
+            po_expiry: !p.cancellationDateRaw
+              ? (dateVal ? fmtDate(dateVal) : '—')
+              : p.po_expiry,
+          }
+        : p
+      ));
+      toast.success(dateVal ? `Expected date set to ${fmtDate(dateVal)}` : 'Expected date cleared');
+      closeDialog();
+    } catch {
+      toast.error('Failed to save expected date');
     } finally {
       setIsSaving(false);
     }
@@ -212,28 +335,36 @@ function AmazonPOPageContent() {
     return { effectiveDateFrom: filters.dateFrom, effectiveDateTo: filters.dateTo };
   }, [filterMode, customStart, customEnd, filters.dateFrom, filters.dateTo]);
 
-  const fetchAmazonPOs = useCallback(async (p: number, statusFilter: string, searchQuery: string, dateFrom: string, dateTo: string, stateFilter: string) => {
+  const fetchSeqRef = useRef(0);
+  const fetchAmazonPOs = useCallback(async (p: number, statusFilter: string, searchQuery: string, dateFrom: string, dateTo: string, stateFilter: string, silent = false) => {
+    const seq = ++fetchSeqRef.current;
     try {
-      setIsLoading(true);
+      if (!silent) setIsLoading(true);
       const params: Record<string, any> = { page: p, page_size: 50 };
       if (statusFilter !== 'all') params.status = statusFilter;
       if (stateFilter !== 'all') params.state = stateFilter;
-      if (searchQuery.trim()) params.search = searchQuery.trim();
-      if (dateFrom) params.start_date = dateFrom;
-      if (dateTo) params.end_date = dateTo;
+      if (searchQuery.trim()) {
+        params.search = searchQuery.trim();
+        // PO number search bypasses date filter — POs should be findable regardless of period
+      } else {
+        if (dateFrom) params.start_date = dateFrom;
+        if (dateTo) params.end_date = dateTo;
+      }
 
       const response = await api.purchaseOrders.getAmazon(params) as any;
+      if (fetchSeqRef.current !== seq) return;
       const transformedPOs = (response.items || []).map((po: any) => ({
         id: po.id,
+        po_id: po.po_id,
         po_number: po.po_number,
         po_date: po.order_date ? fmtDate(po.order_date) : '-',
         orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
         asin: po.amazon_id || '',
-        product_name: po.product_name || po.productName || '',
+        product_name: toTitleCase(po.product_name || po.productName || ''),
         ordered_qty: po.quantity,
         accepted_qty: po.accepted_quantity ?? null,
         mapped_sku: po.asg_sku || po.asgSku || '',
-        received_qty: po.received_quantity || 0,
+        received_qty: po.received_quantity ?? null,
         pending_qty: po.accepted_quantity != null
           ? Math.max(0, (po.quantity || 0) - po.accepted_quantity)
           : Math.max(0, (po.quantity || 0) - (po.received_quantity || 0)),
@@ -241,7 +372,13 @@ function AmazonPOPageContent() {
         total_cost: po.total_amount ?? null,
         po_expiry: po.po_cancellation_date ? fmtDate(po.po_cancellation_date)
           : po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : '-',
-        status: po.status || 'Created',
+        expectedDateRaw: po.expected_delivery_date || null,
+        cancellationDateRaw: po.po_cancellation_date || null,
+        shipWindowEndDateRaw: po.ship_window_end_date ? po.ship_window_end_date.slice(0, 10) : null,
+        dispatch_date: po.dispatch_date || null,
+        courier: po.courier || null,
+        status: effStatus(po.status || 'Created', po.ship_window_end_date ? po.ship_window_end_date.slice(0, 10) : null),
+        po_status: po.po_status || 'Created',
         city: po.ship_to_city || '—',
         state: po.ship_to_state || '—',
       }));
@@ -249,9 +386,10 @@ function AmazonPOPageContent() {
       setTotal(response.total || 0);
       setTotalPages(response.total_pages || 1);
     } catch (error) {
+      if (fetchSeqRef.current !== seq) return;
       console.error('Error fetching Amazon purchase orders:', error);
     } finally {
-      setIsLoading(false);
+      if (fetchSeqRef.current === seq) setIsLoading(false);
     }
   }, []);
 
@@ -260,38 +398,43 @@ function AmazonPOPageContent() {
     (api.purchaseOrders as any).getAmazonStates()
       .then((res: any) => setAllStates(res?.states ?? []))
       .catch(() => {});
+    (api.purchaseOrders as any).getCarriers()
+      .then((res: any) => setCarriers(res?.carriers ?? []))
+      .catch(() => {});
   }, []);
 
   // Fetch date-filtered stats for KPI cards — re-runs when global filter changes
   useEffect(() => {
+    if (filterMode === 'custom' && !customStart) return;
     const params: Record<string, string> = {};
     if (effectiveDateFrom) params.start_date = effectiveDateFrom;
     if (effectiveDateTo) params.end_date = effectiveDateTo;
     (api.purchaseOrders as any).getAmazonStats(Object.keys(params).length ? params : undefined)
       .then((s: any) => setStatsData(s)).catch(() => {});
-  }, [effectiveDateFrom, effectiveDateTo]);
+  }, [filterMode, customStart, effectiveDateFrom, effectiveDateTo, statsKey]);
 
   // Initial load
   useEffect(() => {
-    fetchAmazonPOs(1, filters.status, search, effectiveDateFrom, effectiveDateTo, filters.state);
+    fetchAmazonPOs(1, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, filters.state);
   }, [fetchAmazonPOs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Re-fetch when filters or global date filter change — reset to page 1
-  const prevFiltersRef = useRef({ status: filters.status, state: filters.state, search, dateFrom: effectiveDateFrom, dateTo: effectiveDateTo });
+  const prevFiltersRef = useRef({ status: filters.status, state: filters.state, search: globalSearch, dateFrom: effectiveDateFrom, dateTo: effectiveDateTo });
   useEffect(() => {
+    if (filterMode === 'custom' && !customStart) return;
     const prev = prevFiltersRef.current;
     const changed =
       prev.status !== filters.status ||
       prev.state !== filters.state ||
-      prev.search !== search ||
+      prev.search !== globalSearch ||
       prev.dateFrom !== effectiveDateFrom ||
       prev.dateTo !== effectiveDateTo;
     if (changed) {
-      prevFiltersRef.current = { status: filters.status, state: filters.state, search, dateFrom: effectiveDateFrom, dateTo: effectiveDateTo };
+      prevFiltersRef.current = { status: filters.status, state: filters.state, search: globalSearch, dateFrom: effectiveDateFrom, dateTo: effectiveDateTo };
       setPage(1);
-      fetchAmazonPOs(1, filters.status, search, effectiveDateFrom, effectiveDateTo, filters.state);
+      fetchAmazonPOs(1, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, filters.state);
     }
-  }, [filters.status, filters.state, search, effectiveDateFrom, effectiveDateTo, fetchAmazonPOs]);
+  }, [filterMode, customStart, filters.status, filters.state, globalSearch, effectiveDateFrom, effectiveDateTo, fetchAmazonPOs]);
 
   const getStatusBadge = (status: string) => {
     return BADGE_STYLES[status] || 'bg-gray-50 text-gray-700 border-gray-200';
@@ -392,8 +535,8 @@ function AmazonPOPageContent() {
       minWidth: 90,
       align: 'right',
       cell: (row) => (
-        <span className={row.received_qty > 0 ? 'font-medium' : 'text-muted-foreground'}>
-          {row.received_qty.toLocaleString('en-IN')}
+        <span className={(row.received_qty ?? 0) > 0 ? 'font-medium' : 'text-muted-foreground'}>
+          {(row.received_qty ?? 0).toLocaleString('en-IN')}
         </span>
       ),
     },
@@ -446,6 +589,30 @@ function AmazonPOPageContent() {
       width: 130,
       minWidth: 110,
       cell: (row) => <span className="text-muted-foreground">{row.po_expiry}</span>,
+    },
+    {
+      id: 'dispatchDate',
+      header: 'Dispatch Date',
+      accessorKey: 'dispatch_date',
+      width: 140,
+      minWidth: 110,
+      cell: (row) => row.dispatch_date ? (
+        <span className="text-sm text-emerald-700 font-medium">{fmtDate(row.dispatch_date)}</span>
+      ) : (
+        <span className="text-muted-foreground text-xs">—</span>
+      ),
+    },
+    {
+      id: 'courier',
+      header: 'Courier',
+      accessorKey: 'courier',
+      width: 140,
+      minWidth: 100,
+      cell: (row) => row.courier ? (
+        <span className="text-sm text-slate-700">{row.courier}</span>
+      ) : (
+        <span className="text-muted-foreground text-xs">—</span>
+      ),
     },
     {
       id: 'city',
@@ -501,6 +668,19 @@ function AmazonPOPageContent() {
               Edit Received Qty
             </DropdownMenuItem>
             <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => openExpectedDateDialog(row)}>
+              <Calendar className="h-4 w-4 mr-2" />
+              {row.expectedDateRaw ? 'Edit Expected Date' : 'Set Expected Date'}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openDispatchDateDialog(row)}>
+              <Calendar className="h-4 w-4 mr-2" />
+              {row.dispatch_date ? 'Edit Dispatch Date' : 'Set Dispatch Date'}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openCourierDialog(row)}>
+              <Truck className="h-4 w-4 mr-2" />
+              {row.courier ? 'Edit Courier' : 'Set Courier'}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => openStatusDialog(row)}>
               <RefreshCw className="h-4 w-4 mr-2" />
               Edit Status
@@ -523,8 +703,16 @@ function AmazonPOPageContent() {
     { label: 'Cancelled',  value: 'Cancelled' },
   ];
 
-  // All filters (search, status, date, state) are server-side.
-  const filteredPoData = poData;
+  // Global search + server filters are applied server-side. Grid search is client-side only.
+  const filteredPoData = gridSearch.trim()
+    ? poData.filter(p => {
+        const q = gridSearch.toLowerCase();
+        return (p.po_number || '').toLowerCase().includes(q) ||
+               (p.product_name || '').toLowerCase().includes(q) ||
+               (p.asin || '').toLowerCase().includes(q) ||
+               (p.mapped_sku || '').toLowerCase().includes(q);
+      })
+    : poData;
 
   const stateOptions = useMemo(() => {
     return [{ label: 'All', value: 'all' }, ...allStates.map(s => ({ label: s, value: s }))];
@@ -605,15 +793,15 @@ function AmazonPOPageContent() {
 
         {/* Filters */}
         <FilterBar
-          searchPlaceholder="Search by PO number or product..."
-          searchValue={search}
-          onSearchChange={setSearch}
+          searchPlaceholder="Search PO number, product, ASIN or SKU..."
+          searchValue={gridSearch}
+          onSearchChange={setGridSearch}
         >
           <div className="flex items-center gap-2 ml-auto">
             <FilterPanel
               values={filters}
               onChange={(key, value) => setFilters(prev => ({ ...prev, [key]: value }))}
-              onClear={() => { setFilters(DEFAULT_FILTER_VALUES); setSearch(''); }}
+              onClear={() => { setFilters(DEFAULT_FILTER_VALUES); setGlobalSearchRaw(''); setGridSearch(''); }}
               showDateRange={filterMode === 'all'}
               showChannel={false}
               showStatus
@@ -648,6 +836,8 @@ function AmazonPOPageContent() {
                     'Pending Qty': p.pending_qty,
                     'Unit Cost': p.unit_cost ?? '',
                     'Total Cost': p.total_cost ?? '',
+                    'Dispatch Date': p.dispatch_date ? fmtDate(p.dispatch_date) : '',
+                    'Courier': p.courier || '',
                     'Status': p.status,
                   })),
                   'amazon_po'
@@ -663,15 +853,15 @@ function AmazonPOPageContent() {
         {/* Data Grid */}
         {filteredPoData.length > 0 ? (
           <>
-            <DataGrid data={filteredPoData} gridState={gridState} />
+            <DataGrid data={filteredPoData} gridState={gridState} getRowClass={(row) => getPoRowClass(row.status, row.shipWindowEndDateRaw)} getRowBgColor={(row) => getPoRowBgColor(row.status, row.shipWindowEndDateRaw)} />
             <div className="flex items-center justify-between pt-1">
               <p className="text-sm text-muted-foreground">{total.toLocaleString('en-IN')} line items</p>
               <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" onClick={() => { const p = Math.max(1, page - 1); setPage(p); fetchAmazonPOs(p, filters.status, search, effectiveDateFrom, effectiveDateTo, filters.state); }} disabled={page === 1 || isLoading}>
+                <Button variant="outline" size="sm" onClick={() => { const p = Math.max(1, page - 1); setPage(p); fetchAmazonPOs(p, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, filters.state); }} disabled={page === 1 || isLoading}>
                   Previous
                 </Button>
                 <span className="text-sm text-muted-foreground">Page {page} of {totalPages}</span>
-                <Button variant="outline" size="sm" onClick={() => { const p = Math.min(totalPages, page + 1); setPage(p); fetchAmazonPOs(p, filters.status, search, effectiveDateFrom, effectiveDateTo, filters.state); }} disabled={page === totalPages || isLoading}>
+                <Button variant="outline" size="sm" onClick={() => { const p = Math.min(totalPages, page + 1); setPage(p); fetchAmazonPOs(p, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, filters.state); }} disabled={page === totalPages || isLoading}>
                   Next
                 </Button>
               </div>
@@ -788,6 +978,111 @@ function AmazonPOPageContent() {
             <Button variant="outline" onClick={closeDialog} disabled={isSaving}>Cancel</Button>
             <Button onClick={handleSaveStatus} disabled={isSaving}>
               {isSaving ? 'Saving...' : 'Update'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Set/Edit Courier Dialog */}
+      <Dialog open={actionDialogType === 'courier'} onOpenChange={(open) => { if (!open) closeDialog(); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{actionRow?.courier ? 'Edit Courier' : 'Set Courier'}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            {actionRow && (
+              <p className="text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">{actionRow.po_number}</span>
+              </p>
+            )}
+            <Input
+              list="amz-carrier-list"
+              placeholder="Type or select a carrier…"
+              value={courierInput}
+              onChange={(e) => setCourierInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSaveCourier()}
+              autoFocus
+            />
+            <datalist id="amz-carrier-list">
+              {carriers.map(c => <option key={c} value={c} />)}
+            </datalist>
+            {courierInput && (
+              <Button variant="ghost" size="sm" className="text-xs text-red-600 h-7 px-2" onClick={() => setCourierInput('')}>
+                Clear
+              </Button>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeDialog} disabled={isSaving}>Cancel</Button>
+            <Button onClick={handleSaveCourier} disabled={isSaving}>
+              {isSaving ? 'Saving...' : 'Save'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Set/Edit Dispatch Date Dialog */}
+      <Dialog open={actionDialogType === 'dispatch_date'} onOpenChange={(open) => { if (!open) closeDialog(); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{actionRow?.dispatch_date ? 'Edit Dispatch Date' : 'Set Dispatch Date'}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            {actionRow && (
+              <p className="text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">{actionRow.po_number}</span>
+              </p>
+            )}
+            <Input
+              type="date"
+              value={dispatchDateInput}
+              onChange={(e) => setDispatchDateInput(e.target.value)}
+              autoFocus
+            />
+            {dispatchDateInput && (
+              <Button variant="ghost" size="sm" className="text-xs text-red-600 h-7 px-2" onClick={() => setDispatchDateInput('')}>
+                Clear date
+              </Button>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeDialog} disabled={isSaving}>Cancel</Button>
+            <Button onClick={handleSaveDispatchDate} disabled={isSaving}>
+              {isSaving ? 'Saving...' : 'Save'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Set/Edit Expected Date Dialog */}
+      <Dialog open={actionDialogType === 'expected_date'} onOpenChange={(open) => { if (!open) closeDialog(); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{actionRow?.expectedDateRaw ? 'Edit Expected Date' : 'Set Expected Date'}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            {actionRow && (
+              <p className="text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">{actionRow.po_number}</span>
+                {' — '}{actionRow.product_name || actionRow.asin}
+              </p>
+            )}
+            <Input
+              type="date"
+              value={expectedDateInput}
+              onChange={(e) => setExpectedDateInput(e.target.value)}
+              autoFocus
+            />
+            {expectedDateInput && (
+              <Button variant="ghost" size="sm" className="text-xs text-red-600 h-7 px-2" onClick={() => setExpectedDateInput('')}>
+                Clear date
+              </Button>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeDialog} disabled={isSaving}>Cancel</Button>
+            <Button onClick={handleSaveExpectedDate} disabled={isSaving}>
+              {isSaving ? 'Saving...' : 'Save'}
             </Button>
           </DialogFooter>
         </DialogContent>

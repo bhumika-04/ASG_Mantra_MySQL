@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
@@ -8,12 +8,13 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { DataGrid, GridColumn, useDataGrid } from '@/components/ui/data-grid';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { TrendingUp, ShoppingCart, Package, Box, Download, Search } from 'lucide-react';
+import { TrendingUp, ShoppingCart, Package, Box, Download, Search, X } from 'lucide-react';
 import { exportToCSV } from '@/lib/export';
 import { fmtCurrency } from '@/lib/format';
 import {
   BarChart,
   Bar,
+  Legend,
   PieChart,
   Pie,
   XAxis,
@@ -35,58 +36,96 @@ interface TopProduct {
   blinkitRevenue: number;
 }
 
-function filterMonthly(data: any[], mode: string, customStart: string, customEnd: string) {
-  if (mode === 'all') return data;
-  const { start_date, end_date } = computeDateRange(mode as FilterMode, customStart, customEnd);
-  return data.filter(d => {
-    const m = (d.month || '').slice(0, 7);
-    if (start_date && m < start_date.slice(0, 7)) return false;
-    if (end_date && m > end_date.slice(0, 7)) return false;
-    return true;
-  });
+function isoToMonthLabel(iso: string): string {
+  const d = new Date(iso + 'T00:00:00');
+  return d.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
+}
+
+function aggregateDailyToMonthly(
+  amazonTrend: any[],
+  blinkitTrend: any[],
+): { month: string; sortKey: string; Amazon: number; Blinkit: number }[] {
+  const map = new Map<string, { Amazon: number; Blinkit: number }>();
+
+  for (const row of amazonTrend) {
+    const key = (row.date || '').slice(0, 7);
+    if (!key) continue;
+    const entry = map.get(key) || { Amazon: 0, Blinkit: 0 };
+    entry.Amazon += row.total_units || 0;
+    map.set(key, entry);
+  }
+  for (const row of blinkitTrend) {
+    const key = (row.date || '').slice(0, 7);
+    if (!key) continue;
+    const entry = map.get(key) || { Amazon: 0, Blinkit: 0 };
+    entry.Blinkit += row.total_qty || 0;
+    map.set(key, entry);
+  }
+
+  return Array.from(map.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, vals]) => ({
+      sortKey: key,
+      month: isoToMonthLabel(key + '-01'),
+      Amazon: Math.round(vals.Amazon),
+      Blinkit: Math.round(vals.Blinkit),
+    }));
 }
 
 export default function SalesOverviewPage() {
-  const { filterMode, customStart, customEnd } = useFilter();
+  const { filterMode, customStart, customEnd, channel, globalSearch } = useFilter();
+  const [gridSearch, setGridSearch] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [stats, setStats] = useState({
     total_revenue: 0,
     total_orders: 0,
     amazon_revenue: 0,
     blinkit_revenue: 0,
+    amazon_units: 0,
+    blinkit_units: 0,
     activeProducts: 0,
   });
   const [topProducts, setTopProducts] = useState<TopProduct[]>([]);
   const [monthlyData, setMonthlyData] = useState<any[]>([]);
-  const [productSearch, setProductSearch] = useState('');
   const [productChannel, setProductChannel] = useState<'all' | 'amazon' | 'blinkit'>('all');
+  const fetchSeqRef = useRef(0);
+
+  const getDateParams = useCallback(() => {
+    const { start_date, end_date } = computeDateRange(filterMode, customStart, customEnd);
+    return { start_date, end_date };
+  }, [filterMode, customStart, customEnd]);
+
+  // Sync global channel filter → local productChannel (controls chart bars + pie)
+  useEffect(() => {
+    setProductChannel(channel === 'all' ? 'all' : channel as 'amazon' | 'blinkit');
+  }, [channel]);
+
+  // Hide the other channel's column when a single channel is selected
+  useEffect(() => {
+    gridState.setColumnVisible('amazon',  channel !== 'blinkit');
+    gridState.setColumnVisible('blinkit', channel !== 'amazon');
+  }, [channel]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    if (filterMode === 'custom' && !customStart) return;
+    const seq = ++fetchSeqRef.current;
     const fetchSalesOverview = async () => {
       try {
         setIsLoading(true);
+        const { start_date, end_date } = getDateParams();
+        const searchArgs = globalSearch.trim()
+          ? { asin: globalSearch.trim(), item_id: globalSearch.trim() }
+          : {};
 
-        const { start_date, end_date } = computeDateRange(filterMode, customStart, customEnd);
-
-        const results = await Promise.allSettled([
-          api.amazonSalesData.getAnalytics({ start_date, end_date }),
-          api.blinkitSalesData.getAnalytics({ start_date, end_date }),
-          api.dashboard.getCharts({ start_date, end_date }),
-          api.dashboard.getProductOverview({ page_size: 100 }),
+        const [amzResult, blkResult] = await Promise.allSettled([
+          api.amazonSalesData.getAnalytics({ start_date, end_date, ...(searchArgs.asin ? { asin: searchArgs.asin } : {}) }),
+          api.blinkitSalesData.getAnalytics({ start_date, end_date, ...(searchArgs.item_id ? { item_id: searchArgs.item_id } : {}) }),
         ]);
 
-        const amazonAnalytics: any = results[0].status === 'fulfilled' ? results[0].value : null;
-        const blinkitAnalytics: any = results[1].status === 'fulfilled' ? results[1].value : null;
-        const chartsData: any = results[2].status === 'fulfilled' ? results[2].value : null;
-        const productOverview: any = results[3].status === 'fulfilled' ? results[3].value : null;
+        if (fetchSeqRef.current !== seq) return;
 
-        // Build name → ASG SKU lookup from product master
-        const skuLookup = new Map<string, string>();
-        (productOverview?.items || []).forEach((p: any) => {
-          if (p.productName && p.asgSku) {
-            skuLookup.set(p.productName.trim().toLowerCase(), p.asgSku);
-          }
-        });
+        const amazonAnalytics: any = amzResult.status === 'fulfilled' ? amzResult.value : null;
+        const blinkitAnalytics: any = blkResult.status === 'fulfilled' ? blkResult.value : null;
 
         const amzRevenue: number = amazonAnalytics?.summary?.total_revenue || 0;
         const blkRevenue: number = blinkitAnalytics?.summary?.total_revenue || 0;
@@ -98,86 +137,79 @@ export default function SalesOverviewPage() {
           total_orders:    amzUnits + blkQty,
           amazon_revenue:  amzRevenue,
           blinkit_revenue: blkRevenue,
+          amazon_units:    amzUnits,
+          blinkit_units:   blkQty,
           activeProducts:  (amazonAnalytics?.summary?.active_products || 0) + (blinkitAnalytics?.summary?.active_items || 0),
         });
 
-        // Build combined top products list — merge by product name
         const productMap = new Map<string, any>();
-
         (amazonAnalytics?.top_products || []).forEach((p: any) => {
           const name = (p.product_title || p.asin || 'Unknown').trim();
           const key = name.toLowerCase();
           if (productMap.has(key)) {
-            const existing = productMap.get(key);
-            existing.amazon        += Math.round(p.total_units || 0);
-            existing.total         += Math.round(p.total_units || 0);
-            existing.amazonRevenue += (p.total_revenue || 0);
+            const ex = productMap.get(key);
+            ex.amazon += Math.round(p.total_units || 0);
+            ex.total  += Math.round(p.total_units || 0);
+            ex.amazonRevenue += (p.total_revenue || 0);
           } else {
-            productMap.set(key, {
-              name,
-              sku:           p.asin || '',
-              amazon:        Math.round(p.total_units || 0),
-              blinkit:       0,
-              total:         Math.round(p.total_units || 0),
-              amazonRevenue: p.total_revenue || 0,
-              blinkitRevenue: 0,
-            });
+            // Use MAX(SKU) from analytics — already the product SKU stored at upload time
+            productMap.set(key, { name, sku: p.sku || p.asin || '', amazon: Math.round(p.total_units || 0), blinkit: 0, total: Math.round(p.total_units || 0), amazonRevenue: p.total_revenue || 0, blinkitRevenue: 0 });
           }
         });
-
         (blinkitAnalytics?.top_products || []).forEach((p: any) => {
           const name = (p.item_name || String(p.item_id)).trim();
           const key = name.toLowerCase();
           if (productMap.has(key)) {
-            const existing = productMap.get(key);
-            existing.blinkit        += Math.round(p.total_qty || 0);
-            existing.total          += Math.round(p.total_qty || 0);
-            existing.blinkitRevenue += (p.total_revenue || 0);
+            const ex = productMap.get(key);
+            ex.blinkit += Math.round(p.total_qty || 0);
+            ex.total   += Math.round(p.total_qty || 0);
+            ex.blinkitRevenue += (p.total_revenue || 0);
           } else {
-            productMap.set(key, {
-              name,
-              sku:           String(p.item_id),
-              amazon:        0,
-              blinkit:       Math.round(p.total_qty || 0),
-              total:         Math.round(p.total_qty || 0),
-              amazonRevenue:  0,
-              blinkitRevenue: p.total_revenue || 0,
-            });
+            productMap.set(key, { name, sku: String(p.item_id), amazon: 0, blinkit: Math.round(p.total_qty || 0), total: Math.round(p.total_qty || 0), amazonRevenue: 0, blinkitRevenue: p.total_revenue || 0 });
           }
         });
 
-        // Resolve ASG SKU from product master lookup
-        for (const [key, product] of productMap) {
-          const asgSku = skuLookup.get(key);
-          if (asgSku) product.sku = asgSku;
-        }
-
-        const sortedProducts = Array.from(productMap.values())
-          .sort((a, b) => b.total - a.total)
-          .map((p, index) => ({ rank: index + 1, ...p }));
-
-        setTopProducts(sortedProducts);
-
-        // Monthly data from dashboard charts
-        setMonthlyData(chartsData?.monthly_sales || []);
+        setTopProducts(
+          Array.from(productMap.values())
+            .sort((a, b) => b.total - a.total)
+            .map((p, i) => ({ rank: i + 1, ...p }))
+        );
+        // Build monthly chart directly from daily_trend — no separate dashboard/charts call needed
+        setMonthlyData(aggregateDailyToMonthly(
+          amazonAnalytics?.daily_trend || [],
+          blinkitAnalytics?.daily_trend || [],
+        ));
       } catch (error) {
+        if (fetchSeqRef.current !== seq) return;
         console.error('Error fetching sales overview:', error);
       } finally {
-        setIsLoading(false);
+        if (fetchSeqRef.current === seq) setIsLoading(false);
       }
     };
 
     fetchSalesOverview();
-  }, [filterMode, customStart, customEnd]);
+  }, [filterMode, customStart, customEnd, globalSearch, getDateParams]);
 
-  // Channel split for pie chart — derived from KPI revenue (same data source as cards)
+  const chartData = monthlyData;
+
+  // Channel-derived KPI values
+  const kpiRevenue = channel === 'amazon' ? stats.amazon_revenue : channel === 'blinkit' ? stats.blinkit_revenue : stats.total_revenue;
+  const kpiOrders  = channel === 'amazon' ? stats.amazon_units  : channel === 'blinkit' ? stats.blinkit_units  : stats.total_orders;
+  const kpiRevLabel = channel === 'amazon' ? 'Amazon revenue' : channel === 'blinkit' ? 'Blinkit revenue' : 'Combined Amazon + Blinkit';
+
+  // Channel split for pie chart
   const totalRevenue = stats.amazon_revenue + stats.blinkit_revenue;
   const amazonPct = totalRevenue > 0 ? Math.round((stats.amazon_revenue / totalRevenue) * 100) : 0;
   const blinkitPct = totalRevenue > 0 ? Math.round((stats.blinkit_revenue / totalRevenue) * 100) : 0;
-  const channelData = [
-    { name: 'Amazon',  value: amazonPct,  fill: '#60a5fa' },
-    { name: 'Blinkit', value: blinkitPct, fill: '#fbbf24' },
-  ];
+
+  const pieData = (() => {
+    if (productChannel === 'amazon')  return [{ name: 'Amazon',  value: 100,        fill: '#60a5fa' }];
+    if (productChannel === 'blinkit') return [{ name: 'Blinkit', value: 100,        fill: '#fbbf24' }];
+    return [
+      { name: 'Amazon',  value: amazonPct,  fill: '#60a5fa' },
+      { name: 'Blinkit', value: blinkitPct, fill: '#fbbf24' },
+    ];
+  })();
 
   const gridColumns: GridColumn<TopProduct>[] = [
     {
@@ -233,11 +265,17 @@ export default function SalesOverviewPage() {
     },
   ];
 
+  // globalSearch filters KPIs + chart (applied to backend). Here it also narrows the products table.
+  // gridSearch is an additional client-side filter for the table only.
   const filteredTopProducts = topProducts.filter(p => {
     if (productChannel === 'amazon'  && p.amazon  === 0) return false;
     if (productChannel === 'blinkit' && p.blinkit === 0) return false;
-    if (productSearch.trim()) {
-      const q = productSearch.trim().toLowerCase();
+    if (globalSearch.trim()) {
+      const q = globalSearch.trim().toLowerCase();
+      if (!p.name.toLowerCase().includes(q) && !p.sku.toLowerCase().includes(q)) return false;
+    }
+    if (gridSearch.trim()) {
+      const q = gridSearch.trim().toLowerCase();
       if (!p.name.toLowerCase().includes(q) && !p.sku.toLowerCase().includes(q)) return false;
     }
     return true;
@@ -264,10 +302,10 @@ export default function SalesOverviewPage() {
         {/* KPI Cards */}
         <StatsGrid columns={4}>
           <StatsCard
-            title="Total Units Sold"
-            value={stats.total_orders.toLocaleString('en-IN')}
+            title={channel === 'amazon' ? 'Amazon Units Sold' : channel === 'blinkit' ? 'Blinkit Units Sold' : 'Total Units Sold'}
+            value={kpiOrders.toLocaleString('en-IN')}
             icon={TrendingUp}
-            description={stats.total_revenue > 0 ? `${fmtCurrency(Math.round(stats.total_revenue))} revenue` : 'Amazon units + Blinkit qty'}
+            description={kpiRevenue > 0 ? `${fmtCurrency(Math.round(kpiRevenue))} revenue` : kpiRevLabel}
           />
           <StatsCard
             title="Amazon Sales"
@@ -295,39 +333,55 @@ export default function SalesOverviewPage() {
           {/* Monthly Sales Trend Chart */}
           <Card className="lg:col-span-2">
             <CardHeader className="pb-2">
-              <CardTitle className="text-base font-medium">Monthly Sales Trend</CardTitle>
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <CardTitle className="text-base font-medium">Monthly Sales Trend</CardTitle>
+              </div>
             </CardHeader>
             <CardContent>
-              <ResponsiveContainer width="100%" height={320}>
-                <BarChart data={filterMonthly(monthlyData, filterMode, customStart, customEnd)}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                  <XAxis dataKey="month" tick={{ fill: '#6b7280', fontSize: 12 }} axisLine={{ stroke: '#e5e7eb' }} />
-                  <YAxis
-                    tick={{ fill: '#6b7280', fontSize: 12 }}
-                    axisLine={{ stroke: '#e5e7eb' }}
-                    tickFormatter={(v) => `${(v / 1000).toLocaleString('en-IN')}k`}
-                  />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '8px' }}
-                    formatter={(value: number | undefined) => [`${Number(value ?? 0).toLocaleString('en-IN')}`, '']}
-                  />
-                  <Bar dataKey="Amazon"  fill="#60a5fa" radius={[8, 8, 0, 0]} />
-                  <Bar dataKey="Blinkit" fill="#fbbf24" radius={[8, 8, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+              {chartData.length > 0 ? (
+                <ResponsiveContainer width="100%" height={320}>
+                  <BarChart data={chartData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                    <XAxis dataKey="month" tick={{ fill: '#6b7280', fontSize: 12 }} axisLine={{ stroke: '#e5e7eb' }} />
+                    <YAxis
+                      tick={{ fill: '#6b7280', fontSize: 12 }}
+                      axisLine={{ stroke: '#e5e7eb' }}
+                      tickFormatter={(v) => `${(v / 1000).toLocaleString('en-IN')}k`}
+                    />
+                    <Tooltip
+                      contentStyle={{ backgroundColor: '#fff', border: '1px solid #e5e7eb', borderRadius: '8px', padding: '8px' }}
+                      formatter={(value: number | undefined) => [`${Number(value ?? 0).toLocaleString('en-IN')}`, '']}
+                    />
+                    <Legend />
+                    {productChannel !== 'blinkit' && <Bar dataKey="Amazon"  fill="#60a5fa" radius={[8, 8, 0, 0]} />}
+                    {productChannel !== 'amazon'  && <Bar dataKey="Blinkit" fill="#fbbf24" radius={[8, 8, 0, 0]} />}
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="h-64 flex items-center justify-center text-muted-foreground text-sm">
+                  No sales data available
+                </div>
+              )}
             </CardContent>
           </Card>
 
           {/* Channel Distribution */}
           <Card>
             <CardHeader className="pb-2">
-              <CardTitle className="text-base font-medium">Channel Distribution</CardTitle>
+              <CardTitle className="text-base font-medium">
+                Channel Distribution
+                {productChannel !== 'all' && (
+                  <span className={`ml-2 text-xs font-normal ${productChannel === 'amazon' ? 'text-blue-600' : 'text-yellow-600'}`}>
+                    ({productChannel === 'amazon' ? 'Amazon only' : 'Blinkit only'})
+                  </span>
+                )}
+              </CardTitle>
             </CardHeader>
             <CardContent>
               <ResponsiveContainer width="100%" height={220}>
                 <PieChart>
                   <Pie
-                    data={channelData}
+                    data={pieData}
                     cx="50%"
                     cy="50%"
                     outerRadius={85}
@@ -339,22 +393,26 @@ export default function SalesOverviewPage() {
 
               {/* Custom legend chips */}
               <div className="flex flex-col gap-2 mt-1 px-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="w-3 h-3 rounded-full bg-blue-400 shrink-0" />
-                    <span className="text-sm font-medium text-blue-700">Amazon</span>
-                    <span className="text-xs text-muted-foreground">({amazonPct}%)</span>
+                {productChannel !== 'blinkit' && (
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="w-3 h-3 rounded-full bg-blue-400 shrink-0" />
+                      <span className="text-sm font-medium text-blue-700">Amazon</span>
+                      <span className="text-xs text-muted-foreground">({amazonPct}%)</span>
+                    </div>
+                    <span className="text-sm font-semibold text-slate-700">{fmtCurrency(Math.round(stats.amazon_revenue))}</span>
                   </div>
-                  <span className="text-sm font-semibold text-slate-700">{fmtCurrency(Math.round(stats.amazon_revenue))}</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="w-3 h-3 rounded-full bg-yellow-400 shrink-0" />
-                    <span className="text-sm font-medium text-yellow-700">Blinkit</span>
-                    <span className="text-xs text-muted-foreground">({blinkitPct}%)</span>
+                )}
+                {productChannel !== 'amazon' && (
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="w-3 h-3 rounded-full bg-yellow-400 shrink-0" />
+                      <span className="text-sm font-medium text-yellow-700">Blinkit</span>
+                      <span className="text-xs text-muted-foreground">({blinkitPct}%)</span>
+                    </div>
+                    <span className="text-sm font-semibold text-slate-700">{fmtCurrency(Math.round(stats.blinkit_revenue))}</span>
                   </div>
-                  <span className="text-sm font-semibold text-slate-700">{fmtCurrency(Math.round(stats.blinkit_revenue))}</span>
-                </div>
+                )}
                 <div className="border-t pt-2 mt-1 flex items-center justify-between">
                   <span className="text-xs text-muted-foreground font-medium">Total Revenue</span>
                   <span className="text-sm font-bold text-slate-800">{fmtCurrency(Math.round(totalRevenue))}</span>
@@ -370,34 +428,20 @@ export default function SalesOverviewPage() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <CardTitle className="text-base font-medium">Top Selling Products</CardTitle>
               <div className="flex items-center gap-2 flex-wrap">
-                {/* Search */}
                 <div className="relative">
-                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
                   <input
                     type="text"
-                    placeholder="Search by name or SKU..."
-                    value={productSearch}
-                    onChange={e => setProductSearch(e.target.value.replace(/^\s+/, ''))}
-                    className="h-8 pl-8 pr-3 text-sm border border-border rounded-md bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 w-52"
+                    placeholder="Search products..."
+                    value={gridSearch}
+                    onChange={e => setGridSearch(e.target.value.replace(/^\s+/, ''))}
+                    className="h-8 pl-8 pr-7 text-xs border border-border rounded-md bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 w-44"
                   />
-                </div>
-                {/* Channel filter pills */}
-                <div className="flex items-center gap-1 rounded-md border border-border p-0.5">
-                  {(['all', 'amazon', 'blinkit'] as const).map(ch => (
-                    <button
-                      key={ch}
-                      onClick={() => setProductChannel(ch)}
-                      className={`px-2.5 py-1 text-xs font-medium rounded transition-colors capitalize ${
-                        productChannel === ch
-                          ? ch === 'amazon'  ? 'bg-blue-600 text-white'
-                          : ch === 'blinkit' ? 'bg-yellow-500 text-white'
-                          : 'bg-primary text-primary-foreground'
-                          : 'text-muted-foreground hover:text-foreground'
-                      }`}
-                    >
-                      {ch === 'all' ? 'All' : ch.charAt(0).toUpperCase() + ch.slice(1)}
+                  {gridSearch && (
+                    <button onClick={() => setGridSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+                      <X className="h-3.5 w-3.5" />
                     </button>
-                  ))}
+                  )}
                 </div>
                 {topProducts.length > 0 && (
                   <Button
@@ -406,12 +450,12 @@ export default function SalesOverviewPage() {
                     className="h-8"
                     onClick={() => exportToCSV(
                       filteredTopProducts.map(p => ({
-                        'Rank':            p.rank,
-                        'Product':         p.name,
-                        'SKU':             p.sku,
-                        'Amazon Units':    p.amazon,
-                        'Blinkit Qty':     p.blinkit,
-                        'Total Units':     p.total,
+                        'Rank':          p.rank,
+                        'Product':       p.name,
+                        'SKU':           p.sku,
+                        'Amazon Units':  p.amazon,
+                        'Blinkit Qty':   p.blinkit,
+                        'Total Units':   p.total,
                         'Total Revenue': Math.round((p.amazonRevenue || 0) + (p.blinkitRevenue || 0)),
                       })),
                       'sales_overview_top_products'
@@ -423,7 +467,7 @@ export default function SalesOverviewPage() {
                 )}
               </div>
             </div>
-            {(productSearch || productChannel !== 'all') && (
+            {(globalSearch || gridSearch || productChannel !== 'all') && (
               <p className="text-xs text-muted-foreground mt-1">
                 Showing {filteredTopProducts.length} of {topProducts.length} products
               </p>

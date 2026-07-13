@@ -41,8 +41,10 @@ class BlinkitPOData(Base):
 
     # Ship To
     ShipToName = Column(String(200), nullable=True)
-    ShipToAddress = Column(String(500), nullable=True)
+    ShipToAddress = Column(String(1000), nullable=True)
     ShipToGSTIN = Column(String(20), nullable=True)
+    ShipToCity = Column(String(100), nullable=True)
+    ShipToState = Column(String(100), nullable=True)
 
     # Totals
     TotalTaxableAmount = Column(DECIMAL(15, 2), nullable=True)
@@ -52,8 +54,10 @@ class BlinkitPOData(Base):
     DiscountSD = Column(DECIMAL(15, 2), nullable=True)
     GrandTotal = Column(DECIMAL(15, 2), nullable=True)
 
-    # Status (manual entry)
+    # Status & dispatch (manual entry)
     Status = Column(String(50), nullable=True)
+    DispatchDate = Column(Date, nullable=True)
+    Courier = Column(String(100), nullable=True)
 
     # Metadata
     CreatedAt = Column(DateTime, default=func.getdate())
@@ -67,11 +71,16 @@ class BlinkitPOData(Base):
             "poNumber": self.PONumber,
             "poDate": self.PODate.isoformat() if self.PODate else None,
             "poExpiryDate": self.POExpiryDate.isoformat() if self.POExpiryDate else None,
+            "expectedDeliveryDate": self.ExpectedDeliveryDate.isoformat() if self.ExpectedDeliveryDate else None,
             "vendorName": self.VendorName,
             "shipToName": self.ShipToName,
             "shipToAddress": self.ShipToAddress,
             "shipToGstin": self.ShipToGSTIN,
+            "shipToCity": self.ShipToCity,
+            "shipToState": self.ShipToState,
             "grandTotal": float(self.GrandTotal) if self.GrandTotal else None,
             "status": self.Status,
+            "dispatchDate": self.DispatchDate.isoformat() if self.DispatchDate else None,
+            "courier": self.Courier,
             "createdAt": self.CreatedAt.isoformat() if self.CreatedAt else None,
         }

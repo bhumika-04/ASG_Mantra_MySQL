@@ -318,6 +318,10 @@ export default function AmazonUploadPage() {
     setPdfExtractData(null);
   };
 
+  const updatePdfHeader = (field: string, value: string) => {
+    setPdfExtractData((prev: any) => prev ? { ...prev, header: { ...prev.header, [field]: value || null } } : prev);
+  };
+
   const formatINR = (val: number | null | undefined) => {
     if (val == null) return '—';
     return `₹${val.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -905,13 +909,52 @@ export default function AmazonUploadPage() {
                           <span className="text-gray-500 block text-xs">Ordered On</span>
                           <span className="font-medium">{pdfExtractData.header?.ordered_on_date || '—'}</span>
                         </div>
-                        <div className="p-2 bg-gray-50 rounded">
-                          <span className="text-gray-500 block text-xs">Ship To</span>
-                          <span className="font-medium">
-                            {pdfExtractData.header?.ship_to_location_code || '—'}
-                            {pdfExtractData.header?.ship_to_city ? ` - ${pdfExtractData.header.ship_to_city}` : ''}
-                            {pdfExtractData.header?.ship_to_state ? `, ${pdfExtractData.header.ship_to_state}` : ''}
-                          </span>
+                        <div className="p-2 bg-gray-50 rounded col-span-2 md:col-span-4">
+                          <span className="text-gray-500 block text-xs mb-1.5">Ship To — edit if extraction failed</span>
+                          <div className="flex gap-3 flex-wrap">
+                            <div className="flex-1 min-w-[110px]">
+                              <span className="text-gray-400 text-xs block mb-0.5">FC Code</span>
+                              <input
+                                type="text"
+                                value={pdfExtractData.header?.ship_to_location_code || ''}
+                                onChange={e => updatePdfHeader('ship_to_location_code', e.target.value)}
+                                placeholder="e.g. BOM7"
+                                className="w-full bg-white border border-gray-300 rounded text-sm px-2 py-1 focus:border-blue-500 focus:outline-none"
+                              />
+                            </div>
+                            <div className="flex-1 min-w-[130px]">
+                              <span className={`text-xs block mb-0.5 ${!pdfExtractData.header?.ship_to_city ? 'text-orange-500 font-medium' : 'text-gray-400'}`}>
+                                City{!pdfExtractData.header?.ship_to_city ? ' — needs input' : ''}
+                              </span>
+                              <input
+                                type="text"
+                                value={pdfExtractData.header?.ship_to_city || ''}
+                                onChange={e => updatePdfHeader('ship_to_city', e.target.value)}
+                                placeholder="Enter city..."
+                                className={`w-full bg-white border rounded text-sm px-2 py-1 focus:outline-none ${
+                                  !pdfExtractData.header?.ship_to_city
+                                    ? 'border-orange-400 focus:border-orange-500'
+                                    : 'border-gray-300 focus:border-blue-500'
+                                }`}
+                              />
+                            </div>
+                            <div className="flex-1 min-w-[130px]">
+                              <span className={`text-xs block mb-0.5 ${!pdfExtractData.header?.ship_to_state ? 'text-orange-500 font-medium' : 'text-gray-400'}`}>
+                                State{!pdfExtractData.header?.ship_to_state ? ' — needs input' : ''}
+                              </span>
+                              <input
+                                type="text"
+                                value={pdfExtractData.header?.ship_to_state || ''}
+                                onChange={e => updatePdfHeader('ship_to_state', e.target.value)}
+                                placeholder="Enter state..."
+                                className={`w-full bg-white border rounded text-sm px-2 py-1 focus:outline-none ${
+                                  !pdfExtractData.header?.ship_to_state
+                                    ? 'border-orange-400 focus:border-orange-500'
+                                    : 'border-gray-300 focus:border-blue-500'
+                                }`}
+                              />
+                            </div>
+                          </div>
                         </div>
                         <div className="p-2 bg-gray-50 rounded">
                           <span className="text-gray-500 block text-xs">Ship Window</span>

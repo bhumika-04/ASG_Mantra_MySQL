@@ -13,6 +13,16 @@ from typing import Optional, List, Dict
 from dataclasses import dataclass, field, asdict
 
 
+def _title_case(s: str) -> str:
+    """Convert an all-uppercase string to Title Case; leave mixed-case strings unchanged."""
+    if not s:
+        return s
+    letters = re.sub(r'[^a-zA-Z]', '', s)
+    if len(letters) > 3 and letters == letters.upper():
+        return s.lower().title()
+    return s
+
+
 @dataclass
 class POItemExtracted:
     """Single line item extracted from the PDF table."""
@@ -569,7 +579,7 @@ def _parse_item_row_mapped(row: list, col_map: Dict[str, int]) -> Optional[POIte
     raw_code = _gcol('item_code')
     item.item_code = _normalize_item_code(raw_code) if raw_code else None
 
-    item.item_name      = _gcol('item_name') or None
+    item.item_name      = _title_case(_gcol('item_name')) or None
     item.mrp            = _clean_num(_gcol('mrp'))
     item.size           = _gcol('size') or None
     item.hsn_code       = _gcol('hsn_code') or None
@@ -639,7 +649,7 @@ def _parse_item_row_positional(row: list) -> Optional[POItemExtracted]:
                 pass
 
         item.item_code = _normalize_item_code(_get(1)) or None
-        item.item_name = _get(2) or None
+        item.item_name = _title_case(_get(2)) or None
         item.mrp = _clean_num(_get(3))
 
         # HSN anchor: look for 6+ digit numeric string in positions 4-6

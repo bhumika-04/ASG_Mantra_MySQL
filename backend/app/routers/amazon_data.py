@@ -553,7 +553,7 @@ def _upload_vendor_csv(df: pd.DataFrame, report_date: date, db: Session, filenam
                 ReportDate=report_date,
                 SourceFile='VendorCSV',
                 ASIN=asin,
-                SKU=safe_str(row.get('Model Number'), 100),
+                SKU=safe_str(row.get('Model Number') or row.get('ModelNumber'), 100),
                 Brand=safe_str(row.get('Brand'), 100),
                 ProductTitle=safe_str(row.get('Product Title'), 500),
                 BrandCode=safe_str(row.get('Brand Code'), 50),
@@ -903,7 +903,7 @@ async def get_amazon_inventory(
     stats_row = query.with_entities(
         func.sum(AmazonInventoryData.SellableOnHandUnits).label('total_sellable'),
         func.sum(AmazonInventoryData.UnsellableOnHandUnits).label('total_unsellable'),
-        func.sum(AmazonInventoryData.InTransitQuantity).label('total_in_transit'),
+        func.sum(AmazonInventoryData.OpenPurchaseOrderQuantity).label('total_open_po'),
         func.count(AmazonInventoryData.ASIN.distinct()).label('unique_asins'),
     ).one()
 
@@ -914,11 +914,7 @@ async def get_amazon_inventory(
 
     dates_list = db.query(AmazonInventoryData.ReportDate).distinct().order_by(
         desc(AmazonInventoryData.ReportDate)
-    ).limit(20).all()
-
-    total_sellable = int(stats_row.total_sellable or 0)
-    total_unsellable = int(stats_row.total_unsellable or 0)
-    total_in_transit = int(stats_row.total_in_transit or 0)
+    ).all()
 
     return {
         "items": [item.to_dict() for item in items],
@@ -927,9 +923,9 @@ async def get_amazon_inventory(
         "page_size": page_size,
         "total_pages": (total + page_size - 1) // page_size,
         "stats": {
-            "totalSellableUnits": total_sellable,
-            "totalUnsellableUnits": total_unsellable,
-            "totalInTransit": total_in_transit,
+            "totalSellableUnits": int(stats_row.total_sellable or 0),
+            "totalUnsellableUnits": int(stats_row.total_unsellable or 0),
+            "totalOpenPOQty": int(stats_row.total_open_po or 0),
             "uniqueAsins": int(stats_row.unique_asins or 0),
         },
         "filters": {
@@ -1143,7 +1139,7 @@ async def upload_amazon_inventory(
                 UPC=safe_str(row.get('UPC'), 50),
                 EAN=safe_str(row.get('EAN'), 50),
                 ISBN=safe_str(row.get('ISBN'), 50),
-                ModelNumber=safe_str(row.get('Model Number'), 100),
+                ModelNumber=safe_str(row.get('Model Number') or row.get('ModelNumber'), 100),
                 MSRP=clean_numeric(row.get('MSRP')) or None,
                 Binding=safe_str(row.get('Binding'), 100),
                 Colour=safe_str(row.get('Colour'), 100),
@@ -1161,15 +1157,15 @@ async def upload_amazon_inventory(
                 UnfilledCustomerOrderedUnits=safe_int(row.get('Unfilled Customer Ordered Units')),
                 Aged90PlusDaysSellableInventory=clean_numeric(row.get('Aged 90+ Days Sellable Inventory')) or None,
                 Aged90PlusDaysSellableUnits=safe_int(row.get('Aged 90+ Days Sellable Units')),
-                SellableOnHandInventory=clean_numeric(row.get('Sellable On-Hand Inventory')) or None,
-                SellableOnHandUnits=safe_int(row.get('Sellable On Hand Units')),
-                UnsellableOnHandInventory=clean_numeric(row.get('Unsellable On-Hand Inventory')) or None,
-                UnsellableOnHandUnits=safe_int(row.get('Unsellable On-Hand Units')),
+                SellableOnHandInventory=clean_numeric(row.get('Sellable On-Hand Inventory') or row.get('Sellable On Hand Inventory')) or None,
+                SellableOnHandUnits=safe_int(row.get('Sellable On Hand Units') or row.get('Sellable On-Hand Units') or row.get('Sellable')),
+                UnsellableOnHandInventory=clean_numeric(row.get('Unsellable On-Hand Inventory') or row.get('Unsellable On Hand Inventory')) or None,
+                UnsellableOnHandUnits=safe_int(row.get('Unsellable On-Hand Units') or row.get('Unsellable On Hand Units') or row.get('Unfulfillable')),
                 ConfirmedUnits=safe_int(row.get('Confirmed Units')),
                 NetOrderedGMS=clean_numeric(row.get('Net Ordered GMS')) or None,
                 NetShippedGMS=clean_numeric(row.get('Net Shipped GMS')) or None,
-                InTransitQuantity=safe_int(row.get('In Transit Quantity')),
-                SellableInTransitUnits=safe_int(row.get('Sellable In Transit Units')),
+                InTransitQuantity=safe_int(row.get('In Transit Quantity') or row.get('In-Transit Quantity')),
+                SellableInTransitUnits=safe_int(row.get('Sellable In Transit Units') or row.get('Sellable In-Transit Units') or row.get('Reserved FC Transfers') or row.get('Reserved')),
                 UnsellableInTransitUnits=safe_int(row.get('Unsellable In Transit Units')),
             )
             db.add(record)
@@ -1356,6 +1352,13 @@ async def upload_amazon_po(
                 ship_to_city = safe_str(row.get('ShipToCity'), 100)
                 ship_to_state = safe_str(row.get('ShipToState'), 100)
 
+                _sc = (ship_to_code or '').strip().strip('-—–').strip()
+                _sc_city = (ship_to_city or '').strip().strip('-—–').strip()
+                if not _sc and not _sc_city:
+                    errors.append(f"Row {idx+1} (PO {po_number}): Ship To location (code or city) is blank or invalid — row skipped")
+                    rows_skipped += 1
+                    continue
+
                 po = AmazonPOData(
                     PONumber=po_number,
                     POStatus='Created',
@@ -1460,9 +1463,12 @@ async def upload_amazon_po(
 # ============================================================
 @router.get("/analytics")
 async def get_amazon_sales_analytics(
-    days: int = Query(1825, ge=1, le=1825, description="Number of days to look back"),
+    days: Optional[int] = Query(None, ge=1, le=36500, description="Days to look back (omit for all-time)"),
     start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD (overrides days)"),
     end_date: Optional[str] = Query(None, description="End date YYYY-MM-DD (default: today)"),
+    asin: Optional[str] = Query(None, description="Filter by ASIN or product name"),
+    prev_start_date: Optional[str] = Query(None, description="Start of previous period for growth comparison"),
+    prev_end_date: Optional[str] = Query(None, description="End of previous period for growth comparison"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -1473,68 +1479,78 @@ async def get_amazon_sales_analytics(
     Only VendorCSV OrderedUnits are used for 'total units' — DRR is not ordered units.
     """
     end_dt = date.fromisoformat(end_date) if end_date else date.today()
-    start_dt = date.fromisoformat(start_date) if start_date else (end_dt - timedelta(days=days))
-    start_dt_s = start_dt.isoformat()
+    if start_date:
+        start_dt = date.fromisoformat(start_date)
+    elif days is not None:
+        start_dt = end_dt - timedelta(days=days)
+    else:
+        start_dt = None  # all-time: no lower bound
+    start_dt_s = start_dt.isoformat() if start_dt else '1900-01-01'
     end_dt_s = end_dt.isoformat()
+
+    sku_filter = "AND (ASIN = :asin OR ProductTitle LIKE '%' + :asin + '%')" if asin else ""
+    sku_params: dict = {"asin": asin} if asin else {}
 
     try:
         # Use raw T-SQL for all queries to guarantee MSSQL/pyodbc compatibility.
         # Only VendorCSV rows have OrderedUnits; RKExcel rows store DRR_D1 (daily run rate).
         # DRR is NOT ordered units, so we use ISNULL(OrderedUnits, 0) throughout.
 
-        # ----- Total rows all-time (diagnostic: confirms table has data) -----
-        total_records_all_time = int(
-            db.execute(text("SELECT COUNT(*) FROM AmazonSales")).scalar() or 0
-        )
-
-        # ----- Summary stats -----
-        summary_row = db.execute(text("""
+        # ----- Summary + growth + all-time count in one CTE query -----
+        summary_row = db.execute(text(f"""
+            WITH base AS (
+                SELECT * FROM AmazonSales
+                WHERE ReportDate >= :start_dt AND ReportDate <= :end_dt
+                {sku_filter}
+            ),
+            mx AS (SELECT MAX(ReportDate) AS max_date FROM base)
             SELECT
-                COUNT(*)                                        AS total_records,
-                COUNT(DISTINCT CASE WHEN SourceFile = 'VendorCSV' AND OrderedUnits > 0 THEN ASIN END) AS active_products,
-                SUM(ISNULL(OrderedUnits, 0))                    AS total_units,
-                SUM(OrderedRevenue)                             AS total_revenue,
-                MAX(ReportDate)                                 AS max_date
-            FROM AmazonSales
-            WHERE ReportDate >= :start_dt AND ReportDate <= :end_dt
-        """), {"start_dt": start_dt_s, "end_dt": end_dt_s}).fetchone()
+                COUNT(*)                                AS total_records,
+                COUNT(DISTINCT CASE WHEN b.SourceFile = 'VendorCSV' AND b.OrderedUnits > 0 THEN b.ASIN END) AS active_products,
+                SUM(ISNULL(b.OrderedUnits, 0))          AS total_units,
+                SUM(b.OrderedRevenue)                   AS total_revenue,
+                mx.max_date,
+                (SELECT COUNT(*) FROM AmazonSales WHERE 1=1 {sku_filter}) AS total_records_all_time,
+                SUM(CASE WHEN b.ReportDate > DATEADD(day, -30, mx.max_date)
+                              AND b.ReportDate <= mx.max_date
+                         THEN ISNULL(b.OrderedUnits, 0) END)              AS current_units,
+                SUM(CASE WHEN b.ReportDate > DATEADD(day, -60, mx.max_date)
+                              AND b.ReportDate <= DATEADD(day, -30, mx.max_date)
+                         THEN ISNULL(b.OrderedUnits, 0) END)              AS prev_units
+            FROM base b
+            CROSS JOIN mx
+            GROUP BY mx.max_date
+        """), {"start_dt": start_dt_s, "end_dt": end_dt_s, **sku_params}).fetchone()
+
+        if summary_row is None:
+            summary_row = (0, 0, 0, 0, None, 0, 0, 0)
 
         total_records_in_range = int(summary_row[0] or 0)
         active_products        = int(summary_row[1] or 0)
         total_units            = int(summary_row[2] or 0)
         total_revenue          = float(summary_row[3] or 0)
-        max_date               = summary_row[4]  # Python date/datetime or None
-
+        max_date               = summary_row[4]
+        total_records_all_time = int(summary_row[5] or 0)
         avg_units_per_product = round(total_units / active_products, 1) if active_products > 0 else 0
 
-        # ----- Monthly growth -----
-        monthly_growth = 0.0
-        if max_date:
-            max_date_d     = max_date.date() if hasattr(max_date, 'date') else max_date
-            current_start  = max_date_d - timedelta(days=30)
-            prev_start     = max_date_d - timedelta(days=60)
-
-            growth_rows = db.execute(text("""
-                SELECT
-                    SUM(CASE WHEN ReportDate > :current_start AND ReportDate <= :max_date
-                             THEN ISNULL(OrderedUnits, 0) END) AS current_units,
-                    SUM(CASE WHEN ReportDate > :prev_start    AND ReportDate <= :current_start
-                             THEN ISNULL(OrderedUnits, 0) END) AS prev_units
+        if prev_start_date and prev_end_date:
+            prev_row = db.execute(text(f"""
+                SELECT COALESCE(SUM(ISNULL(OrderedUnits, 0)), 0)
                 FROM AmazonSales
-                WHERE ReportDate > :prev_start AND ReportDate <= :max_date
-            """), {
-                "current_start": current_start.isoformat(),
-                "max_date":      max_date_d.isoformat(),
-                "prev_start":    prev_start.isoformat(),
-            }).fetchone()
+                WHERE ReportDate >= :p_start AND ReportDate <= :p_end
+                  AND SourceFile = 'VendorCSV'
+                  {sku_filter}
+            """), {"p_start": prev_start_date, "p_end": prev_end_date, **sku_params}).fetchone()
+            prev_u = float(prev_row[0] or 0) if prev_row else 0.0
+            current_u = float(total_units)
+        else:
+            current_u = float(summary_row[6] or 0)
+            prev_u    = float(summary_row[7] or 0)
 
-            current_u = float(growth_rows[0] or 0)
-            prev_u    = float(growth_rows[1] or 0)
-            if prev_u > 0:
-                monthly_growth = round(((current_u - prev_u) / prev_u) * 100, 1)
+        monthly_growth = round(((current_u - prev_u) / prev_u) * 100, 1) if prev_u > 0 else 0.0
 
         # ----- All products -----
-        top_rows = db.execute(text("""
+        top_rows = db.execute(text(f"""
             SELECT
                 ASIN,
                 MAX(ProductTitle)                               AS product_title,
@@ -1545,14 +1561,16 @@ async def get_amazon_sales_analytics(
                 MAX(ReportDate)                                 AS last_sale
             FROM AmazonSales
             WHERE ReportDate >= :start_dt AND ReportDate <= :end_dt AND SourceFile = 'VendorCSV'
+            {sku_filter}
             GROUP BY ASIN
             ORDER BY SUM(ISNULL(OrderedUnits, 0)) DESC
-        """), {"start_dt": start_dt_s, "end_dt": end_dt_s}).fetchall()
+        """), {"start_dt": start_dt_s, "end_dt": end_dt_s, **sku_params}).fetchall()
 
         top_products = [
             {
                 "asin":          row[0],
                 "product_title": row[1] or row[2] or row[0],
+                "sku":           row[2] or "",
                 "total_units":   int(row[3] or 0),
                 "total_revenue": float(row[4] or 0),
                 "first_sale":    row[5].strftime('%d-%m-%Y') if row[5] else None,
@@ -1563,16 +1581,17 @@ async def get_amazon_sales_analytics(
 
         # ----- Daily / Monthly trend -----
         # First try daily grouping; if only 1 distinct date exists fall back to monthly
-        daily_rows = db.execute(text("""
+        daily_rows = db.execute(text(f"""
             SELECT
                 ReportDate,
                 SUM(ISNULL(OrderedUnits, 0))          AS total_units,
                 SUM(OrderedRevenue)                   AS total_revenue
             FROM AmazonSales
             WHERE ReportDate >= :start_dt AND ReportDate <= :end_dt AND SourceFile = 'VendorCSV'
+            {sku_filter}
             GROUP BY ReportDate
             ORDER BY ReportDate
-        """), {"start_dt": start_dt_s, "end_dt": end_dt_s}).fetchall()
+        """), {"start_dt": start_dt_s, "end_dt": end_dt_s, **sku_params}).fetchall()
 
         if len(daily_rows) > 1:
             daily_trend = [
@@ -1585,16 +1604,17 @@ async def get_amazon_sales_analytics(
             ]
         else:
             # Fall back to monthly grouping so area chart renders with multiple points
-            monthly_rows = db.execute(text("""
+            monthly_rows = db.execute(text(f"""
                 SELECT
                     CONVERT(varchar(7), ReportDate, 120) AS month,
                     SUM(ISNULL(OrderedUnits, 0))          AS total_units,
                     SUM(OrderedRevenue)                   AS total_revenue
                 FROM AmazonSales
-                WHERE ReportDate IS NOT NULL AND SourceFile = 'VendorCSV'
+                WHERE ReportDate >= :start_dt AND ReportDate <= :end_dt AND SourceFile = 'VendorCSV'
+                {sku_filter}
                 GROUP BY CONVERT(varchar(7), ReportDate, 120)
                 ORDER BY CONVERT(varchar(7), ReportDate, 120)
-            """)).fetchall()
+            """), {"start_dt": start_dt_s, "end_dt": end_dt_s, **sku_params}).fetchall()
             daily_trend = [
                 {
                     "date":          row[0],
@@ -1823,6 +1843,11 @@ async def confirm_amazon_po_pdf(
 
     if not header.po_number:
         raise HTTPException(status_code=400, detail="PO Number is required")
+
+    _loc = (header.ship_to_location_code or '').strip().strip('-—–').strip()
+    _city = (header.ship_to_city or '').strip().strip('-—–').strip()
+    if not _loc and not _city:
+        raise HTTPException(status_code=400, detail="Ship To location code or city is required and cannot be a placeholder")
 
     # Check for duplicate PO
     existing = db.query(AmazonPOData).filter(AmazonPOData.PONumber == header.po_number).first()

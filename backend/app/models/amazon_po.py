@@ -50,6 +50,10 @@ class AmazonPOData(Base):
     ReceivedQuantity = Column(Integer, nullable=True)
     ReceivedTotalCost = Column(DECIMAL(15, 2), nullable=True)
 
+    # Dispatch tracking (manual entry)
+    DispatchDate = Column(Date, nullable=True)
+    Courier = Column(String(100), nullable=True)
+
     # Metadata
     CreatedAt = Column(DateTime, default=func.getdate())
 

@@ -36,9 +36,10 @@ import {
   MoreVertical,
   PackagePlus,
   RefreshCw,
+  Calendar,
 } from 'lucide-react';
 import api from '@/lib/api';
-import { fmtDate } from '@/lib/format';
+import { fmtDate, toTitleCase } from '@/lib/format';
 
 // KPI config keyed by DB status name
 const KPI_CONFIG: Record<string, { icon: React.ReactNode; color: string; bg: string; desc: string }> = {
@@ -59,12 +60,40 @@ const BADGE_STYLES: Record<string, string> = {
   'Cancelled':  'bg-gray-50 text-gray-600 border-gray-200',
   'Diff Loss':  'bg-purple-50 text-purple-700 border-purple-200',
   'Closed':     'bg-slate-50 text-slate-600 border-slate-200',
+  'Expired':    'bg-red-50 text-red-700 border-red-200',
 };
 
 const STATUS_OPTIONS = ['Created', 'Dispatched', 'In Transit', 'Delivered', 'Delayed', 'Cancelled'];
 
+const NO_EXPIRY_OVERRIDE = new Set(['Delivered', 'Received', 'Cancelled', 'Closed', 'Expired', 'Dispatched', 'In Transit']);
+function effStatus(base: string, expiryISO: string | null): string {
+  if (NO_EXPIRY_OVERRIDE.has(base)) return base;
+  if (!expiryISO) return base;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return (today.getTime() - new Date(expiryISO + 'T00:00:00').getTime()) / 86400000 >= 15 ? 'Expired' : base;
+}
+function getPoRowClass(status: string, expiryISO: string | null): string | undefined {
+  if (['Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit'].includes(status)) return undefined;
+  if (!expiryISO) return undefined;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const d = Math.ceil((new Date(expiryISO + 'T00:00:00').getTime() - today.getTime()) / 86400000);
+  if (d <= 7)  return 'bg-red-50 dark:bg-red-950/20';
+  if (d <= 15) return 'bg-yellow-50 dark:bg-yellow-950/20';
+  return undefined;
+}
+function getPoRowBgColor(status: string, expiryISO: string | null): string | undefined {
+  if (['Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit'].includes(status)) return undefined;
+  if (!expiryISO) return undefined;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const d = Math.ceil((new Date(expiryISO + 'T00:00:00').getTime() - today.getTime()) / 86400000);
+  if (d <= 7)  return 'rgb(254,242,242)';
+  if (d <= 15) return 'rgb(254,252,232)';
+  return undefined;
+}
+
 interface POItem {
   id: number;
+  po_id: number;
   po_number: string;
   po_date: string;
   orderDateRaw: string | null;
@@ -72,6 +101,7 @@ interface POItem {
   product_name: string;
   ordered_qty: number;
   accepted_qty: number | null;
+  received_qty: number | null;
   mapped_sku: string;
   pending_qty: number;
   unit_cost: number | null;
@@ -80,15 +110,27 @@ interface POItem {
   state: string;
   shipTo: string;
   delivery: string;
+  deliveryDateRaw: string | null;
   po_expiry: string;
+  expiryDateRaw: string | null;
+  dispatch_date: string | null;
+  courier: string | null;
   status: string;
+  po_status: string;
 }
 
 
 function BlinkitPOPageContent() {
   const searchParams = useSearchParams();
-  const { filterMode, customStart, customEnd } = useFilter();
-  const [search, setSearch] = useState(searchParams.get('search') || '');
+  const { filterMode, customStart, customEnd, globalSearch, setGlobalSearchRaw } = useFilter();
+  const [gridSearch, setGridSearch] = useState('');
+  useEffect(() => {
+    const urlParam = searchParams.get('search');
+    if (urlParam) {
+      setGridSearch(urlParam);
+      setGlobalSearchRaw(urlParam);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
   const [poData, setPoData] = useState<POItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -96,12 +138,19 @@ function BlinkitPOPageContent() {
   const [totalPages, setTotalPages] = useState(1);
   const [total, setTotal] = useState(0);
   const [statsData, setStatsData] = useState<{ status_counts: Record<string, number>; total_pos: number; total_units: number } | null>(null);
+  const [carriers, setCarriers] = useState<string[]>([]);
+  const [statsKey, setStatsKey] = useState(0);
 
   // Action state
   const [actionRow, setActionRow] = useState<POItem | null>(null);
   const [acceptedQtyInput, setAcceptedQtyInput] = useState('');
+  const [receivedQtyInput, setReceivedQtyInput] = useState('');
   const [statusInput, setStatusInput] = useState('');
-  const [actionDialogType, setActionDialogType] = useState<'accepted_qty' | 'status' | null>(null);
+  const [dispatchDateInput, setDispatchDateInput] = useState('');
+  const [courierInput, setCourierInput] = useState('');
+  const [actionDialogType, setActionDialogType] = useState<'accepted_qty' | 'received_qty' | 'status' | 'dispatch_date' | 'courier' | 'delivery_date' | 'expiry_date' | null>(null);
+  const [deliveryDateInput, setDeliveryDateInput] = useState('');
+  const [expiryDateInput, setExpiryDateInput] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
   const openAcceptedQtyDialog = (row: POItem) => {
@@ -110,15 +159,65 @@ function BlinkitPOPageContent() {
     setActionDialogType('accepted_qty');
   };
 
+  const openReceivedQtyDialog = (row: POItem) => {
+    setActionRow(row);
+    setReceivedQtyInput(row.received_qty != null ? String(row.received_qty) : '');
+    setActionDialogType('received_qty');
+  };
+
   const openStatusDialog = (row: POItem) => {
     setActionRow(row);
-    setStatusInput(row.status);
+    setStatusInput(row.po_status);
     setActionDialogType('status');
+  };
+
+  const openDispatchDateDialog = (row: POItem) => {
+    setActionRow(row);
+    setDispatchDateInput(row.dispatch_date || '');
+    setActionDialogType('dispatch_date');
+  };
+
+  const openCourierDialog = (row: POItem) => {
+    setActionRow(row);
+    setCourierInput(row.courier || '');
+    setActionDialogType('courier');
+  };
+
+  const openDeliveryDateDialog = (row: POItem) => {
+    setActionRow(row);
+    setDeliveryDateInput(row.deliveryDateRaw || '');
+    setActionDialogType('delivery_date');
+  };
+
+  const openExpiryDateDialog = (row: POItem) => {
+    setActionRow(row);
+    setExpiryDateInput(row.expiryDateRaw || '');
+    setActionDialogType('expiry_date');
   };
 
   const closeDialog = () => {
     setActionDialogType(null);
     setActionRow(null);
+  };
+
+  const handleSaveReceivedQty = async () => {
+    if (!actionRow) return;
+    const qty = parseInt(receivedQtyInput);
+    if (isNaN(qty) || qty < 0) {
+      toast.error('Please enter a valid quantity');
+      return;
+    }
+    setIsSaving(true);
+    try {
+      await api.purchaseOrders.updateBlinkitItemReceivedQty(actionRow.id, qty);
+      setPoData(prev => prev.map(p => p.id === actionRow.id ? { ...p, received_qty: qty } : p));
+      toast.success(`Received qty updated to ${qty}`);
+      closeDialog();
+    } catch {
+      toast.error('Failed to update received qty');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleSaveAcceptedQty = async () => {
@@ -150,21 +249,91 @@ function BlinkitPOPageContent() {
   };
 
   const handleSaveStatus = async () => {
-    if (!actionRow || statusInput === actionRow.status) { closeDialog(); return; }
+    if (!actionRow || statusInput === actionRow.po_status) { closeDialog(); return; }
     const dbStatus = statusInput;
     setIsSaving(true);
     try {
-      await api.purchaseOrders.updateBlinkitItemStatus(actionRow.id, { status: dbStatus });
-      setPoData(prev => prev.map(p => p.id === actionRow.id ? { ...p, status: statusInput } : p));
-      // Refresh KPI stats with current date filter
-      const p: Record<string, string> = {};
-      if (effectiveDateFrom) p.start_date = effectiveDateFrom;
-      if (effectiveDateTo) p.end_date = effectiveDateTo;
-      (api.purchaseOrders as any).getBlinkitStats(Object.keys(p).length ? p : undefined).then((s: any) => setStatsData(s)).catch(() => {});
+      await api.purchaseOrders.updateBlinkitPOStatus(actionRow.po_id, { status: dbStatus });
+      setPoData(prev => prev.map(p => p.po_id === actionRow.po_id
+        ? { ...p, status: effStatus(statusInput, p.expiryDateRaw), po_status: statusInput }
+        : p));
+      setStatsKey(k => k + 1);
+      setPage(1);
+      fetchBlinkitPOs(1, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, true);
       toast.success(`Status updated to ${statusInput}`);
       closeDialog();
     } catch {
       toast.error('Failed to update status');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSaveDispatchDate = async () => {
+    if (!actionRow) return;
+    setIsSaving(true);
+    try {
+      const dateVal = dispatchDateInput.trim() || null;
+      await (api.purchaseOrders as any).updateBlinkitPODispatchDate(actionRow.po_id, dateVal);
+      setPoData(prev => prev.map(p => p.po_id === actionRow.po_id ? { ...p, dispatch_date: dateVal } : p));
+      toast.success(dateVal ? `Dispatch date set to ${fmtDate(dateVal)}` : 'Dispatch date cleared');
+      closeDialog();
+    } catch {
+      toast.error('Failed to save dispatch date');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSaveCourier = async () => {
+    if (!actionRow) return;
+    setIsSaving(true);
+    try {
+      const val = courierInput.trim() || null;
+      await (api.purchaseOrders as any).updateBlinkitPOCourier(actionRow.po_id, val);
+      setPoData(prev => prev.map(p => p.po_id === actionRow.po_id ? { ...p, courier: val } : p));
+      toast.success(val ? `Courier set to "${val}"` : 'Courier cleared');
+      closeDialog();
+    } catch {
+      toast.error('Failed to save courier');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSaveDeliveryDate = async () => {
+    if (!actionRow) return;
+    setIsSaving(true);
+    try {
+      const dateVal = deliveryDateInput.trim() || null;
+      await (api.purchaseOrders as any).updateBlinkitPOExpectedDeliveryDate(actionRow.po_id, dateVal);
+      setPoData(prev => prev.map(p => p.po_id === actionRow.po_id
+        ? { ...p, delivery: dateVal ? fmtDate(dateVal) : '-', deliveryDateRaw: dateVal }
+        : p
+      ));
+      toast.success(dateVal ? `Expected delivery set to ${fmtDate(dateVal)}` : 'Expected delivery date cleared');
+      closeDialog();
+    } catch {
+      toast.error('Failed to save expected delivery date');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSaveExpiryDate = async () => {
+    if (!actionRow) return;
+    setIsSaving(true);
+    try {
+      const dateVal = expiryDateInput.trim() || null;
+      await (api.purchaseOrders as any).updateBlinkitPOExpiryDate(actionRow.po_id, dateVal);
+      setPoData(prev => prev.map(p => p.po_id === actionRow.po_id
+        ? { ...p, po_expiry: dateVal ? fmtDate(dateVal) : '-', expiryDateRaw: dateVal }
+        : p
+      ));
+      toast.success(dateVal ? `PO expiry set to ${fmtDate(dateVal)}` : 'PO expiry date cleared');
+      closeDialog();
+    } catch {
+      toast.error('Failed to save PO expiry date');
     } finally {
       setIsSaving(false);
     }
@@ -178,25 +347,33 @@ function BlinkitPOPageContent() {
     return { effectiveDateFrom: filters.dateFrom, effectiveDateTo: filters.dateTo };
   }, [filterMode, customStart, customEnd, filters.dateFrom, filters.dateTo]);
 
-  const fetchBlinkitPOs = useCallback(async (p: number, statusFilter: string, searchQuery: string, dateFrom: string, dateTo: string) => {
+  const fetchSeqRef = useRef(0);
+  const fetchBlinkitPOs = useCallback(async (p: number, statusFilter: string, searchQuery: string, dateFrom: string, dateTo: string, silent = false) => {
+    const seq = ++fetchSeqRef.current;
     try {
-      setIsLoading(true);
+      if (!silent) setIsLoading(true);
       const params: Record<string, any> = { page: p, page_size: 50 };
       if (statusFilter !== 'all') params.status = statusFilter;
-      if (searchQuery.trim()) params.search = searchQuery.trim();
-      if (dateFrom) params.start_date = dateFrom;
-      if (dateTo) params.end_date = dateTo;
+      if (searchQuery.trim()) {
+        params.search = searchQuery.trim();
+      } else {
+        if (dateFrom) params.start_date = dateFrom;
+        if (dateTo) params.end_date = dateTo;
+      }
 
       const response = await api.purchaseOrders.getBlinkit(params) as any;
+      if (fetchSeqRef.current !== seq) return;
       const transformedPOs = (response.items || []).map((po: any) => ({
         id: po.id,
+        po_id: po.po_id,
         po_number: po.po_number,
         po_date: po.order_date ? fmtDate(po.order_date) : '-',
         orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
         blinkitSku: po.blinkit_id || po.blinkitId || '',
-        product_name: po.product_name || po.productName || '',
+        product_name: toTitleCase(po.product_name || po.productName || ''),
         ordered_qty: po.quantity,
         accepted_qty: po.accepted_qty ?? null,
+        received_qty: po.received_quantity ?? null,
         mapped_sku: po.asg_sku || po.asgSku || '',
         pending_qty: po.accepted_qty != null
           ? Math.max(0, (po.quantity || 0) - po.accepted_qty)
@@ -207,49 +384,59 @@ function BlinkitPOPageContent() {
         state: po.ship_to_state || '—',
         shipTo: po.ship_to_name || '—',
         delivery: po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : '-',
+        deliveryDateRaw: po.expected_delivery_date || null,
         po_expiry: po.po_expiry_date ? fmtDate(po.po_expiry_date) : '-',
-        status: po.status || 'Created',
+        expiryDateRaw: po.po_expiry_date || null,
+        dispatch_date: po.dispatch_date || null,
+        courier: po.courier || null,
+        status: effStatus(po.status || 'Created', po.po_expiry_date || null),
+        po_status: po.po_status || 'Created',
       }));
       setPoData(transformedPOs);
       setTotal(response.total || 0);
       setTotalPages(response.total_pages || 1);
     } catch (error) {
+      if (fetchSeqRef.current !== seq) return;
       console.error('Error fetching Blinkit purchase orders:', error);
     } finally {
-      setIsLoading(false);
+      if (fetchSeqRef.current === seq) setIsLoading(false);
     }
   }, []);
 
-  // Fetch date-filtered stats for KPI cards — re-runs when global filter changes
+  // Fetch date-filtered stats for KPI cards — re-runs when date filter or statsKey changes
   useEffect(() => {
+    if (filterMode === 'custom' && !customStart) return;
     const params: Record<string, string> = {};
     if (effectiveDateFrom) params.start_date = effectiveDateFrom;
     if (effectiveDateTo) params.end_date = effectiveDateTo;
     (api.purchaseOrders as any).getBlinkitStats(Object.keys(params).length ? params : undefined)
       .then((s: any) => setStatsData(s)).catch(() => {});
-  }, [effectiveDateFrom, effectiveDateTo]);
+  }, [filterMode, customStart, effectiveDateFrom, effectiveDateTo, statsKey]);
 
-  // Initial load
+  // Initial load + one-time master data fetch
   useEffect(() => {
-    fetchBlinkitPOs(1, filters.status, search, effectiveDateFrom, effectiveDateTo);
+    fetchBlinkitPOs(1, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo);
+    (api.purchaseOrders as any).getCarriers()
+      .then((res: any) => setCarriers(res?.carriers ?? []))
+      .catch(() => {});
   }, [fetchBlinkitPOs]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Re-fetch when filters or global date filter change — reset to page 1
-  const prevFiltersRef = useRef({ status: filters.status, state: filters.state, search, dateFrom: effectiveDateFrom, dateTo: effectiveDateTo });
+  const prevFiltersRef = useRef({ status: filters.status, search: globalSearch, dateFrom: effectiveDateFrom, dateTo: effectiveDateTo });
   useEffect(() => {
+    if (filterMode === 'custom' && !customStart) return;
     const prev = prevFiltersRef.current;
     const changed =
       prev.status !== filters.status ||
-      prev.state !== filters.state ||
-      prev.search !== search ||
+      prev.search !== globalSearch ||
       prev.dateFrom !== effectiveDateFrom ||
       prev.dateTo !== effectiveDateTo;
     if (changed) {
-      prevFiltersRef.current = { status: filters.status, state: filters.state, search, dateFrom: effectiveDateFrom, dateTo: effectiveDateTo };
+      prevFiltersRef.current = { status: filters.status, search: globalSearch, dateFrom: effectiveDateFrom, dateTo: effectiveDateTo };
       setPage(1);
-      fetchBlinkitPOs(1, filters.status, search, effectiveDateFrom, effectiveDateTo);
+      fetchBlinkitPOs(1, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo);
     }
-  }, [filters.status, filters.state, search, effectiveDateFrom, effectiveDateTo, fetchBlinkitPOs]);
+  }, [filterMode, customStart, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, fetchBlinkitPOs]);
 
   const gridColumns: GridColumn<POItem>[] = [
     {
@@ -318,6 +505,24 @@ function BlinkitPOPageContent() {
         row.accepted_qty != null ? (
           <span className={`font-medium ${row.accepted_qty < row.ordered_qty ? 'text-amber-600' : 'text-emerald-600'}`}>
             {row.accepted_qty.toLocaleString('en-IN')}
+          </span>
+        ) : (
+          <span className="text-muted-foreground text-xs">—</span>
+        )
+      ),
+    },
+    {
+      id: 'receivedQty',
+      header: 'Received Qty',
+      accessorKey: 'received_qty',
+      sortable: true,
+      width: 120,
+      minWidth: 100,
+      align: 'right',
+      cell: (row) => (
+        row.received_qty != null ? (
+          <span className={`font-medium ${row.received_qty < row.ordered_qty ? 'text-amber-600' : 'text-emerald-600'}`}>
+            {row.received_qty.toLocaleString('en-IN')}
           </span>
         ) : (
           <span className="text-muted-foreground text-xs">—</span>
@@ -421,6 +626,30 @@ function BlinkitPOPageContent() {
       cell: (row) => <span className="text-muted-foreground">{row.po_expiry}</span>,
     },
     {
+      id: 'dispatchDate',
+      header: 'Dispatch Date',
+      accessorKey: 'dispatch_date',
+      width: 140,
+      minWidth: 110,
+      cell: (row) => row.dispatch_date ? (
+        <span className="text-sm text-emerald-700 font-medium">{fmtDate(row.dispatch_date)}</span>
+      ) : (
+        <span className="text-muted-foreground text-xs">—</span>
+      ),
+    },
+    {
+      id: 'courier',
+      header: 'Courier',
+      accessorKey: 'courier',
+      width: 140,
+      minWidth: 100,
+      cell: (row) => row.courier ? (
+        <span className="text-sm text-slate-700">{row.courier}</span>
+      ) : (
+        <span className="text-muted-foreground text-xs">—</span>
+      ),
+    },
+    {
       id: 'status',
       header: 'Status',
       accessorKey: 'status',
@@ -451,6 +680,26 @@ function BlinkitPOPageContent() {
               <PackagePlus className="h-4 w-4 mr-2" />
               {row.accepted_qty != null ? 'Edit Accepted Qty' : 'Set Accepted Qty'}
             </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openReceivedQtyDialog(row)}>
+              <CheckCircle2 className="h-4 w-4 mr-2" />
+              {row.received_qty != null ? 'Edit Received Qty' : 'Set Received Qty'}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openDeliveryDateDialog(row)}>
+              <Calendar className="h-4 w-4 mr-2" />
+              {row.deliveryDateRaw ? 'Edit Expected Delivery' : 'Set Expected Delivery'}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openExpiryDateDialog(row)}>
+              <Calendar className="h-4 w-4 mr-2" />
+              {row.expiryDateRaw ? 'Edit PO Expiry Date' : 'Set PO Expiry Date'}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openDispatchDateDialog(row)}>
+              <Calendar className="h-4 w-4 mr-2" />
+              {row.dispatch_date ? 'Edit Dispatch Date' : 'Set Dispatch Date'}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openCourierDialog(row)}>
+              <Truck className="h-4 w-4 mr-2" />
+              {row.courier ? 'Edit Courier' : 'Set Courier'}
+            </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem onClick={() => openStatusDialog(row)}>
               <RefreshCw className="h-4 w-4 mr-2" />
@@ -475,11 +724,21 @@ function BlinkitPOPageContent() {
   ];
 
   const filteredPoData = useMemo(() => {
+    let data = poData;
     if (filters.state !== 'all') {
-      return poData.filter((po) => po.state === filters.state);
+      data = data.filter((po) => po.state === filters.state);
     }
-    return poData;
-  }, [poData, filters.state]);
+    if (gridSearch.trim()) {
+      const q = gridSearch.toLowerCase();
+      data = data.filter(p =>
+        (p.po_number || '').toLowerCase().includes(q) ||
+        (p.product_name || '').toLowerCase().includes(q) ||
+        (p.blinkitSku || '').toLowerCase().includes(q) ||
+        (p.mapped_sku || '').toLowerCase().includes(q)
+      );
+    }
+    return data;
+  }, [poData, filters.state, gridSearch]);
 
   const stateOptions = useMemo(() => {
     const states = [...new Set(poData.map(p => p.state).filter(s => s && s !== '—'))].sort();
@@ -561,15 +820,15 @@ function BlinkitPOPageContent() {
 
         {/* Filters */}
         <FilterBar
-          searchPlaceholder="Search by PO number or product..."
-          searchValue={search}
-          onSearchChange={setSearch}
+          searchPlaceholder="Search PO number, product or SKU..."
+          searchValue={gridSearch}
+          onSearchChange={setGridSearch}
         >
           <div className="flex items-center gap-2 ml-auto">
             <FilterPanel
               values={filters}
               onChange={(key, value) => setFilters(prev => ({ ...prev, [key]: value }))}
-              onClear={() => { setFilters(DEFAULT_FILTER_VALUES); setSearch(''); }}
+              onClear={() => { setFilters(DEFAULT_FILTER_VALUES); setGlobalSearchRaw(''); setGridSearch(''); }}
               showDateRange={filterMode === 'all'}
               showChannel={false}
               showStatus
@@ -599,6 +858,7 @@ function BlinkitPOPageContent() {
                     'Product': p.product_name,
                     'Ordered Qty': p.ordered_qty,
                     'Accepted Qty': p.accepted_qty ?? '',
+                    'Received Qty': p.received_qty ?? '',
                     'ASG SKU': p.mapped_sku,
                     'Pending Qty': p.pending_qty,
                     'Unit Cost': p.unit_cost ?? '',
@@ -608,6 +868,8 @@ function BlinkitPOPageContent() {
                     'Ship To': p.shipTo,
                     'Expected Delivery': p.delivery,
                     'PO Expiry': p.po_expiry,
+                    'Dispatch Date': p.dispatch_date ? fmtDate(p.dispatch_date) : '',
+                    'Courier': p.courier || '',
                     'Status': p.status,
                   })),
                   'blinkit_po'
@@ -623,15 +885,15 @@ function BlinkitPOPageContent() {
         {/* Data Grid */}
         {filteredPoData.length > 0 ? (
           <>
-            <DataGrid data={filteredPoData} gridState={gridState} />
+            <DataGrid data={filteredPoData} gridState={gridState} getRowClass={(row) => getPoRowClass(row.status, row.expiryDateRaw)} getRowBgColor={(row) => getPoRowBgColor(row.status, row.expiryDateRaw)} />
             <div className="flex items-center justify-between pt-1">
               <p className="text-sm text-muted-foreground">{total.toLocaleString('en-IN')} line items</p>
               <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" onClick={() => { const p = Math.max(1, page - 1); setPage(p); fetchBlinkitPOs(p, filters.status, search, effectiveDateFrom, effectiveDateTo); }} disabled={page === 1 || isLoading}>
+                <Button variant="outline" size="sm" onClick={() => { const p = Math.max(1, page - 1); setPage(p); fetchBlinkitPOs(p, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo); }} disabled={page === 1 || isLoading}>
                   Previous
                 </Button>
                 <span className="text-sm text-muted-foreground">Page {page} of {totalPages}</span>
-                <Button variant="outline" size="sm" onClick={() => { const p = Math.min(totalPages, page + 1); setPage(p); fetchBlinkitPOs(p, filters.status, search, effectiveDateFrom, effectiveDateTo); }} disabled={page === totalPages || isLoading}>
+                <Button variant="outline" size="sm" onClick={() => { const p = Math.min(totalPages, page + 1); setPage(p); fetchBlinkitPOs(p, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo); }} disabled={page === totalPages || isLoading}>
                   Next
                 </Button>
               </div>
@@ -644,6 +906,48 @@ function BlinkitPOPageContent() {
           </div>
         )}
       </div>
+
+      {/* Received Qty Dialog */}
+      <Dialog open={actionDialogType === 'received_qty'} onOpenChange={(open) => { if (!open) closeDialog(); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>
+              {actionRow?.received_qty != null ? 'Edit Received Qty' : 'Set Received Qty'}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            {actionRow && (
+              <p className="text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">{actionRow.po_number}</span>
+                {' — '}{actionRow.product_name || actionRow.blinkitSku}
+              </p>
+            )}
+            <p className="text-xs text-muted-foreground">
+              Ordered: <strong>{actionRow?.ordered_qty}</strong>
+              {actionRow?.accepted_qty != null && <> &nbsp;·&nbsp; Accepted: <strong>{actionRow.accepted_qty}</strong></>}
+            </p>
+            <Input
+              type="number"
+              min={0}
+              placeholder="Enter received quantity"
+              value={receivedQtyInput}
+              onChange={(e) => setReceivedQtyInput(e.target.value)}
+              autoFocus
+            />
+            {actionRow && receivedQtyInput !== '' && Number(receivedQtyInput) < actionRow.ordered_qty && (
+              <p className="text-xs text-amber-600">
+                Short delivery: {Number(receivedQtyInput)} of {actionRow.ordered_qty} units
+              </p>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeDialog} disabled={isSaving}>Cancel</Button>
+            <Button onClick={handleSaveReceivedQty} disabled={isSaving}>
+              {isSaving ? 'Saving...' : 'Save'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Accepted Qty Dialog */}
       <Dialog open={actionDialogType === 'accepted_qty'} onOpenChange={(open) => { if (!open) closeDialog(); }}>
@@ -713,6 +1017,143 @@ function BlinkitPOPageContent() {
             <Button variant="outline" onClick={closeDialog} disabled={isSaving}>Cancel</Button>
             <Button onClick={handleSaveStatus} disabled={isSaving}>
               {isSaving ? 'Saving...' : 'Update'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Set/Edit Courier Dialog */}
+      <Dialog open={actionDialogType === 'courier'} onOpenChange={(open) => { if (!open) closeDialog(); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{actionRow?.courier ? 'Edit Courier' : 'Set Courier'}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            {actionRow && (
+              <p className="text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">{actionRow.po_number}</span>
+              </p>
+            )}
+            <Input
+              list="blk-carrier-list"
+              placeholder="Type or select a carrier…"
+              value={courierInput}
+              onChange={(e) => setCourierInput(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSaveCourier()}
+              autoFocus
+            />
+            <datalist id="blk-carrier-list">
+              {carriers.map(c => <option key={c} value={c} />)}
+            </datalist>
+            {courierInput && (
+              <Button variant="ghost" size="sm" className="text-xs text-red-600 h-7 px-2" onClick={() => setCourierInput('')}>
+                Clear
+              </Button>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeDialog} disabled={isSaving}>Cancel</Button>
+            <Button onClick={handleSaveCourier} disabled={isSaving}>
+              {isSaving ? 'Saving...' : 'Save'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Set/Edit Dispatch Date Dialog */}
+      <Dialog open={actionDialogType === 'dispatch_date'} onOpenChange={(open) => { if (!open) closeDialog(); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{actionRow?.dispatch_date ? 'Edit Dispatch Date' : 'Set Dispatch Date'}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            {actionRow && (
+              <p className="text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">{actionRow.po_number}</span>
+              </p>
+            )}
+            <Input
+              type="date"
+              value={dispatchDateInput}
+              onChange={(e) => setDispatchDateInput(e.target.value)}
+              autoFocus
+            />
+            {dispatchDateInput && (
+              <Button variant="ghost" size="sm" className="text-xs text-red-600 h-7 px-2" onClick={() => setDispatchDateInput('')}>
+                Clear date
+              </Button>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeDialog} disabled={isSaving}>Cancel</Button>
+            <Button onClick={handleSaveDispatchDate} disabled={isSaving}>
+              {isSaving ? 'Saving...' : 'Save'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Set/Edit Expected Delivery Date Dialog */}
+      <Dialog open={actionDialogType === 'delivery_date'} onOpenChange={(open) => { if (!open) closeDialog(); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{actionRow?.deliveryDateRaw ? 'Edit Expected Delivery' : 'Set Expected Delivery'}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            {actionRow && (
+              <p className="text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">{actionRow.po_number}</span>
+              </p>
+            )}
+            <Input
+              type="date"
+              value={deliveryDateInput}
+              onChange={(e) => setDeliveryDateInput(e.target.value)}
+              autoFocus
+            />
+            {deliveryDateInput && (
+              <Button variant="ghost" size="sm" className="text-xs text-red-600 h-7 px-2" onClick={() => setDeliveryDateInput('')}>
+                Clear date
+              </Button>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeDialog} disabled={isSaving}>Cancel</Button>
+            <Button onClick={handleSaveDeliveryDate} disabled={isSaving}>
+              {isSaving ? 'Saving...' : 'Save'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Set/Edit PO Expiry Date Dialog */}
+      <Dialog open={actionDialogType === 'expiry_date'} onOpenChange={(open) => { if (!open) closeDialog(); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>{actionRow?.expiryDateRaw ? 'Edit PO Expiry Date' : 'Set PO Expiry Date'}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            {actionRow && (
+              <p className="text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">{actionRow.po_number}</span>
+              </p>
+            )}
+            <Input
+              type="date"
+              value={expiryDateInput}
+              onChange={(e) => setExpiryDateInput(e.target.value)}
+              autoFocus
+            />
+            {expiryDateInput && (
+              <Button variant="ghost" size="sm" className="text-xs text-red-600 h-7 px-2" onClick={() => setExpiryDateInput('')}>
+                Clear date
+              </Button>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={closeDialog} disabled={isSaving}>Cancel</Button>
+            <Button onClick={handleSaveExpiryDate} disabled={isSaving}>
+              {isSaving ? 'Saving...' : 'Save'}
             </Button>
           </DialogFooter>
         </DialogContent>

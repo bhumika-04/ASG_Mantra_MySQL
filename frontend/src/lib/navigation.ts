@@ -91,6 +91,18 @@ export const navigationItems: NavItem[] = [
     roles: ROUTE_PERMISSIONS['/blinkit-sales'],
   },
   {
+    title: 'Amazon Inventory',
+    href: '/amazon-inventory',
+    icon: Truck,
+    roles: ROUTE_PERMISSIONS['/amazon-inventory'],
+  },
+  {
+    title: 'Blinkit Inventory',
+    href: '/blinkit-inventory',
+    icon: Store,
+    roles: ROUTE_PERMISSIONS['/blinkit-inventory'],
+  },
+  {
     title: 'Low Inventory Alerts',
     href: '/low-stock-alerts',
     icon: AlertTriangle,
@@ -163,16 +175,40 @@ export const navigationGroups: NavGroup[] = [
         icon: TrendingUp,
         roles: ROUTE_PERMISSIONS['/sales-overview'],
       },
+      {
+        title: 'Amazon Sales',
+        href: '/amazon-sales',
+        icon: Truck,
+        roles: ROUTE_PERMISSIONS['/amazon-sales'],
+      },
+      {
+        title: 'Blinkit Sales',
+        href: '/blinkit-sales',
+        icon: Store,
+        roles: ROUTE_PERMISSIONS['/blinkit-sales'],
+      },
     ],
   },
   {
     title: 'Inventory',
     items: [
       {
-        title: 'Inventory',
+        title: 'In-House Inventory',
         href: '/inventory',
         icon: Package,
         roles: ROUTE_PERMISSIONS['/inventory'],
+      },
+      {
+        title: 'Amazon Inventory',
+        href: '/amazon-inventory',
+        icon: Truck,
+        roles: ROUTE_PERMISSIONS['/amazon-inventory'],
+      },
+      {
+        title: 'Blinkit Inventory',
+        href: '/blinkit-inventory',
+        icon: Store,
+        roles: ROUTE_PERMISSIONS['/blinkit-inventory'],
       },
       {
         title: 'Low Inventory Alerts',
@@ -225,23 +261,6 @@ export const navigationGroups: NavGroup[] = [
         href: '/blinkit-po-overview',
         icon: Store,
         roles: ROUTE_PERMISSIONS['/blinkit-po-overview'],
-      },
-    ],
-  },
-  {
-    title: 'Sales',
-    items: [
-      {
-        title: 'Amazon Sales',
-        href: '/amazon-sales',
-        icon: Truck,
-        roles: ROUTE_PERMISSIONS['/amazon-sales'],
-      },
-      {
-        title: 'Blinkit Sales',
-        href: '/blinkit-sales',
-        icon: Store,
-        roles: ROUTE_PERMISSIONS['/blinkit-sales'],
       },
     ],
   },

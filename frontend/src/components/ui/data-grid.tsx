@@ -47,6 +47,9 @@ interface DataGridProps<T> {
   onRowClick?: (row: T) => void;
   gridState: ReturnType<typeof useDataGrid<T>>;
   pageSize?: number;
+  getRowClass?: (row: T) => string | undefined;
+  /** Return an explicit CSS color string for sticky-column backgrounds (e.g. 'rgb(254,242,242)' for red). Avoids Tailwind cascade issues where bg-background overrides row color classes. */
+  getRowBgColor?: (row: T) => string | undefined;
 }
 
 export type RowDensity = 'compact' | 'normal' | 'comfortable';
@@ -268,6 +271,8 @@ export function DataGrid<T extends Record<string, any>>({
   onRowClick,
   gridState,
   pageSize: defaultPageSize = 25,
+  getRowClass,
+  getRowBgColor,
 }: DataGridProps<T>) {
   const {
     columns,
@@ -283,6 +288,8 @@ export function DataGrid<T extends Record<string, any>>({
     draggedColumn,
     setDraggedColumn,
   } = gridState;
+
+  const [hoveredRow, setHoveredRow] = React.useState<number | null>(null);
 
   // Sort data
   const sortedData = React.useMemo(() => {
@@ -447,7 +454,7 @@ export function DataGrid<T extends Record<string, any>>({
                   left: 0,
                   top: 0,
                   zIndex: 21,
-                  background: '#f1f5f9',
+                  background: 'var(--muted)',
                   boxShadow: !hasStickyUserCols ? frozenShadow : undefined,
                 }}
               >
@@ -470,11 +477,12 @@ export function DataGrid<T extends Record<string, any>>({
                   style={{
                     position: 'sticky',
                     top: 0,
+                    overflow: 'hidden',
+                    width: `${columnWidths[column.id] || column.width || 150}px`,
+                    maxWidth: `${columnWidths[column.id] || column.width || 150}px`,
                     zIndex: column.sticky ? 20 : 10,
-                    background: '#f1f5f9',
+                    background: 'var(--muted)',
                     ...(column.sticky ? {
-                      width: `${columnWidths[column.id] || column.width || 150}px`,
-                      maxWidth: `${columnWidths[column.id] || column.width || 150}px`,
                       left: `${stickyOffsets[column.id]}px`,
                       boxShadow: column === lastStickyUserCol ? frozenShadow : undefined,
                     } : {}),
@@ -510,26 +518,34 @@ export function DataGrid<T extends Record<string, any>>({
 
           {/* Body */}
           <tbody className="divide-y">
-            {paginatedData.map((row, rowIndex) => (
+            {paginatedData.map((row, rowIndex) => {
+              const baseBg = getRowBgColor?.(row) ?? 'var(--card)';
+              const isHovered = hoveredRow === rowIndex;
+              // On hover: blend a subtle overlay. For colored rows keep color, just darken slightly.
+              const cellBg = isHovered
+                ? (baseBg === 'var(--card)' ? 'var(--muted)' : baseBg)
+                : baseBg;
+              const w = (id: string, col: GridColumn<T>) => columnWidths[id] || col.width || 150;
+              return (
               <tr
                 key={rowIndex}
-                className={cn(
-                  'hover:bg-muted/30 transition-colors',
-                  onRowClick && 'cursor-pointer'
-                )}
+                className={cn('transition-colors', onRowClick && 'cursor-pointer')}
+                onMouseEnter={() => setHoveredRow(rowIndex)}
+                onMouseLeave={() => setHoveredRow(null)}
                 onClick={() => onRowClick?.(row)}
               >
-                {/* S.No cell */}
+                {/* S.No cell — sticky */}
                 <td
                   className={cn('px-3 text-sm text-muted-foreground font-medium tabular-nums', densityClasses[rowDensity])}
                   style={{
                     width: `${SNO_WIDTH}px`,
                     minWidth: `${SNO_WIDTH}px`,
                     maxWidth: `${SNO_WIDTH}px`,
+                    overflow: 'hidden',
                     position: 'sticky',
                     left: 0,
                     zIndex: 3,
-                    backgroundColor: '#ffffff',
+                    backgroundColor: cellBg,
                     boxShadow: !hasStickyUserCols ? frozenShadow : undefined,
                   }}
                 >
@@ -545,17 +561,17 @@ export function DataGrid<T extends Record<string, any>>({
                       column.align === 'right' && 'text-right'
                     )}
                     title={
-                      column.sticky && column.accessorKey && typeof row[column.accessorKey] === 'string'
+                      column.accessorKey && typeof row[column.accessorKey] === 'string'
                         ? (row[column.accessorKey] as string)
                         : undefined
                     }
                     style={{
                       overflow: 'hidden',
-                      backgroundColor: '#ffffff',
+                      width: `${w(column.id, column)}px`,
+                      maxWidth: `${w(column.id, column)}px`,
+                      backgroundColor: cellBg,
                       ...(column.sticky ? {
                         position: 'sticky',
-                        width: `${columnWidths[column.id] || column.width || 150}px`,
-                        maxWidth: `${columnWidths[column.id] || column.width || 150}px`,
                         left: `${stickyOffsets[column.id]}px`,
                         zIndex: 3,
                         boxShadow: column === lastStickyUserCol ? frozenShadow : undefined,
@@ -572,7 +588,8 @@ export function DataGrid<T extends Record<string, any>>({
                   </td>
                 ))}
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>

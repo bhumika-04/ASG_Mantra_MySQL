@@ -3,8 +3,8 @@ Inventory Router - Inventory Management
 Handles inventory queries, updates, and low stock alerts
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
-from sqlalchemy import func, or_
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func, or_, select
 from typing import Optional, List
 from datetime import datetime
 
@@ -39,8 +39,12 @@ async def get_inventory(
     Get inventory list with search, filtering, and pagination.
     Defaults to latest inventory date (date-wise snapshots).
     """
-    # Base query with product join
-    query = db.query(Inventory).join(Product, Inventory.ProductId == Product.Id)
+    # Base query with product join — eager-load relationships to avoid N+1
+    query = (
+        db.query(Inventory)
+        .join(Product, Inventory.ProductId == Product.Id)
+        .options(joinedload(Inventory.product), joinedload(Inventory.asg_warehouse))
+    )
 
     # Date filtering — default to latest date
     if inventory_date:
@@ -69,17 +73,21 @@ async def get_inventory(
     if low_stock_only:
         query = query.filter(Inventory.CurrentStock <= LOW_STOCK_THRESHOLD)
 
-    # Get total count
-    total = query.count()
-
-    # Apply pagination
+    # Count + fetch in a single round-trip using window function
     offset = (page - 1) * page_size
-    inventory_items = query.order_by(Inventory.LastUpdated.desc()).offset(offset).limit(page_size).all()
+    rows_with_count = (
+        query
+        .add_columns(func.count().over().label('_total'))
+        .order_by(Inventory.LastUpdated.desc())
+        .offset(offset).limit(page_size).all()
+    )
+    total = rows_with_count[0][-1] if rows_with_count else 0
+    inventory_items = [r[0] for r in rows_with_count]
 
     # Available dates for the date picker
     available_dates = db.query(Inventory.InventoryDate).distinct().order_by(
         Inventory.InventoryDate.desc()
-    ).limit(60).all()
+    ).all()
 
     # Format response with product details
     items = []
@@ -141,6 +149,7 @@ async def get_low_stock_dashboard(
             .filter(Inventory.InventoryDate == latest_date)
             .subquery()
         )
+    if latest_date:
         rows = (
             db.query(Product, inv_sq)
             .outerjoin(inv_sq, Product.Id == inv_sq.c.ProductId)
@@ -276,9 +285,15 @@ async def get_dispatch_overview(
     - Amazon stock            : AmazonInventory.SellableOnHandUnits (latest ReportDate)
     - Blinkit stock           : BlinkitInventory.BackendInvQty       (latest ReportDate)
     """
-    # ── Latest report dates for each platform ────────────────────────────
-    latest_amazon = db.query(func.max(AmazonInventoryData.ReportDate)).scalar()
-    latest_blinkit = db.query(func.max(BlinkitInventoryData.ReportDate)).scalar()
+    # ── Latest report dates for each platform — single round-trip ────────
+    from sqlalchemy import text as _text
+    _dates = db.execute(_text("""
+        SELECT
+            (SELECT MAX(ReportDate)  FROM AmazonInventory)  AS amz_date,
+            (SELECT MAX(ReportDate)  FROM BlinkitInventory) AS blk_date
+    """)).fetchone()
+    latest_amazon  = _dates.amz_date  if _dates else None
+    latest_blinkit = _dates.blk_date if _dates else None
 
     # ── Amazon stock subquery ─────────────────────────────────────────────
     amz_q = db.query(
@@ -304,11 +319,12 @@ async def get_dispatch_overview(
     blinkit_sq = blk_q.group_by(BlinkitInventoryData.ItemId).subquery()
 
     # ── ASG warehouse packed/unpacked subquery (latest or selected date) ──
-    # Available dates for picker
-    available_inv_dates = db.query(Inventory.InventoryDate).distinct().order_by(
+    # Fetch available dates and latest date in one round-trip
+    inv_date_rows = db.query(Inventory.InventoryDate).distinct().order_by(
         Inventory.InventoryDate.desc()
-    ).limit(60).all()
-    available_inv_dates = [d[0].isoformat() for d in available_inv_dates if d[0]]
+    ).all()
+    available_inv_dates = [d[0].isoformat() for d in inv_date_rows if d[0]]
+    latest_inv_date = inv_date_rows[0][0] if inv_date_rows else None
 
     if inventory_date:
         try:
@@ -316,7 +332,7 @@ async def get_dispatch_overview(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid inventory_date format. Use YYYY-MM-DD.")
     else:
-        selected_inv_date = db.query(func.max(Inventory.InventoryDate)).scalar()
+        selected_inv_date = latest_inv_date
 
     wh_q = db.query(
         Inventory.ProductId.label('product_id'),

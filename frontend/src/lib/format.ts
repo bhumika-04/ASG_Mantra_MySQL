@@ -1,3 +1,16 @@
+/**
+ * Convert an all-uppercase product name to title case for display.
+ * If the string is already mixed case, it is returned unchanged.
+ */
+export function toTitleCase(str: string | null | undefined): string {
+  if (!str) return str ?? '';
+  const letters = str.replace(/[^a-zA-Z]/g, '');
+  if (letters.length > 3 && letters === letters.toUpperCase()) {
+    return str.toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+  }
+  return str;
+}
+
 /** Format a number using the Indian number system (lakhs/crores). */
 export function fmtN(n: number): string {
   return n.toLocaleString('en-IN');

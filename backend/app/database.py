@@ -11,10 +11,11 @@ from .config import settings
 # Create SQLAlchemy engine
 engine = create_engine(
     settings.database_url,
-    echo=False,  # Disable SQL query logging for cleaner output
-    pool_pre_ping=True,  # Test connections before using them
-    pool_size=10,  # Connection pool size
-    max_overflow=20,  # Max connections beyond pool_size
+    echo=False,
+    pool_pre_ping=True,   # detect dropped connections before handing to request
+    pool_size=10,
+    max_overflow=20,
+    pool_recycle=3600,
 )
 
 # Create SessionLocal class

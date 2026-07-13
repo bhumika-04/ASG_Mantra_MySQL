@@ -1,6 +1,6 @@
 ﻿'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
@@ -13,6 +13,9 @@ import {
   ClipboardList,
   AlertTriangle,
   ArrowRight,
+  ShoppingCart,
+  Truck,
+  XCircle,
 } from 'lucide-react';
 import {
   PieChart,
@@ -108,7 +111,7 @@ function fmtRangeDate(iso: string): string {
 }
 
 export default function DashboardPage() {
-  const { filterMode, customStart, customEnd } = useFilter();
+  const { filterMode, customStart, customEnd, channel } = useFilter();
 
   const dateRangeLabel = (() => {
     if (filterMode === 'all') return null;
@@ -119,6 +122,11 @@ export default function DashboardPage() {
   })();
 
   const [topProductsChannel, setTopProductsChannel] = useState('all');
+
+  // Sync top-products channel selector to global channel filter
+  useEffect(() => {
+    setTopProductsChannel(channel === 'all' ? 'all' : channel);
+  }, [channel]);
   const [isChartLoading, setIsChartLoading] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
   const [stats, setStats] = useState<DashboardStats>({
@@ -143,13 +151,17 @@ export default function DashboardPage() {
   const [lowStockCounts, setLowStockCounts] = useState({ critical: 0, low: 0 });
   const [chartData, setChartData] = useState<ChartData>({ monthly_sales: [], top_products: [], granularity: 'monthly' });
 
-  // Fetch stats & low stock once on mount
+  const isFirstChartRender = useRef(true);
+
+  // Fetch stats, low stock, AND charts together on mount — single parallel burst
   useEffect(() => {
     const fetchInitial = async () => {
       try {
-        const [statsData, lowStockData]: any[] = await Promise.all([
+        const { start_date, end_date } = computeDateRange(filterMode, customStart, customEnd);
+        const [statsData, lowStockData, charts]: any[] = await Promise.all([
           api.dashboard.getInventoryStats(),
           api.inventory.getLowStock({ limit: 10 }),
+          api.dashboard.getCharts({ start_date, end_date }),
         ]);
         setStats(statsData);
         setLowInventoryItems(lowStockData.items || []);
@@ -157,19 +169,29 @@ export default function DashboardPage() {
           critical: lowStockData.critical_count || 0,
           low: lowStockData.low_count || 0,
         });
+        setChartData({
+          monthly_sales: charts.monthly_sales || [],
+          top_products: charts.top_products || [],
+          granularity: charts.granularity || 'monthly',
+        });
       } catch (error) {
         console.error('Error fetching dashboard data:', error);
       } finally {
         setIsLoading(false);
+        setIsChartLoading(false);
       }
     };
     fetchInitial();
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Re-fetch charts whenever filter changes
+  // Re-fetch charts on filter change (skip first render — handled by mount effect above)
   useEffect(() => {
+    if (isFirstChartRender.current) {
+      isFirstChartRender.current = false;
+      return;
+    }
     const { start_date, end_date } = computeDateRange(filterMode, customStart, customEnd);
-    if (filterMode === 'custom' && (!start_date || !end_date)) return;
+    if (filterMode === 'custom' && !start_date) return;
     setIsChartLoading(true);
     api.dashboard.getCharts({ start_date, end_date })
       .then((charts: any) => {
@@ -182,6 +204,17 @@ export default function DashboardPage() {
       .catch((err: any) => console.error('Chart fetch error:', err))
       .finally(() => setIsChartLoading(false));
   }, [filterMode, customStart, customEnd]);
+
+  // Channel-derived KPI values (no extra fetch needed — all fields already in stats)
+  // Packed/Unpacked are ASG warehouse totals — no per-channel breakdown exists
+  const kpiPacked    = stats.packedInventory;
+  const kpiUnpacked  = stats.unpackedInventory;
+  const kpiPendingPOs = channel === 'amazon' ? stats.amazonPendingPOs : channel === 'blinkit' ? stats.blinkitPendingPOs : stats.pendingPOs;
+  const kpiPendingDesc = channel === 'amazon'
+    ? 'Amazon POs pending'
+    : channel === 'blinkit'
+      ? 'Blinkit POs pending'
+      : `${stats.amazonPendingPOs} Amazon · ${stats.blinkitPendingPOs} Blinkit`;
 
   if (isLoading) {
     return (
@@ -219,24 +252,56 @@ export default function DashboardPage() {
           />
           <StatsCard
             title="Packed Inventory"
-            value={stats.packedInventory.toLocaleString('en-IN')}
+            value={kpiPacked.toLocaleString('en-IN')}
             icon={PackageCheck}
             description="Ready to ship"
             variant="blue"
           />
           <StatsCard
             title="Unpacked Inventory"
-            value={stats.unpackedInventory.toLocaleString('en-IN')}
+            value={kpiUnpacked.toLocaleString('en-IN')}
             icon={PackageOpen}
             description="Raw stock"
             variant="yellow"
           />
           <StatsCard
             title="Pending POs"
-            value={stats.pendingPOs.toLocaleString('en-IN')}
+            value={kpiPendingPOs.toLocaleString('en-IN')}
             icon={ClipboardList}
-            description={`${stats.delayedPOs} delayed`}
+            description={kpiPendingDesc}
             variant={stats.delayedPOs > 0 ? 'orange' : 'default'}
+          />
+        </StatsGrid>
+
+        {/* Channel Stock + Alert KPIs */}
+        <StatsGrid columns={4}>
+          <StatsCard
+            title="Amazon Stock"
+            value={stats.amazonInventory.toLocaleString('en-IN')}
+            icon={ShoppingCart}
+            description="Sellable units at Amazon (latest)"
+            variant="blue"
+          />
+          <StatsCard
+            title="Blinkit Stock"
+            value={stats.blinkitInventory.toLocaleString('en-IN')}
+            icon={Truck}
+            description="Units at Blinkit hub (latest)"
+            variant="yellow"
+          />
+          <StatsCard
+            title="Low Stock Alerts"
+            value={stats.lowInventoryCount.toLocaleString('en-IN')}
+            icon={AlertTriangle}
+            description="Unresolved alerts"
+            variant={stats.lowInventoryCount > 0 ? 'orange' : 'default'}
+          />
+          <StatsCard
+            title="Out of Stock"
+            value={stats.outOfStockCount.toLocaleString('en-IN')}
+            icon={XCircle}
+            description="ASG SKUs at zero units"
+            variant={stats.outOfStockCount > 0 ? 'red' : 'default'}
           />
         </StatsGrid>
 
@@ -278,8 +343,8 @@ export default function DashboardPage() {
                     <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
                     <Tooltip labelFormatter={(v) => formatPeriodLabel(v, chartData.granularity)} formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString('en-IN')}`, '']} />
                     <Legend />
-                    <Area type="monotone" dataKey="Amazon" stroke="#60a5fa" strokeWidth={2} fillOpacity={1} fill="url(#colorAmazon)" />
-                    <Area type="monotone" dataKey="Blinkit" stroke="#fbbf24" strokeWidth={2} fillOpacity={1} fill="url(#colorBlinkit)" />
+                    {channel !== 'blinkit' && <Area type="monotone" dataKey="Amazon" stroke="#60a5fa" strokeWidth={2} fillOpacity={1} fill="url(#colorAmazon)" />}
+                    {channel !== 'amazon' && <Area type="monotone" dataKey="Blinkit" stroke="#fbbf24" strokeWidth={2} fillOpacity={1} fill="url(#colorBlinkit)" />}
                   </AreaChart>
                 </ResponsiveContainer>
               </CardContent>
@@ -303,8 +368,8 @@ export default function DashboardPage() {
                     <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
                     <Tooltip labelFormatter={(v) => formatPeriodLabel(v, chartData.granularity)} formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString('en-IN')}`, '']} />
                     <Legend />
-                    <Bar dataKey="Amazon" fill="#60a5fa" radius={[4, 4, 0, 0]} />
-                    <Bar dataKey="Blinkit" fill="#fbbf24" radius={[4, 4, 0, 0]} />
+                    {channel !== 'blinkit' && <Bar dataKey="Amazon" fill="#60a5fa" radius={[4, 4, 0, 0]} />}
+                    {channel !== 'amazon' && <Bar dataKey="Blinkit" fill="#fbbf24" radius={[4, 4, 0, 0]} />}
                   </BarChart>
                 </ResponsiveContainer>
               </CardContent>
@@ -322,10 +387,14 @@ export default function DashboardPage() {
                   const total = amazonTotal + blinkitTotal;
                   const amazonPct = total > 0 ? Math.round((amazonTotal / total) * 100) : 0;
                   const blinkitPct = total > 0 ? 100 - amazonPct : 0;
-                  const distData = [
-                    { name: 'Amazon', value: amazonTotal, fill: '#60a5fa' },
-                    { name: 'Blinkit', value: blinkitTotal, fill: '#fbbf24' },
-                  ];
+                  const distData = channel === 'amazon'
+                    ? [{ name: 'Amazon', value: amazonTotal, fill: '#60a5fa' }]
+                    : channel === 'blinkit'
+                      ? [{ name: 'Blinkit', value: blinkitTotal, fill: '#fbbf24' }]
+                      : [
+                          { name: 'Amazon', value: amazonTotal, fill: '#60a5fa' },
+                          { name: 'Blinkit', value: blinkitTotal, fill: '#fbbf24' },
+                        ];
                   return (
                     <div className="flex-1 flex flex-col">
                       <ResponsiveContainer width="100%" height={200}>
@@ -342,21 +411,25 @@ export default function DashboardPage() {
                       </ResponsiveContainer>
                       {/* Channel breakdown — no overlap, always readable */}
                       <div className="flex items-center justify-center gap-8 pt-3 border-t mt-auto">
-                        <div className="flex items-center gap-2.5">
-                          <div className="h-3 w-3 rounded-full bg-blue-400 shrink-0" />
-                          <div>
-                            <p className="text-sm font-bold leading-none">{amazonPct}%</p>
-                            <p className="text-xs text-muted-foreground mt-0.5">Amazon</p>
+                        {channel !== 'blinkit' && (
+                          <div className="flex items-center gap-2.5">
+                            <div className="h-3 w-3 rounded-full bg-blue-400 shrink-0" />
+                            <div>
+                              <p className="text-sm font-bold leading-none">{channel === 'amazon' ? '100' : amazonPct}%</p>
+                              <p className="text-xs text-muted-foreground mt-0.5">Amazon</p>
+                            </div>
                           </div>
-                        </div>
-                        <div className="h-8 w-px bg-border" />
-                        <div className="flex items-center gap-2.5">
-                          <div className="h-3 w-3 rounded-full bg-yellow-400 shrink-0" />
-                          <div>
-                            <p className="text-sm font-bold leading-none">{blinkitPct}%</p>
-                            <p className="text-xs text-muted-foreground mt-0.5">Blinkit</p>
+                        )}
+                        {channel === 'all' && <div className="h-8 w-px bg-border" />}
+                        {channel !== 'amazon' && (
+                          <div className="flex items-center gap-2.5">
+                            <div className="h-3 w-3 rounded-full bg-yellow-400 shrink-0" />
+                            <div>
+                              <p className="text-sm font-bold leading-none">{channel === 'blinkit' ? '100' : blinkitPct}%</p>
+                              <p className="text-xs text-muted-foreground mt-0.5">Blinkit</p>
+                            </div>
                           </div>
-                        </div>
+                        )}
                       </div>
                     </div>
                   );

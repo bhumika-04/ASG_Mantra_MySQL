@@ -49,6 +49,9 @@ class BlinkitPOItemData(Base):
     # Accepted (actual shipped) quantity — set manually after dispatch
     AcceptedQty = Column(Integer, nullable=True)
 
+    # Received quantity — set manually on delivery
+    ReceivedQty = Column(Integer, nullable=True)
+
     # Product link (resolved from ItemCode/EagleCode at upload time)
     ProductId = Column(Integer, ForeignKey("Products.Id"), nullable=True, index=True)
 
@@ -74,5 +77,7 @@ class BlinkitPOItemData(Base):
             "unitBaseCost": float(self.UnitBaseCost) if self.UnitBaseCost else None,
             "totalAmount": float(self.TotalAmount) if self.TotalAmount else None,
             "acceptedQty": self.AcceptedQty,
+            "receivedQty": self.ReceivedQty,
+            "itemStatus": self.ItemStatus,
             "createdAt": self.CreatedAt.isoformat() if self.CreatedAt else None,
         }
