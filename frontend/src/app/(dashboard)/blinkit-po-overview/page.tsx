@@ -106,6 +106,7 @@ export default function BlinkitPOOverviewPage() {
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
+  const PAGE_SIZE = 50;
 
   const [statsKey, setStatsKey] = useState(0);
 
@@ -215,6 +216,11 @@ export default function BlinkitPOOverviewPage() {
       fetchGrid(1, globalSearch, filters.status, effectiveDateFrom, effectiveDateTo);
     }
   }, [filterMode, customStart, globalSearch, filters.status, effectiveDateFrom, effectiveDateTo, fetchGrid]);
+
+  const handlePageChange = useCallback((newPage: number) => {
+    setPage(newPage);
+    fetchGrid(newPage, globalSearch, filters.status, effectiveDateFrom, effectiveDateTo);
+  }, [globalSearch, filters.status, effectiveDateFrom, effectiveDateTo, fetchGrid]);
 
   const poStatusOptions = [
     { label: 'All',        value: 'all' },
@@ -521,19 +527,9 @@ export default function BlinkitPOOverviewPage() {
               onRowClick={(row) => router.push(`/blinkit-po?search=${encodeURIComponent(row.po_number)}`)}
               getRowClass={getExpiryRowClass}
               getRowBgColor={getExpiryRowBgColor}
+              serverPagination={gridSearch.trim() ? undefined : { total, page, pageSize: PAGE_SIZE, onPageChange: handlePageChange }}
             />
-            <div className="flex items-center justify-between pt-1">
-              <p className="text-sm text-muted-foreground">{total.toLocaleString('en-IN')} purchase orders</p>
-              <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" onClick={() => { const p = Math.max(1, page - 1); setPage(p); fetchGrid(p, globalSearch, filters.status, effectiveDateFrom, effectiveDateTo); }} disabled={page === 1 || isLoading}>
-                  Previous
-                </Button>
-                <span className="text-sm text-muted-foreground">Page {page} of {totalPages}</span>
-                <Button variant="outline" size="sm" onClick={() => { const p = Math.min(totalPages, page + 1); setPage(p); fetchGrid(p, globalSearch, filters.status, effectiveDateFrom, effectiveDateTo); }} disabled={page === totalPages || isLoading}>
-                  Next
-                </Button>
-              </div>
-            </div>
+            <p className="text-sm text-muted-foreground pt-1">{total.toLocaleString('en-IN')} purchase orders</p>
           </>
         )}
       </div>

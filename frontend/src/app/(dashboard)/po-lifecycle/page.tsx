@@ -714,6 +714,8 @@ export default function POLifecyclePage() {
                 <DataGrid
                   data={displayOrders}
                   gridState={gridState}
+                  hideFooter={true}
+                  serverPagination={{ total: displayOrders.length, page: 1, pageSize: Math.max(displayOrders.length, 1), onPageChange: () => {} }}
                   getRowClass={(row) => getPoRowClass(row.status, row.expiryDateRaw)}
                   getRowBgColor={(row) => getPoRowBgColor(row.status, row.expiryDateRaw)}
                   onRowClick={(row) => {
@@ -721,11 +723,11 @@ export default function POLifecyclePage() {
                     router.push(`${path}?search=${encodeURIComponent(row.po_number)}`);
                   }}
                 />
-                {totalPages > 1 && (
-                  <div className="flex items-center justify-between pt-4">
-                    <p className="text-sm text-muted-foreground">
-                      Page {page} of {totalPages} &nbsp;·&nbsp; {displayOrders.length} shown
-                    </p>
+                <div className="flex items-center justify-between pt-4">
+                  <p className="text-sm text-muted-foreground">
+                    Page {page} of {totalPages} &nbsp;·&nbsp; {displayOrders.length} shown
+                  </p>
+                  {totalPages > 1 && (
                     <div className="flex items-center gap-2">
                       <Button
                         variant="outline"
@@ -744,8 +746,8 @@ export default function POLifecyclePage() {
                         Next
                       </Button>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </>
             ) : (
               <div className="text-center py-12 text-muted-foreground">

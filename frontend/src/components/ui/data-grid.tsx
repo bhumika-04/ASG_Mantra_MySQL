@@ -57,6 +57,8 @@ interface DataGridProps<T> {
     pageSize: number;
     onPageChange: (page: number) => void;
   };
+  /** Hide the built-in pagination footer entirely. Use when a parent component provides its own navigation (e.g. po-lifecycle mixed-channel pagination). */
+  hideFooter?: boolean;
 }
 
 export type RowDensity = 'compact' | 'normal' | 'comfortable';
@@ -281,6 +283,7 @@ export function DataGrid<T extends Record<string, any>>({
   getRowClass,
   getRowBgColor,
   serverPagination,
+  hideFooter = false,
 }: DataGridProps<T>) {
   const {
     columns,
@@ -614,7 +617,7 @@ export function DataGrid<T extends Record<string, any>>({
       </div>
 
       {/* Pagination Footer */}
-      {effectiveTotal > 0 && (
+      {!hideFooter && effectiveTotal > 0 && (
         <div className="flex items-center justify-between mt-3 px-1">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             {!serverPagination && (
