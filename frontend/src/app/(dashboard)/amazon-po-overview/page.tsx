@@ -21,6 +21,7 @@ import {
   PackageCheck,
   Download,
   Pencil,
+  ShoppingCart,
 } from 'lucide-react';
 import api from '@/lib/api';
 import { fmtDate } from '@/lib/format';
@@ -264,6 +265,10 @@ export default function AmazonPOOverviewPage() {
     };
   }, [statsData]);
 
+  // Falls back to the grid total until the stats call lands
+  const totalPOs = statsData?.total_pos ?? total;
+  const totalUnits = statsData?.total_units ?? 0;
+
   const getStatusBadge = (status: string) => {
     const style = BADGE_STYLES[status] || 'bg-gray-50 text-gray-700 border-gray-200';
     const iconMap: Record<string, React.ReactNode> = {
@@ -401,7 +406,17 @@ export default function AmazonPOOverviewPage() {
     <ProtectedRoute>
       <div className="p-6 space-y-6">
         {/* KPI Cards */}
-        <div className="grid grid-cols-3 md:grid-cols-5 gap-4">
+        <div className="grid grid-cols-3 md:grid-cols-6 gap-4">
+          <div className="flex items-center gap-3 p-4 bg-card border rounded-xl">
+            <div className="flex items-center justify-center h-10 w-10 rounded-full bg-blue-100 text-blue-600">
+              <ShoppingCart className="h-5 w-5" />
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground">Total POs</p>
+              <p className="text-xl font-bold">{totalPOs.toLocaleString('en-IN')}</p>
+              <p className="text-xs text-muted-foreground">{totalUnits.toLocaleString('en-IN')} units</p>
+            </div>
+          </div>
           {kpiCards.map(({ label, count, status }) => {
             const config = KPI_CONFIG[status];
             return (
