@@ -8,6 +8,7 @@ import { FilterBar } from '@/components/ui/filter-bar';
 import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
 import { DataGrid, GridColumn, useDataGrid, ViewOptionsButton } from '@/components/ui/data-grid';
 import { Badge } from '@/components/ui/badge';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { exportToCSV } from '@/lib/export';
@@ -471,11 +472,20 @@ export default function AmazonPOOverviewPage() {
 
         {/* Data Grid */}
         {isLoading ? (
-          <div className="flex items-center justify-center py-16">
-            <div className="text-center">
-              <div className="inline-block animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mb-3"></div>
-              <p className="text-sm text-muted-foreground">Loading...</p>
+          <div className="rounded-lg border bg-card overflow-hidden">
+            <div className="p-3 border-b bg-muted/50 flex gap-4">
+              {Array.from({ length: 7 }).map((_, i) => <Skeleton key={i} className="h-4 w-20" />)}
             </div>
+            {Array.from({ length: 10 }).map((_, i) => (
+              <div key={i} className="p-3 border-b flex gap-4 items-center">
+                <Skeleton className="h-4 w-6" />
+                <Skeleton className="h-4 w-28" />
+                <Skeleton className="h-4 w-24" />
+                <Skeleton className="h-4 w-32" />
+                <Skeleton className="h-5 w-20 rounded-full" />
+                <Skeleton className="h-4 w-24" />
+              </div>
+            ))}
           </div>
         ) : filteredData.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 border-2 border-dashed rounded-xl">

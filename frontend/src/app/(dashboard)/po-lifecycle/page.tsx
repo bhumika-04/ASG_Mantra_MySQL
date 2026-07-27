@@ -6,6 +6,7 @@ import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Skeleton } from '@/components/ui/skeleton';
 import { DataGrid, GridColumn, useDataGrid, ViewOptionsButton } from '@/components/ui/data-grid';
 import { FilterBar } from '@/components/ui/filter-bar';
 import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
@@ -448,10 +449,29 @@ export default function POLifecyclePage() {
   if (isLoading) {
     return (
       <ProtectedRoute>
-        <div className="p-6 flex items-center justify-center">
-          <div className="text-center">
-            <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
-            <p className="text-muted-foreground">Loading purchase order lifecycle...</p>
+        <div className="p-6 space-y-6">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="p-4 bg-card border rounded-xl space-y-2">
+                <Skeleton className="h-3 w-24" />
+                <Skeleton className="h-8 w-16" />
+              </div>
+            ))}
+          </div>
+          <div className="rounded-lg border bg-card overflow-hidden">
+            <div className="p-3 border-b bg-muted/50 flex gap-4">
+              {Array.from({ length: 7 }).map((_, i) => <Skeleton key={i} className="h-4 w-20" />)}
+            </div>
+            {Array.from({ length: 12 }).map((_, i) => (
+              <div key={i} className="p-3 border-b flex gap-4 items-center">
+                <Skeleton className="h-4 w-6" />
+                <Skeleton className="h-4 w-24" />
+                <Skeleton className="h-4 w-28" />
+                <Skeleton className="h-4 w-16" />
+                <Skeleton className="h-5 w-16 rounded-full" />
+                <Skeleton className="h-5 w-20 rounded-full" />
+              </div>
+            ))}
           </div>
         </div>
       </ProtectedRoute>
@@ -677,9 +697,17 @@ export default function POLifecyclePage() {
             </FilterBar>
 
             {isGridLoading ? (
-              <div className="text-center py-12">
-                <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
-                <p className="mt-3 text-sm text-muted-foreground">Loading orders...</p>
+              <div className="rounded-lg border bg-card overflow-hidden">
+                {Array.from({ length: 10 }).map((_, i) => (
+                  <div key={i} className="p-3 border-b flex gap-4 items-center">
+                    <Skeleton className="h-4 w-6" />
+                    <Skeleton className="h-4 w-24" />
+                    <Skeleton className="h-4 w-28" />
+                    <Skeleton className="h-4 w-16" />
+                    <Skeleton className="h-5 w-16 rounded-full" />
+                    <Skeleton className="h-5 w-20 rounded-full" />
+                  </div>
+                ))}
               </div>
             ) : displayOrders.length > 0 ? (
               <>

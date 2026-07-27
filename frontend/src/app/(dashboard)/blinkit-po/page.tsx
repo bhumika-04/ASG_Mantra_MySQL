@@ -9,6 +9,7 @@ import { DataGrid, GridColumn, useDataGrid, ViewOptionsButton } from '@/componen
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
 import {
   Dialog,
   DialogContent,
@@ -126,6 +127,8 @@ function BlinkitPOPageContent() {
   const [poData, setPoData] = useState<POItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 50;
   const [statsData, setStatsData] = useState<{ status_counts: Record<string, number>; total_pos: number; total_units: number } | null>(null);
   const [carriers, setCarriers] = useState<string[]>([]);
   const [statsKey, setStatsKey] = useState(0);
@@ -247,6 +250,7 @@ function BlinkitPOPageContent() {
         ? { ...p, status: effStatus(statusInput, p.expiryDateRaw), po_status: statusInput }
         : p));
       setStatsKey(k => k + 1);
+      setPage(1);
       fetchBlinkitPOs(1, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, true);
       toast.success(`Status updated to ${statusInput}`);
       closeDialog();
@@ -336,11 +340,11 @@ function BlinkitPOPageContent() {
   }, [filterMode, customStart, customEnd, filters.dateFrom, filters.dateTo]);
 
   const fetchSeqRef = useRef(0);
-  const fetchBlinkitPOs = useCallback(async (_p: number, statusFilter: string, searchQuery: string, dateFrom: string, dateTo: string, silent = false) => {
+  const fetchBlinkitPOs = useCallback(async (p: number, statusFilter: string, searchQuery: string, dateFrom: string, dateTo: string, silent = false) => {
     const seq = ++fetchSeqRef.current;
     try {
       if (!silent) setIsLoading(true);
-      const params: Record<string, any> = { page: 1, page_size: 500 };
+      const params: Record<string, any> = { page: p, page_size: 50 };
       if (statusFilter !== 'all') params.status = statusFilter;
       if (searchQuery.trim()) {
         params.search = searchQuery.trim();
@@ -420,6 +424,7 @@ function BlinkitPOPageContent() {
       prev.dateTo !== effectiveDateTo;
     if (changed) {
       prevFiltersRef.current = { status: filters.status, search: globalSearch, dateFrom: effectiveDateFrom, dateTo: effectiveDateTo };
+      setPage(1);
       fetchBlinkitPOs(1, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo);
     }
   }, [filterMode, customStart, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, fetchBlinkitPOs]);
@@ -699,6 +704,11 @@ function BlinkitPOPageContent() {
 
   const gridState = useDataGrid(gridColumns, 'blinkit-po');
 
+  const handlePageChange = useCallback((newPage: number) => {
+    setPage(newPage);
+    fetchBlinkitPOs(newPage, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo);
+  }, [filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, fetchBlinkitPOs]);
+
   const poStatusOptions = [
     { label: 'All',        value: 'all' },
     { label: 'Created',    value: 'Created' },
@@ -752,10 +762,40 @@ function BlinkitPOPageContent() {
   if (isLoading) {
     return (
       <ProtectedRoute>
-        <div className="p-6 flex items-center justify-center">
-          <div className="text-center">
-            <div className="inline-block animate-spin rounded-full h-12 w-12 border-b-2 border-yellow-600 mb-4"></div>
-            <p className="text-muted-foreground">Loading Blinkit purchase orders...</p>
+        <div className="p-6 space-y-6">
+          <div className="grid grid-cols-3 md:grid-cols-6 gap-4">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-3 p-4 bg-card border rounded-xl">
+                <Skeleton className="h-10 w-10 rounded-full flex-shrink-0" />
+                <div className="space-y-2 flex-1">
+                  <Skeleton className="h-3 w-16" />
+                  <Skeleton className="h-6 w-10" />
+                  <Skeleton className="h-3 w-24" />
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <Skeleton className="h-9 w-64" />
+            <Skeleton className="h-9 w-32" />
+            <Skeleton className="h-9 w-28" />
+          </div>
+          <div className="rounded-lg border bg-card overflow-hidden">
+            <div className="p-3 border-b bg-muted/50 flex gap-4">
+              {Array.from({ length: 8 }).map((_, i) => <Skeleton key={i} className="h-4 w-20" />)}
+            </div>
+            {Array.from({ length: 12 }).map((_, i) => (
+              <div key={i} className="p-3 border-b flex gap-4 items-center">
+                <Skeleton className="h-4 w-6" />
+                <Skeleton className="h-4 w-28" />
+                <Skeleton className="h-4 w-24" />
+                <Skeleton className="h-4 w-32" />
+                <Skeleton className="h-4 w-48" />
+                <Skeleton className="h-4 w-16" />
+                <Skeleton className="h-4 w-16" />
+                <Skeleton className="h-5 w-20 rounded-full" />
+              </div>
+            ))}
           </div>
         </div>
       </ProtectedRoute>
@@ -871,7 +911,13 @@ function BlinkitPOPageContent() {
         {/* Data Grid */}
         {filteredPoData.length > 0 ? (
           <>
-            <DataGrid data={filteredPoData} gridState={gridState} getRowClass={(row) => getPoRowClass(row.status, row.expiryDateRaw)} getRowBgColor={(row) => getPoRowBgColor(row.status, row.expiryDateRaw)} />
+            <DataGrid
+              data={filteredPoData}
+              gridState={gridState}
+              getRowClass={(row) => getPoRowClass(row.status, row.expiryDateRaw)}
+              getRowBgColor={(row) => getPoRowBgColor(row.status, row.expiryDateRaw)}
+              serverPagination={gridSearch.trim() ? undefined : { total, page, pageSize: PAGE_SIZE, onPageChange: handlePageChange }}
+            />
             <p className="text-sm text-muted-foreground pt-1">{total.toLocaleString('en-IN')} line items from {totalPOs} POs</p>
           </>
         ) : (

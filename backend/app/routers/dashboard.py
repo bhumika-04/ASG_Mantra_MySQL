@@ -16,8 +16,22 @@ from ..models.alert import LowStockAlert
 from ..models.amazon_inventory import AmazonInventoryData
 from ..models.blinkit_inventory import BlinkitInventoryData
 from ..utils.dependencies import get_current_active_user
+import time as _time
 
 router = APIRouter()
+
+# Simple in-memory cache for dashboard endpoints — 60s TTL
+_dash_cache: dict = {}
+_DASH_TTL = 60.0
+
+def _dash_get(key: str):
+    e = _dash_cache.get(key)
+    if e and _time.monotonic() - e["ts"] < _DASH_TTL:
+        return e["data"]
+    return None
+
+def _dash_set(key: str, data):
+    _dash_cache[key] = {"data": data, "ts": _time.monotonic()}
 
 
 @router.get("/inventory-stats")
@@ -30,6 +44,10 @@ async def get_inventory_stats(
     Uses a single raw SQL query instead of 14 separate ORM calls to minimise
     round-trips to the remote DB.
     """
+    cached = _dash_get("inventory_stats")
+    if cached:
+        return cached
+
     row = db.execute(text("""
         WITH
         max_dates AS (
@@ -81,7 +99,7 @@ async def get_inventory_stats(
         FROM inv_agg, max_dates
     """)).fetchone()
 
-    return {
+    result = {
         "totalSKUs":        int(row.total_skus    or 0),
         "totalInventory":   int(row.total_inventory or 0),
         "packedInventory":  int(row.packed         or 0),
@@ -99,6 +117,8 @@ async def get_inventory_stats(
         "blinkitUnpacked": 0,
         "blinkitPendingPOs":int(row.blinkit_pending or 0),
     }
+    _dash_set("inventory_stats", result)
+    return result
 
 
 @router.get("/charts")
@@ -114,6 +134,11 @@ async def get_dashboard_charts(
     Returns is_weekly flag so frontend knows which label format to use.
     """
     from datetime import date as date_type
+
+    cache_key = f"charts:{start_date}:{end_date}"
+    cached = _dash_get(cache_key)
+    if cached:
+        return cached
 
     try:
         s_date = date_type.fromisoformat(start_date) if start_date else None
@@ -282,13 +307,15 @@ async def get_dashboard_charts(
         key=lambda x: x['revenue'], reverse=True
     )[:10]
 
-    return {
+    result = {
         "monthly_sales":    monthly_data,
         "amazon_products":  amazon_product_data,
         "blinkit_products": blinkit_product_data,
         "top_products":     overall_product_data,
         "granularity":      granularity,
     }
+    _dash_set(cache_key, result)
+    return result
 
 
 @router.get("/product-overview")

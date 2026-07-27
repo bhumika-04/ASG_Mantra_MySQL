@@ -47,6 +47,24 @@ def _eff_status(base: Optional[str], expiry_date=None) -> str:
 # Cache latest inventory date for 5 minutes — avoids one DB round-trip per PO page load
 _inv_date_cache: dict = {"value": None, "ts": 0.0}
 
+# Short-lived cache for stats endpoints — 15s TTL so KPIs feel instant on navigation
+# while still reflecting status changes within a few seconds.
+_stats_cache: dict = {}  # key → {"data": ..., "ts": float}
+_STATS_TTL = 15.0
+
+def _stats_get(key: str):
+    entry = _stats_cache.get(key)
+    if entry and _time.monotonic() - entry["ts"] < _STATS_TTL:
+        return entry["data"]
+    return None
+
+def _stats_set(key: str, data: dict):
+    _stats_cache[key] = {"data": data, "ts": _time.monotonic()}
+
+def _stats_invalidate():
+    """Call after any mutation that changes PO status so next read is always fresh."""
+    _stats_cache.clear()
+
 def _get_latest_inv_date(db):
     now = _time.monotonic()
     if _inv_date_cache["value"] is not None and now - _inv_date_cache["ts"] < 300:
@@ -343,6 +361,10 @@ async def get_amazon_po_stats(
         except ValueError:
             pass
     amz_where_sql = ("WHERE p." + " AND p.".join(where_clauses)) if where_clauses else ""
+    cache_key = f"amz_stats:{start_date}:{end_date}"
+    cached = _stats_get(cache_key)
+    if cached:
+        return cached
     # Single query: status counts + total units via CTE to avoid two round-trips
     rows = db.execute(text(f"""
         WITH base AS (
@@ -373,11 +395,13 @@ async def get_amazon_po_stats(
     """), params).fetchall()
     status_counts = {r[0]: r[1] for r in rows}
     total_units = int(sum(r[2] or 0 for r in rows))
-    return {
+    result = {
         "status_counts": status_counts,
         "total_pos": sum(status_counts.values()),
         "total_units": total_units,
     }
+    _stats_set(cache_key, result)
+    return result
 
 
 @router.get("/carriers")
@@ -692,6 +716,10 @@ async def get_blinkit_po_stats(
         except ValueError:
             pass
     blk_where_sql = ("WHERE p." + " AND p.".join(blk_where)) if blk_where else ""
+    cache_key = f"blk_stats:{start_date}:{end_date}"
+    cached = _stats_get(cache_key)
+    if cached:
+        return cached
     # Single query: status counts + total units via CTE to avoid two round-trips
     rows = db.execute(text(f"""
         WITH base AS (
@@ -722,11 +750,13 @@ async def get_blinkit_po_stats(
     """), blk_params).fetchall()
     status_counts = {r[0]: r[1] for r in rows}
     total_units = int(sum(r[2] or 0 for r in rows))
-    return {
+    result = {
         "status_counts": status_counts,
         "total_pos": sum(status_counts.values()),
         "total_units": total_units,
     }
+    _stats_set(cache_key, result)
+    return result
 
 
 @router.get("/blinkit", response_model=PaginatedResponse)
@@ -1382,6 +1412,7 @@ async def update_amazon_po_header_status(
            f"PO {po.PONumber}: {old_status} → {status_data.status}", "po_status")
     try:
         db.commit()
+        _stats_invalidate()
         return {"success": True, "message": f"Amazon PO {po.PONumber} status updated to {status_data.status}"}
     except Exception as e:
         db.rollback()
@@ -1427,6 +1458,7 @@ async def update_blinkit_po_header_status(
            f"PO {po.PONumber}: {old_status} → {status_data.status}", "po_status")
     try:
         db.commit()
+        _stats_invalidate()
         return {"success": True, "message": f"Blinkit PO {po.PONumber} status updated to {status_data.status}"}
     except Exception as e:
         db.rollback()

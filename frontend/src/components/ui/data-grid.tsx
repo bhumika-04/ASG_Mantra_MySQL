@@ -50,6 +50,13 @@ interface DataGridProps<T> {
   getRowClass?: (row: T) => string | undefined;
   /** Return an explicit CSS color string for sticky-column backgrounds (e.g. 'rgb(254,242,242)' for red). Avoids Tailwind cascade issues where bg-background overrides row color classes. */
   getRowBgColor?: (row: T) => string | undefined;
+  /** When provided, DataGrid operates in server-side pagination mode: data is already the current page's rows, and page navigation calls onPageChange instead of slicing locally. */
+  serverPagination?: {
+    total: number;
+    page: number;
+    pageSize: number;
+    onPageChange: (page: number) => void;
+  };
 }
 
 export type RowDensity = 'compact' | 'normal' | 'comfortable';
@@ -273,6 +280,7 @@ export function DataGrid<T extends Record<string, any>>({
   pageSize: defaultPageSize = 25,
   getRowClass,
   getRowBgColor,
+  serverPagination,
 }: DataGridProps<T>) {
   const {
     columns,
@@ -316,20 +324,31 @@ export function DataGrid<T extends Record<string, any>>({
     });
   }, [data, sortColumn, sortDirection, columns]);
 
-  // Pagination state
+  // Client-side pagination state (unused when serverPagination prop is provided)
   const [currentPage, setCurrentPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(defaultPageSize);
-  const totalPages = Math.max(1, Math.ceil(sortedData.length / pageSize));
 
-  // Reset to page 1 when data or pageSize changes and current page is out of bounds
+  // Effective pagination values — server overrides client when prop is present
+  const effectivePage = serverPagination ? serverPagination.page : currentPage;
+  const effectivePageSize = serverPagination ? serverPagination.pageSize : pageSize;
+  const effectiveTotal = serverPagination ? serverPagination.total : sortedData.length;
+  const effectiveTotalPages = Math.max(1, Math.ceil(effectiveTotal / effectivePageSize));
+
+  // Reset client page when data shrinks below current page (client pagination only)
   React.useEffect(() => {
-    if (currentPage > totalPages) setCurrentPage(1);
-  }, [sortedData.length, pageSize, totalPages, currentPage]);
+    if (!serverPagination && currentPage > effectiveTotalPages) setCurrentPage(1);
+  }, [sortedData.length, pageSize, effectiveTotalPages, currentPage, serverPagination]);
 
   const paginatedData = React.useMemo(() => {
+    if (serverPagination) return sortedData; // backend already returned the right page
     const start = (currentPage - 1) * pageSize;
     return sortedData.slice(start, start + pageSize);
-  }, [sortedData, currentPage, pageSize]);
+  }, [serverPagination, sortedData, currentPage, pageSize]);
+
+  const handlePaginationChange = (newPage: number) => {
+    if (serverPagination) serverPagination.onPageChange(newPage);
+    else setCurrentPage(newPage);
+  };
 
   const handleSort = (columnId: string) => {
     const column = columns.find((col) => col.id === columnId);
@@ -549,7 +568,7 @@ export function DataGrid<T extends Record<string, any>>({
                     boxShadow: !hasStickyUserCols ? frozenShadow : undefined,
                   }}
                 >
-                  {(currentPage - 1) * pageSize + rowIndex + 1}
+                  {(effectivePage - 1) * effectivePageSize + rowIndex + 1}
                 </td>
                 {visibleColumnsArray.map((column) => (
                   <td
@@ -595,24 +614,28 @@ export function DataGrid<T extends Record<string, any>>({
       </div>
 
       {/* Pagination Footer */}
-      {sortedData.length > 0 && (
+      {effectiveTotal > 0 && (
         <div className="flex items-center justify-between mt-3 px-1">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <span>Rows:</span>
-            <div className="relative">
-              <select
-                value={pageSize}
-                onChange={(e) => setPageSize(Number(e.target.value))}
-                className="appearance-none bg-muted border border-muted rounded px-3 py-1 pr-7 text-sm text-foreground cursor-pointer focus:outline-none focus:ring-1 focus:ring-primary"
-              >
-                {PAGE_SIZE_OPTIONS.map((size) => (
-                  <option key={size} value={size}>{size}</option>
-                ))}
-              </select>
-              <ChevronsUpDown className="absolute right-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
-            </div>
-            <span className="ml-2">
-              {((currentPage - 1) * pageSize) + 1}–{Math.min(currentPage * pageSize, sortedData.length)} of {sortedData.length}
+            {!serverPagination && (
+              <>
+                <span>Rows:</span>
+                <div className="relative">
+                  <select
+                    value={pageSize}
+                    onChange={(e) => setPageSize(Number(e.target.value))}
+                    className="appearance-none bg-muted border border-muted rounded px-3 py-1 pr-7 text-sm text-foreground cursor-pointer focus:outline-none focus:ring-1 focus:ring-primary"
+                  >
+                    {PAGE_SIZE_OPTIONS.map((size) => (
+                      <option key={size} value={size}>{size}</option>
+                    ))}
+                  </select>
+                  <ChevronsUpDown className="absolute right-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+                </div>
+              </>
+            )}
+            <span className={serverPagination ? '' : 'ml-2'}>
+              {((effectivePage - 1) * effectivePageSize) + 1}–{Math.min(effectivePage * effectivePageSize, effectiveTotal)} of {effectiveTotal}
             </span>
           </div>
 
@@ -621,8 +644,8 @@ export function DataGrid<T extends Record<string, any>>({
               variant="ghost"
               size="sm"
               className="h-8 w-8 p-0"
-              disabled={currentPage === 1}
-              onClick={() => setCurrentPage(1)}
+              disabled={effectivePage === 1}
+              onClick={() => handlePaginationChange(1)}
             >
               <ChevronLeft className="h-4 w-4" />
               <ChevronLeft className="h-4 w-4 -ml-2" />
@@ -631,8 +654,8 @@ export function DataGrid<T extends Record<string, any>>({
               variant="ghost"
               size="sm"
               className="h-8 w-8 p-0"
-              disabled={currentPage === 1}
-              onClick={() => setCurrentPage((p) => p - 1)}
+              disabled={effectivePage === 1}
+              onClick={() => handlePaginationChange(effectivePage - 1)}
             >
               <ChevronLeft className="h-4 w-4" />
             </Button>
@@ -640,14 +663,14 @@ export function DataGrid<T extends Record<string, any>>({
             {/* Page number buttons */}
             {(() => {
               const pages: (number | '...')[] = [];
-              if (totalPages <= 7) {
-                for (let i = 1; i <= totalPages; i++) pages.push(i);
+              if (effectiveTotalPages <= 7) {
+                for (let i = 1; i <= effectiveTotalPages; i++) pages.push(i);
               } else {
                 pages.push(1);
-                if (currentPage > 3) pages.push('...');
-                for (let i = Math.max(2, currentPage - 1); i <= Math.min(totalPages - 1, currentPage + 1); i++) pages.push(i);
-                if (currentPage < totalPages - 2) pages.push('...');
-                pages.push(totalPages);
+                if (effectivePage > 3) pages.push('...');
+                for (let i = Math.max(2, effectivePage - 1); i <= Math.min(effectiveTotalPages - 1, effectivePage + 1); i++) pages.push(i);
+                if (effectivePage < effectiveTotalPages - 2) pages.push('...');
+                pages.push(effectiveTotalPages);
               }
               return pages.map((p, idx) =>
                 p === '...' ? (
@@ -655,10 +678,10 @@ export function DataGrid<T extends Record<string, any>>({
                 ) : (
                   <Button
                     key={p}
-                    variant={currentPage === p ? 'default' : 'ghost'}
+                    variant={effectivePage === p ? 'default' : 'ghost'}
                     size="sm"
                     className="h-8 w-8 p-0"
-                    onClick={() => setCurrentPage(p as number)}
+                    onClick={() => handlePaginationChange(p as number)}
                   >
                     {p}
                   </Button>
@@ -670,8 +693,8 @@ export function DataGrid<T extends Record<string, any>>({
               variant="ghost"
               size="sm"
               className="h-8 w-8 p-0"
-              disabled={currentPage === totalPages}
-              onClick={() => setCurrentPage((p) => p + 1)}
+              disabled={effectivePage === effectiveTotalPages}
+              onClick={() => handlePaginationChange(effectivePage + 1)}
             >
               <ChevronRight className="h-4 w-4" />
             </Button>
@@ -679,8 +702,8 @@ export function DataGrid<T extends Record<string, any>>({
               variant="ghost"
               size="sm"
               className="h-8 w-8 p-0"
-              disabled={currentPage === totalPages}
-              onClick={() => setCurrentPage(totalPages)}
+              disabled={effectivePage === effectiveTotalPages}
+              onClick={() => handlePaginationChange(effectiveTotalPages)}
             >
               <ChevronRight className="h-4 w-4" />
               <ChevronRight className="h-4 w-4 -ml-2" />
