@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { FilterBar } from '@/components/ui/filter-bar';
@@ -52,7 +52,7 @@ function effStatus(base: string, expiryISO: string | null): string {
   if (NO_EXPIRY_OVERRIDE.has(base)) return base;
   if (!expiryISO) return base;
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  return (today.getTime() - new Date(expiryISO + 'T00:00:00').getTime()) / 86400000 >= 15 ? 'Expired' : base;
+  return today.getTime() > new Date(expiryISO + 'T00:00:00').getTime() ? 'Expired' : base;
 }
 
 function getExpiryRowClass(row: POOverviewItem): string | undefined {
@@ -60,8 +60,8 @@ function getExpiryRowClass(row: POOverviewItem): string | undefined {
   if (!row.expiryDateRaw) return undefined;
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const d = Math.ceil((new Date(row.expiryDateRaw + 'T00:00:00').getTime() - today.getTime()) / 86400000);
-  if (d <= 7)  return 'bg-red-50 dark:bg-red-950/20';
-  if (d <= 15) return 'bg-yellow-50 dark:bg-yellow-950/20';
+  if (d < 0)  return 'bg-red-50 dark:bg-red-950/20';
+  if (d <= 7) return 'bg-yellow-50 dark:bg-yellow-950/20';
   return undefined;
 }
 function getExpiryRowBgColor(row: POOverviewItem): string | undefined {
@@ -69,8 +69,8 @@ function getExpiryRowBgColor(row: POOverviewItem): string | undefined {
   if (!row.expiryDateRaw) return undefined;
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const d = Math.ceil((new Date(row.expiryDateRaw + 'T00:00:00').getTime() - today.getTime()) / 86400000);
-  if (d <= 7)  return 'rgb(254,242,242)';
-  if (d <= 15) return 'rgb(254,252,232)';
+  if (d < 0)  return 'rgb(254,242,242)';
+  if (d <= 7) return 'rgb(254,252,232)';
   return undefined;
 }
 
@@ -96,13 +96,8 @@ const BADGE_STYLES: Record<string, string> = {
 
 export default function AmazonPOOverviewPage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const { filterMode, setFilterMode, customStart, customEnd, globalSearch, setGlobalSearchRaw } = useFilter();
+  const { filterMode, customStart, customEnd, globalSearch, setGlobalSearchRaw } = useFilter();
   const [gridSearch, setGridSearch] = useState('');
-  useEffect(() => {
-    const urlParam = searchParams.get('search');
-    if (urlParam) { setGridSearch(urlParam); setGlobalSearchRaw(urlParam); setFilterMode('all'); }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
   const [poData, setPoData] = useState<POOverviewItem[]>([]);
   const [statsData, setStatsData] = useState<{ status_counts: Record<string, number>; total_pos: number; total_units: number } | null>(null);

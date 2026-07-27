@@ -175,14 +175,20 @@ export function FilterProvider({ children }: { children: ReactNode }) {
   const [globalSearchRaw, setGlobalSearchRaw] = useState('');
   const [globalSearch, setGlobalSearch] = useState('');
 
-  // Reset all filters and searches on every page navigation
+  // Reset filters on navigation; seed search from URL ?search= so PO number links work
   useEffect(() => {
-    setFilterMode('this_month');
+    const searchParam = new URLSearchParams(window.location.search).get('search');
+    setFilterMode(searchParam ? 'all' : 'this_month');
     setChannel('all');
     setCustomStart('');
     setCustomEnd('');
-    setGlobalSearchRaw('');
-    setGlobalSearch('');
+    if (searchParam) {
+      setGlobalSearchRaw(searchParam);
+      setGlobalSearch(searchParam);
+    } else {
+      setGlobalSearchRaw('');
+      setGlobalSearch('');
+    }
   }, [pathname]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {

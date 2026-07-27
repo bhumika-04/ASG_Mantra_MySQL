@@ -26,7 +26,7 @@ import {
   Pencil,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import api from '@/lib/api';
 
 const STATUS_OPTIONS = ['Created', 'Dispatched', 'In Transit', 'Delivered', 'Delayed', 'Cancelled'];
@@ -57,15 +57,15 @@ function effStatus(base: string, expiryISO: string | null): string {
   if (NO_EXPIRY_OVERRIDE.has(base)) return base;
   if (!expiryISO) return base;
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  return (today.getTime() - new Date(expiryISO + 'T00:00:00').getTime()) / 86400000 >= 15 ? 'Expired' : base;
+  return today.getTime() > new Date(expiryISO + 'T00:00:00').getTime() ? 'Expired' : base;
 }
 function getPoRowClass(status: string, expiryISO: string | null): string | undefined {
   if (['Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit'].includes(status)) return undefined;
   if (!expiryISO) return undefined;
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const d = Math.ceil((new Date(expiryISO + 'T00:00:00').getTime() - today.getTime()) / 86400000);
-  if (d <= 7)  return 'bg-red-50 dark:bg-red-950/20';
-  if (d <= 15) return 'bg-yellow-50 dark:bg-yellow-950/20';
+  if (d < 0)  return 'bg-red-50 dark:bg-red-950/20';
+  if (d <= 7) return 'bg-yellow-50 dark:bg-yellow-950/20';
   return undefined;
 }
 function getPoRowBgColor(status: string, expiryISO: string | null): string | undefined {
@@ -73,8 +73,8 @@ function getPoRowBgColor(status: string, expiryISO: string | null): string | und
   if (!expiryISO) return undefined;
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const d = Math.ceil((new Date(expiryISO + 'T00:00:00').getTime() - today.getTime()) / 86400000);
-  if (d <= 7)  return 'rgb(254,242,242)';
-  if (d <= 15) return 'rgb(254,252,232)';
+  if (d < 0)  return 'rgb(254,242,242)';
+  if (d <= 7) return 'rgb(254,252,232)';
   return undefined;
 }
 
@@ -110,13 +110,8 @@ const toRow = (po: any, channel: string): PurchaseOrder => {
 
 export default function POLifecyclePage() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const { filterMode, setFilterMode, customStart, customEnd, channel, globalSearch, setGlobalSearchRaw } = useFilter();
+  const { filterMode, customStart, customEnd, channel, globalSearch, setGlobalSearchRaw } = useFilter();
   const [gridSearch, setGridSearch] = useState('');
-  useEffect(() => {
-    const urlParam = searchParams.get('search');
-    if (urlParam) { setGridSearch(urlParam); setGlobalSearchRaw(urlParam); setFilterMode('all'); }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
   const [page, setPage] = useState(1);
   const [allOrders, setAllOrders] = useState<PurchaseOrder[]>([]);
@@ -162,6 +157,11 @@ export default function POLifecyclePage() {
     setFilters(prev => ({ ...prev, channel }));
     setPage(1);
   }, [channel]);
+
+  // Reset to page 1 when date/status/search filters change (channel resets separately above)
+  useEffect(() => {
+    setPage(1);
+  }, [filterMode, customStart, customEnd, filters.status, globalSearch]);
 
   // Fetch date-filtered KPI stats — re-runs when global filter changes
   useEffect(() => {
@@ -465,7 +465,7 @@ export default function POLifecyclePage() {
         <StatsGrid columns={5}>
           <StatsCard
             title="Total POs"
-            value={totalPOs.toString()}
+            value={totalShown.toString()}
             icon={Package}
             description={`${totalUnits.toLocaleString('en-IN')} units`}
             variant="blue"

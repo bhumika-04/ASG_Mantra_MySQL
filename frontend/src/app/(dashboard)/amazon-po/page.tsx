@@ -1,7 +1,6 @@
 ﻿'use client';
 
 import { useState, useEffect, useMemo, useCallback, useRef, Suspense } from 'react';
-import { useSearchParams } from 'next/navigation';
 import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import React from 'react';
@@ -72,15 +71,15 @@ function effStatus(base: string, expiryISO: string | null): string {
   if (NO_EXPIRY_OVERRIDE.has(base)) return base;
   if (!expiryISO) return base;
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  return (today.getTime() - new Date(expiryISO + 'T00:00:00').getTime()) / 86400000 >= 15 ? 'Expired' : base;
+  return today.getTime() > new Date(expiryISO + 'T00:00:00').getTime() ? 'Expired' : base;
 }
 function getPoRowClass(status: string, expiryISO: string | null): string | undefined {
   if (['Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit'].includes(status)) return undefined;
   if (!expiryISO) return undefined;
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const d = Math.ceil((new Date(expiryISO + 'T00:00:00').getTime() - today.getTime()) / 86400000);
-  if (d <= 7)  return 'bg-red-50 dark:bg-red-950/20';
-  if (d <= 15) return 'bg-yellow-50 dark:bg-yellow-950/20';
+  if (d < 0)  return 'bg-red-50 dark:bg-red-950/20';
+  if (d <= 7) return 'bg-yellow-50 dark:bg-yellow-950/20';
   return undefined;
 }
 function getPoRowBgColor(status: string, expiryISO: string | null): string | undefined {
@@ -88,8 +87,8 @@ function getPoRowBgColor(status: string, expiryISO: string | null): string | und
   if (!expiryISO) return undefined;
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const d = Math.ceil((new Date(expiryISO + 'T00:00:00').getTime() - today.getTime()) / 86400000);
-  if (d <= 7)  return 'rgb(254,242,242)';
-  if (d <= 15) return 'rgb(254,252,232)';
+  if (d < 0)  return 'rgb(254,242,242)';
+  if (d <= 7) return 'rgb(254,252,232)';
   return undefined;
 }
 
@@ -121,23 +120,11 @@ interface POItem {
 }
 
 function AmazonPOPageContent() {
-  const searchParams = useSearchParams();
-  const { filterMode, setFilterMode, customStart, customEnd, globalSearch, setGlobalSearchRaw } = useFilter();
+  const { filterMode, customStart, customEnd, globalSearch, setGlobalSearchRaw } = useFilter();
   const [gridSearch, setGridSearch] = useState('');
-  // Initialise search from URL param and switch to All Time so date filter doesn't block the result
-  useEffect(() => {
-    const urlParam = searchParams.get('search');
-    if (urlParam) {
-      setGridSearch(urlParam);
-      setGlobalSearchRaw(urlParam);
-      setFilterMode('all');
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
   const [poData, setPoData] = useState<POItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
   const [total, setTotal] = useState(0);
   const [statsData, setStatsData] = useState<{ status_counts: Record<string, number>; total_pos: number; total_units: number } | null>(null);
   const [allStates, setAllStates] = useState<string[]>([]);
@@ -259,7 +246,6 @@ function AmazonPOPageContent() {
         ? { ...p, status: effStatus(statusInput, p.shipWindowEndDateRaw), po_status: statusInput }
         : p));
       setStatsKey(k => k + 1);
-      setPage(1);
       fetchAmazonPOs(1, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, filters.state, true);
       toast.success(`Status updated to ${statusInput}`);
       closeDialog();
@@ -337,11 +323,11 @@ function AmazonPOPageContent() {
   }, [filterMode, customStart, customEnd, filters.dateFrom, filters.dateTo]);
 
   const fetchSeqRef = useRef(0);
-  const fetchAmazonPOs = useCallback(async (p: number, statusFilter: string, searchQuery: string, dateFrom: string, dateTo: string, stateFilter: string, silent = false) => {
+  const fetchAmazonPOs = useCallback(async (_p: number, statusFilter: string, searchQuery: string, dateFrom: string, dateTo: string, stateFilter: string, silent = false) => {
     const seq = ++fetchSeqRef.current;
     try {
       if (!silent) setIsLoading(true);
-      const params: Record<string, any> = { page: p, page_size: 50 };
+      const params: Record<string, any> = { page: 1, page_size: 500 };
       if (statusFilter !== 'all') params.status = statusFilter;
       if (stateFilter !== 'all') params.state = stateFilter;
       if (searchQuery.trim()) {
@@ -385,7 +371,6 @@ function AmazonPOPageContent() {
       }));
       setPoData(transformedPOs);
       setTotal(response.total || 0);
-      setTotalPages(response.total_pages || 1);
     } catch (error) {
       if (fetchSeqRef.current !== seq) return;
       console.error('Error fetching Amazon purchase orders:', error);
@@ -432,7 +417,6 @@ function AmazonPOPageContent() {
       prev.dateTo !== effectiveDateTo;
     if (changed) {
       prevFiltersRef.current = { status: filters.status, state: filters.state, search: globalSearch, dateFrom: effectiveDateFrom, dateTo: effectiveDateTo };
-      setPage(1);
       fetchAmazonPOs(1, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, filters.state);
     }
   }, [filterMode, customStart, filters.status, filters.state, globalSearch, effectiveDateFrom, effectiveDateTo, fetchAmazonPOs]);
@@ -762,7 +746,7 @@ function AmazonPOPageContent() {
             <div>
               <p className="text-xs text-muted-foreground">Total POs</p>
               <p className="text-xl font-bold">{totalPOs}</p>
-              <p className="text-xs text-muted-foreground">{totalUnits.toLocaleString('en-IN')} units</p>
+              <p className="text-xs text-muted-foreground">{totalUnits.toLocaleString('en-IN')} units · {total.toLocaleString('en-IN')} items</p>
             </div>
           </div>
           {kpiCards.map(({ label, count, status }) => {
@@ -855,18 +839,7 @@ function AmazonPOPageContent() {
         {filteredPoData.length > 0 ? (
           <>
             <DataGrid data={filteredPoData} gridState={gridState} getRowClass={(row) => getPoRowClass(row.status, row.shipWindowEndDateRaw)} getRowBgColor={(row) => getPoRowBgColor(row.status, row.shipWindowEndDateRaw)} />
-            <div className="flex items-center justify-between pt-1">
-              <p className="text-sm text-muted-foreground">{total.toLocaleString('en-IN')} line items</p>
-              <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" onClick={() => { const p = Math.max(1, page - 1); setPage(p); fetchAmazonPOs(p, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, filters.state); }} disabled={page === 1 || isLoading}>
-                  Previous
-                </Button>
-                <span className="text-sm text-muted-foreground">Page {page} of {totalPages}</span>
-                <Button variant="outline" size="sm" onClick={() => { const p = Math.min(totalPages, page + 1); setPage(p); fetchAmazonPOs(p, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, filters.state); }} disabled={page === totalPages || isLoading}>
-                  Next
-                </Button>
-              </div>
-            </div>
+            <p className="text-sm text-muted-foreground pt-1">{total.toLocaleString('en-IN')} line items from {totalPOs} POs</p>
           </>
         ) : (
           <div className="text-center py-12 text-muted-foreground border-2 border-dashed rounded-lg">
