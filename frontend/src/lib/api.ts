@@ -290,6 +290,10 @@ export const api = {
       const query = new URLSearchParams(params).toString();
       return apiFetch(`/api/purchase-orders/blinkit/overview${query ? `?${query}` : ''}`);
     },
+    getLifecycleOverview: (params?: any) => {
+      const query = new URLSearchParams(params).toString();
+      return apiFetch(`/api/purchase-orders/lifecycle/overview${query ? `?${query}` : ''}`);
+    },
   },
 
   // Amazon ASIN-level inventory

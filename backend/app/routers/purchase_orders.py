@@ -303,7 +303,11 @@ async def get_amazon_po_overview(
         .order_by(subq.c.order_date.desc())
         .offset(offset).limit(page_size).all()
     )
-    total = rows_with_count[0]._total if rows_with_count else 0
+    # COUNT(*) OVER() rides along on returned rows only — paging past the end returns
+    # none, so fall back to an explicit count rather than reporting a total of 0.
+    total = rows_with_count[0]._total if rows_with_count else (
+        db.query(func.count()).select_from(subq).scalar() or 0
+    )
 
     items = []
     for r in rows_with_count:
@@ -491,7 +495,11 @@ async def get_amazon_purchase_orders(
         .order_by(desc(AmazonPOData.OrderedOnDate))
         .offset(offset).limit(page_size).all()
     )
-    total = rows_with_count[0]._total if rows_with_count else 0
+    # COUNT(*) OVER() rides along on returned rows only — paging past the end returns
+    # none, so fall back to an explicit count rather than reporting a total of 0.
+    total = rows_with_count[0]._total if rows_with_count else (
+        db.query(func.count()).select_from(subq).scalar() or 0
+    )
     po_items = [r[0] for r in rows_with_count]
 
     # Batch load products by ASIN (eliminates N+1)
@@ -654,7 +662,11 @@ async def get_blinkit_po_overview(
         .order_by(subq.c.order_date.desc())
         .offset(offset).limit(page_size).all()
     )
-    total = rows_with_count[0]._total if rows_with_count else 0
+    # COUNT(*) OVER() rides along on returned rows only — paging past the end returns
+    # none, so fall back to an explicit count rather than reporting a total of 0.
+    total = rows_with_count[0]._total if rows_with_count else (
+        db.query(func.count()).select_from(subq).scalar() or 0
+    )
 
     items = []
     for r in rows_with_count:
@@ -681,6 +693,198 @@ async def get_blinkit_po_overview(
             "ship_to_name": r.ship_to_name,
             "ship_to_city": city,
             "ship_to_state": state,
+            "item_count": int(r.item_count or 0),
+            "total_qty": int(r.total_qty or 0),
+        })
+
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "total_pages": (total + page_size - 1) // page_size}
+
+
+@router.get("/lifecycle/overview")
+async def get_lifecycle_overview(
+    search: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    channel: Optional[str] = Query(None, description="all | amazon | blinkit"),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Combined Amazon + Blinkit PO overview with true server-side pagination.
+
+    Paginating the two channel endpoints in lockstep produced uneven page sizes and a
+    `total` that collapsed to 0 once one channel ran out of rows. This UNIONs both
+    channels first, then paginates the merged set, so every page holds exactly
+    `page_size` rows and `total` is stable across pages.
+    """
+    ch = (channel or 'all').lower()
+    show_amz = ch in ('all', 'amazon')
+    show_blk = ch in ('all', 'blinkit')
+    if not show_amz and not show_blk:
+        return {"items": [], "total": 0, "page": page, "page_size": page_size, "total_pages": 0}
+
+    params: dict = {}
+    amz_where, blk_where = [], []
+
+    if search:
+        amz_where.append("p.PONumber LIKE :search")
+        blk_where.append("p.PONumber LIKE :search")
+        params["search"] = f"%{search}%"
+    else:
+        # Date filter is skipped while searching — a PO may predate the active range
+        if start_date:
+            try:
+                datetime.strptime(start_date, "%Y-%m-%d")
+                amz_where.append("p.OrderedOnDate >= :start_date")
+                blk_where.append("p.PODate >= :start_date")
+                params["start_date"] = start_date
+            except ValueError:
+                pass
+        if end_date:
+            try:
+                datetime.strptime(end_date, "%Y-%m-%d")
+                amz_where.append("p.OrderedOnDate <= :end_date")
+                blk_where.append("p.PODate <= :end_date")
+                params["end_date"] = end_date
+            except ValueError:
+                pass
+
+    amz_where_sql = ("WHERE " + " AND ".join(amz_where)) if amz_where else ""
+    blk_where_sql = ("WHERE " + " AND ".join(blk_where)) if blk_where else ""
+
+    # Mirrors the stats CTE: header status wins for shipped/terminal states, else max item status
+    def _base_expr(status_col: str, item_alias: str = "i") -> str:
+        return (f"CASE WHEN p.{status_col} IN ('Delivered','Received','Cancelled','Closed','Dispatched','In Transit') "
+                f"THEN p.{status_col} ELSE COALESCE(MAX({item_alias}.ItemStatus), p.{status_col}, 'Created') END")
+
+    amz_sel = f"""
+        SELECT
+            p.Id AS po_id, p.PONumber AS po_number, 'Amazon' AS channel,
+            p.OrderedOnDate AS order_date,
+            {_base_expr('POStatus')} AS base_status,
+            p.POStatus AS po_status,
+            p.ShipWindowEndDate AS expiry_date,
+            MIN(i.ExpectedDate) AS expected_delivery_date,
+            p.DispatchDate AS dispatch_date, p.Courier AS courier,
+            p.ShipToCity AS ship_to_city, p.ShipToState AS ship_to_state,
+            p.ShipToLocationCode AS ship_to_location_code,
+            CAST(NULL AS VARCHAR(500)) AS ship_to_address,
+            CAST(NULL AS VARCHAR(200)) AS ship_to_name,
+            CAST(NULL AS VARCHAR(50))  AS ship_to_gstin,
+            COUNT(i.Id) AS item_count,
+            COALESCE(SUM(i.QuantityRequested), 0) AS total_qty
+        FROM AmazonPO p
+        LEFT JOIN AmazonPOItem i ON i.POId = p.Id
+        {amz_where_sql}
+        GROUP BY p.Id, p.PONumber, p.OrderedOnDate, p.POStatus, p.ShipWindowEndDate,
+                 p.DispatchDate, p.Courier, p.ShipToCity, p.ShipToState, p.ShipToLocationCode
+    """
+
+    blk_sel = f"""
+        SELECT
+            p.Id AS po_id, p.PONumber AS po_number, 'Blinkit' AS channel,
+            p.PODate AS order_date,
+            {_base_expr('Status')} AS base_status,
+            p.Status AS po_status,
+            p.POExpiryDate AS expiry_date,
+            p.ExpectedDeliveryDate AS expected_delivery_date,
+            p.DispatchDate AS dispatch_date, p.Courier AS courier,
+            p.ShipToCity AS ship_to_city, p.ShipToState AS ship_to_state,
+            CAST(NULL AS VARCHAR(100)) AS ship_to_location_code,
+            CAST(p.ShipToAddress AS VARCHAR(500)) AS ship_to_address,
+            CAST(p.ShipToName AS VARCHAR(200)) AS ship_to_name,
+            CAST(p.ShipToGSTIN AS VARCHAR(50)) AS ship_to_gstin,
+            COUNT(i.Id) AS item_count,
+            COALESCE(SUM(i.QTY), 0) AS total_qty
+        FROM BlinkitPO p
+        LEFT JOIN BlinkitPOItem i ON i.POId = p.Id
+        {blk_where_sql}
+        GROUP BY p.Id, p.PONumber, p.PODate, p.Status, p.POExpiryDate, p.ExpectedDeliveryDate,
+                 p.DispatchDate, p.Courier, p.ShipToCity, p.ShipToState,
+                 CAST(p.ShipToAddress AS VARCHAR(500)), CAST(p.ShipToName AS VARCHAR(200)),
+                 CAST(p.ShipToGSTIN AS VARCHAR(50))
+    """
+
+    parts = ([amz_sel] if show_amz else []) + ([blk_sel] if show_blk else [])
+    union_sql = "\n        UNION ALL\n".join(parts)
+
+    _ov = "','".join(sorted(_NO_EXPIRY_OVERRIDE))
+    status_filter = ""
+    if status and status != 'all':
+        status_filter = "WHERE eff_status = :status"
+        params["status"] = status
+
+    params["offset"] = (page - 1) * page_size
+    params["limit"] = page_size
+
+    rows = db.execute(text(f"""
+        WITH combined AS (
+            {union_sql}
+        ),
+        scored AS (
+            SELECT *,
+                CASE
+                    WHEN base_status NOT IN ('{_ov}')
+                     AND expiry_date IS NOT NULL
+                     AND DATEDIFF(day, expiry_date, GETDATE()) >= {_EXPIRY_DAYS}
+                    THEN 'Expired' ELSE base_status
+                END AS eff_status
+            FROM combined
+        )
+        SELECT *, COUNT(*) OVER() AS _total
+        FROM scored
+        {status_filter}
+        ORDER BY order_date DESC, po_number DESC
+        OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY
+    """), params).fetchall()
+
+    # COUNT(*) OVER() only rides along on returned rows. Paging past the end yields no
+    # rows and therefore no count — re-derive it so `total` never collapses to 0.
+    if rows:
+        total = rows[0]._total
+    else:
+        total = db.execute(text(f"""
+            WITH combined AS (
+                {union_sql}
+            ),
+            scored AS (
+                SELECT *,
+                    CASE
+                        WHEN base_status NOT IN ('{_ov}')
+                         AND expiry_date IS NOT NULL
+                         AND DATEDIFF(day, expiry_date, GETDATE()) >= {_EXPIRY_DAYS}
+                        THEN 'Expired' ELSE base_status
+                    END AS eff_status
+                FROM combined
+            )
+            SELECT COUNT(*) FROM scored {status_filter}
+        """), {k: v for k, v in params.items() if k not in ('offset', 'limit')}).scalar() or 0
+
+    items = []
+    for r in rows:
+        city, state = r.ship_to_city or None, r.ship_to_state or None
+        if r.channel == 'Blinkit' and (not city or not state):
+            _c, _s = _blk_city_state(r.ship_to_address, r.ship_to_name, r.ship_to_gstin, r.po_number)
+            city, state = city or _c, state or _s
+        tat = (r.dispatch_date - r.order_date).days if (r.dispatch_date and r.order_date) else None
+        items.append({
+            "po_id": r.po_id,
+            "po_number": r.po_number,
+            "channel": r.channel,
+            "order_date": r.order_date.isoformat() if r.order_date else None,
+            "expected_delivery_date": r.expected_delivery_date.isoformat() if r.expected_delivery_date else None,
+            "expiry_date": r.expiry_date.isoformat() if r.expiry_date else None,
+            "dispatch_date": r.dispatch_date.isoformat() if r.dispatch_date else None,
+            "courier": r.courier,
+            "status": r.eff_status,
+            "po_status": r.po_status,
+            "ship_to_city": city,
+            "ship_to_state": state,
+            "ship_to_location_code": r.ship_to_location_code,
+            "tat": tat,
             "item_count": int(r.item_count or 0),
             "total_qty": int(r.total_qty or 0),
         })
@@ -812,7 +1016,11 @@ async def get_blinkit_purchase_orders(
         .order_by(desc(BlinkitPOData.PODate))
         .offset(offset).limit(page_size).all()
     )
-    total = rows_with_count[0]._total if rows_with_count else 0
+    # COUNT(*) OVER() rides along on returned rows only — paging past the end returns
+    # none, so fall back to an explicit count rather than reporting a total of 0.
+    total = rows_with_count[0]._total if rows_with_count else (
+        db.query(func.count()).select_from(subq).scalar() or 0
+    )
     po_items = [r[0] for r in rows_with_count]
 
     # Batch load products — priority: EagleCode→BlinkitId, ItemCode→BlinkitId, ItemCode→AsgSku

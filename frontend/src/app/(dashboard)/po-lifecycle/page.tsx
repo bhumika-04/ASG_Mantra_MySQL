@@ -81,10 +81,9 @@ function getPoRowBgColor(status: string, expiryISO: string | null): string | und
 
 const PAGE_SIZE = 50;
 
-const toRow = (po: any, channel: string): PurchaseOrder => {
-  const expiryISO = channel === 'Amazon'
-    ? (po.ship_window_end_date ? po.ship_window_end_date.slice(0, 10) : null)
-    : (po.po_expiry_date ? po.po_expiry_date.slice(0, 10) : null);
+const toRow = (po: any): PurchaseOrder => {
+  const channel = po.channel || 'Amazon';
+  const expiryISO = po.expiry_date ? po.expiry_date.slice(0, 10) : null;
   return {
     id: po.po_id,
     po_id: po.po_id,
@@ -104,6 +103,7 @@ const toRow = (po: any, channel: string): PurchaseOrder => {
       : (po.ship_to_city || '-'),
     courier: po.courier || '-',
     tat: po.tat != null ? `${po.tat}d` : '-',
+    // Backend already applies the expiry override; effStatus is a no-op safety net
     status: effStatus(po.status || 'Created', expiryISO),
     po_status: po.po_status || 'Created',
   };
@@ -118,8 +118,7 @@ export default function POLifecyclePage() {
   const [allOrders, setAllOrders] = useState<PurchaseOrder[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isGridLoading, setIsGridLoading] = useState(false);
-  const [totalAmazon, setTotalAmazon] = useState(0);
-  const [totalBlinkit, setTotalBlinkit] = useState(0);
+  const [total, setTotal] = useState(0);
   const [stats, setStats] = useState({
     amazon: { status_counts: {} as Record<string, number>, total_pos: 0, total_units: 0 },
     blinkit: { status_counts: {} as Record<string, number>, total_pos: 0, total_units: 0 },
@@ -205,30 +204,16 @@ export default function POLifecyclePage() {
           if (end_date) params.end_date = end_date;
         }
         if (filters.status !== 'all') params.status = filters.status;
+        params.channel = filters.channel || 'all';
 
-        const showAmazon = filters.channel === 'all' || filters.channel === 'amazon';
-        const showBlinkit = filters.channel === 'all' || filters.channel === 'blinkit';
-
-        const [amazonRes, blinkitRes] = await Promise.all([
-          showAmazon
-            ? (api.purchaseOrders as any).getAmazonOverview(params) as any
-            : Promise.resolve({ items: [], total: 0, total_pages: 1 }),
-          showBlinkit
-            ? (api.purchaseOrders as any).getBlinkitOverview(params) as any
-            : Promise.resolve({ items: [], total: 0, total_pages: 1 }),
-        ]);
+        // Single combined endpoint — UNIONs both channels then paginates, so every page
+        // holds a full page_size and `total` stays stable across pages.
+        const res = await (api.purchaseOrders as any).getLifecycleOverview(params) as any;
 
         if (fetchSeqRef.current !== seq) return;
 
-        setTotalAmazon(showAmazon ? (amazonRes.total || 0) : 0);
-        setTotalBlinkit(showBlinkit ? (blinkitRes.total || 0) : 0);
-
-        const rows: PurchaseOrder[] = [
-          ...(amazonRes.items || []).map((po: any) => toRow(po, 'Amazon')),
-          ...(blinkitRes.items || []).map((po: any) => toRow(po, 'Blinkit')),
-        ];
-        rows.sort((a, b) => (b.orderDateRaw || '').localeCompare(a.orderDateRaw || ''));
-        setAllOrders(rows);
+        setTotal(res.total || 0);
+        setAllOrders((res.items || []).map(toRow));
       } catch (error) {
         if (fetchSeqRef.current !== seq) return;
         console.error('Error fetching purchase orders:', error);
@@ -251,7 +236,6 @@ export default function POLifecyclePage() {
     merged[s] = (sc_a[s] || 0) + (sc_b[s] || 0);
   });
 
-  const totalPOs   = (channel !== 'blinkit' ? stats.amazon.total_pos   || 0 : 0) + (channel !== 'amazon' ? stats.blinkit.total_pos   || 0 : 0);
   const totalUnits = (channel !== 'blinkit' ? stats.amazon.total_units || 0 : 0) + (channel !== 'amazon' ? stats.blinkit.total_units || 0 : 0);
   const inTransitPOs = merged['In Transit'] || 0;
   const deliveredCount = merged['Delivered'] || 0;
@@ -272,13 +256,7 @@ export default function POLifecyclePage() {
   const hubData = Object.entries(hubMap).map(([name, value]) => ({ name, value })).sort((a, b) => b.value - a.value);
   const maxHub = hubData.length > 0 ? Math.max(...hubData.map(h => h.value)) : 1;
 
-  // Pagination
-  const totalPages = Math.max(
-    Math.ceil(totalAmazon / PAGE_SIZE),
-    Math.ceil(totalBlinkit / PAGE_SIZE),
-    1
-  );
-  const totalShown = totalAmazon + totalBlinkit;
+  const handlePageChange = (newPage: number) => setPage(newPage);
 
   const poStatusOptions = [
     { label: 'All', value: 'all' },
@@ -485,7 +463,7 @@ export default function POLifecyclePage() {
         <StatsGrid columns={5}>
           <StatsCard
             title="Total POs"
-            value={totalShown.toString()}
+            value={total.toString()}
             icon={Package}
             description={`${totalUnits.toLocaleString('en-IN')} units`}
             variant="blue"
@@ -639,7 +617,7 @@ export default function POLifecyclePage() {
           <CardHeader className="pb-3">
             <div className="flex items-center justify-between">
               <CardTitle>All Purchase Orders</CardTitle>
-              <p className="text-sm text-muted-foreground">{totalShown.toLocaleString('en-IN')} total</p>
+              <p className="text-sm text-muted-foreground">{total.toLocaleString('en-IN')} total</p>
             </div>
           </CardHeader>
           <CardContent>
@@ -714,8 +692,7 @@ export default function POLifecyclePage() {
                 <DataGrid
                   data={displayOrders}
                   gridState={gridState}
-                  hideFooter={true}
-                  serverPagination={{ total: displayOrders.length, page: 1, pageSize: Math.max(displayOrders.length, 1), onPageChange: () => {} }}
+                  serverPagination={gridSearch.trim() ? undefined : { total, page, pageSize: PAGE_SIZE, onPageChange: handlePageChange }}
                   getRowClass={(row) => getPoRowClass(row.status, row.expiryDateRaw)}
                   getRowBgColor={(row) => getPoRowBgColor(row.status, row.expiryDateRaw)}
                   onRowClick={(row) => {
@@ -723,31 +700,6 @@ export default function POLifecyclePage() {
                     router.push(`${path}?search=${encodeURIComponent(row.po_number)}`);
                   }}
                 />
-                <div className="flex items-center justify-between pt-4">
-                  <p className="text-sm text-muted-foreground">
-                    Page {page} of {totalPages} &nbsp;·&nbsp; {displayOrders.length} shown
-                  </p>
-                  {totalPages > 1 && (
-                    <div className="flex items-center gap-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setPage(p => Math.max(1, p - 1))}
-                        disabled={page <= 1}
-                      >
-                        Previous
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                        disabled={page >= totalPages}
-                      >
-                        Next
-                      </Button>
-                    </div>
-                  )}
-                </div>
               </>
             ) : (
               <div className="text-center py-12 text-muted-foreground">
