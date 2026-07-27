@@ -122,14 +122,15 @@ interface POItem {
 
 function AmazonPOPageContent() {
   const searchParams = useSearchParams();
-  const { filterMode, customStart, customEnd, globalSearch, setGlobalSearchRaw } = useFilter();
+  const { filterMode, setFilterMode, customStart, customEnd, globalSearch, setGlobalSearchRaw } = useFilter();
   const [gridSearch, setGridSearch] = useState('');
-  // Initialise search bars from URL param when navigating from overview
+  // Initialise search from URL param and switch to All Time so date filter doesn't block the result
   useEffect(() => {
     const urlParam = searchParams.get('search');
     if (urlParam) {
       setGridSearch(urlParam);
       setGlobalSearchRaw(urlParam);
+      setFilterMode('all');
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { FilterBar } from '@/components/ui/filter-bar';
@@ -96,8 +96,13 @@ const BADGE_STYLES: Record<string, string> = {
 
 export default function BlinkitPOOverviewPage() {
   const router = useRouter();
-  const { filterMode, customStart, customEnd, globalSearch, setGlobalSearchRaw } = useFilter();
+  const searchParams = useSearchParams();
+  const { filterMode, setFilterMode, customStart, customEnd, globalSearch, setGlobalSearchRaw } = useFilter();
   const [gridSearch, setGridSearch] = useState('');
+  useEffect(() => {
+    const urlParam = searchParams.get('search');
+    if (urlParam) { setGridSearch(urlParam); setGlobalSearchRaw(urlParam); setFilterMode('all'); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
   const [poData, setPoData] = useState<POOverviewItem[]>([]);
   const [statsData, setStatsData] = useState<{ status_counts: Record<string, number>; total_pos: number; total_units: number } | null>(null);

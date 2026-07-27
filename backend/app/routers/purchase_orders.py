@@ -252,9 +252,10 @@ async def get_amazon_po_overview(
                 f"AND DATEDIFF(day, AmazonPO.ShipWindowEndDate, GETDATE()) >= {_EXPIRY_DAYS}"
             ))
         else:
-            query = query.having(
-                func.coalesce(AmazonPOData.POStatus, func.max(AmazonPOItemData.ItemStatus), literal('Created')) == status
-            )
+            query = query.having(text(
+                f"CASE WHEN AmazonPO.POStatus IN ('Delivered','Received','Cancelled','Closed','Dispatched','In Transit') "
+                f"THEN AmazonPO.POStatus ELSE COALESCE(MAX(AmazonPOItem.ItemStatus), AmazonPO.POStatus, 'Created') END = '{status}'"
+            ))
     # Skip date filter when searching by PO number — the PO may predate the active range
     if not search:
         if start_date:
@@ -347,12 +348,12 @@ async def get_amazon_po_stats(
         WITH base AS (
             SELECT
                 CASE
-                    WHEN COALESCE(p.POStatus, agg.max_status, 'Created')
+                    WHEN CASE WHEN p.POStatus IN ('Delivered','Received','Cancelled','Closed','Dispatched','In Transit') THEN p.POStatus ELSE COALESCE(agg.max_status, p.POStatus, 'Created') END
                          NOT IN ('Delivered','Received','Cancelled','Closed','Expired','Dispatched','In Transit')
                      AND p.ShipWindowEndDate IS NOT NULL
                      AND DATEDIFF(day, p.ShipWindowEndDate, GETDATE()) >= {_EXPIRY_DAYS}
                     THEN 'Expired'
-                    ELSE COALESCE(p.POStatus, agg.max_status, 'Created')
+                    ELSE CASE WHEN p.POStatus IN ('Delivered','Received','Cancelled','Closed','Dispatched','In Transit') THEN p.POStatus ELSE COALESCE(agg.max_status, p.POStatus, 'Created') END
                 END AS eff_status,
                 COALESCE(units.total_qty, 0) AS total_qty
             FROM AmazonPO p
@@ -440,8 +441,10 @@ async def get_amazon_purchase_orders(
                 f"AND DATEDIFF(day, AmazonPO.ShipWindowEndDate, GETDATE()) >= {_EXPIRY_DAYS}"
             ))
         else:
-            eff = func.coalesce(AmazonPOItemData.ItemStatus, AmazonPOData.POStatus, literal('Created'))
-            query = query.filter(eff == status)
+            query = query.filter(text(
+                f"CASE WHEN AmazonPO.POStatus IN ('Delivered','Received','Cancelled','Closed') "
+                f"THEN AmazonPO.POStatus ELSE COALESCE(AmazonPOItem.ItemStatus, AmazonPO.POStatus, 'Created') END = '{status}'"
+            ))
 
     if state:
         query = query.filter(AmazonPOData.ShipToState == state)
@@ -594,9 +597,10 @@ async def get_blinkit_po_overview(
                 f"AND DATEDIFF(day, BlinkitPO.POExpiryDate, GETDATE()) >= {_EXPIRY_DAYS}"
             ))
         else:
-            query = query.having(
-                func.coalesce(BlinkitPOData.Status, func.max(BlinkitPOItemData.ItemStatus), literal('Created')) == status
-            )
+            query = query.having(text(
+                f"CASE WHEN BlinkitPO.Status IN ('Delivered','Received','Cancelled','Closed','Dispatched','In Transit') "
+                f"THEN BlinkitPO.Status ELSE COALESCE(MAX(BlinkitPOItem.ItemStatus), BlinkitPO.Status, 'Created') END = '{status}'"
+            ))
     # Skip date filter when searching by PO number — the PO may predate the active range
     if not search:
         if start_date:
@@ -693,12 +697,12 @@ async def get_blinkit_po_stats(
         WITH base AS (
             SELECT
                 CASE
-                    WHEN COALESCE(p.Status, agg.max_status, 'Created')
+                    WHEN CASE WHEN p.Status IN ('Delivered','Received','Cancelled','Closed','Dispatched','In Transit') THEN p.Status ELSE COALESCE(agg.max_status, p.Status, 'Created') END
                          NOT IN ('Delivered','Received','Cancelled','Closed','Expired','Dispatched','In Transit')
                      AND p.POExpiryDate IS NOT NULL
                      AND DATEDIFF(day, p.POExpiryDate, GETDATE()) >= {_EXPIRY_DAYS}
                     THEN 'Expired'
-                    ELSE COALESCE(p.Status, agg.max_status, 'Created')
+                    ELSE CASE WHEN p.Status IN ('Delivered','Received','Cancelled','Closed','Dispatched','In Transit') THEN p.Status ELSE COALESCE(agg.max_status, p.Status, 'Created') END
                 END AS eff_status,
                 COALESCE(units.total_qty, 0) AS total_qty
             FROM BlinkitPO p
@@ -755,8 +759,10 @@ async def get_blinkit_purchase_orders(
                 f"AND DATEDIFF(day, BlinkitPO.POExpiryDate, GETDATE()) >= {_EXPIRY_DAYS}"
             ))
         else:
-            eff = func.coalesce(BlinkitPOItemData.ItemStatus, BlinkitPOData.Status, literal('Created'))
-            query = query.filter(eff == status)
+            query = query.filter(text(
+                f"CASE WHEN BlinkitPO.Status IN ('Delivered','Received','Cancelled','Closed') "
+                f"THEN BlinkitPO.Status ELSE COALESCE(BlinkitPOItem.ItemStatus, BlinkitPO.Status, 'Created') END = '{status}'"
+            ))
 
     if start_date:
         try:

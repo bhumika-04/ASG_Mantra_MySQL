@@ -26,7 +26,7 @@ import {
   Pencil,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import api from '@/lib/api';
 
 const STATUS_OPTIONS = ['Created', 'Dispatched', 'In Transit', 'Delivered', 'Delayed', 'Cancelled'];
@@ -49,6 +49,7 @@ interface PurchaseOrder {
   courier: string;
   tat: string;
   status: string;
+  po_status: string;
 }
 
 const NO_EXPIRY_OVERRIDE = new Set(['Delivered', 'Received', 'Cancelled', 'Closed', 'Expired', 'Dispatched', 'In Transit']);
@@ -103,13 +104,19 @@ const toRow = (po: any, channel: string): PurchaseOrder => {
     courier: po.courier || '-',
     tat: po.tat != null ? `${po.tat}d` : '-',
     status: effStatus(po.status || 'Created', expiryISO),
+    po_status: po.po_status || 'Created',
   };
 };
 
 export default function POLifecyclePage() {
   const router = useRouter();
-  const { filterMode, customStart, customEnd, channel, globalSearch, setGlobalSearchRaw } = useFilter();
+  const searchParams = useSearchParams();
+  const { filterMode, setFilterMode, customStart, customEnd, channel, globalSearch, setGlobalSearchRaw } = useFilter();
   const [gridSearch, setGridSearch] = useState('');
+  useEffect(() => {
+    const urlParam = searchParams.get('search');
+    if (urlParam) { setGridSearch(urlParam); setGlobalSearchRaw(urlParam); setFilterMode('all'); }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [filters, setFilters] = useState<FilterValues>(DEFAULT_FILTER_VALUES);
   const [page, setPage] = useState(1);
   const [allOrders, setAllOrders] = useState<PurchaseOrder[]>([]);
@@ -130,7 +137,7 @@ export default function POLifecyclePage() {
   const [isSaving, setIsSaving] = useState(false);
 
   const handleSaveStatus = async () => {
-    if (!statusDialogRow || statusInput === statusDialogRow.status) { setStatusDialogRow(null); return; }
+    if (!statusDialogRow || statusInput === statusDialogRow.po_status) { setStatusDialogRow(null); return; }
     setIsSaving(true);
     try {
       if (statusDialogRow.channel === 'Amazon') {
@@ -414,7 +421,7 @@ export default function POLifecyclePage() {
             {row.status}
           </Badge>
           <button
-            onClick={(e) => { e.stopPropagation(); setStatusDialogRow(row); setStatusInput(row.status); }}
+            onClick={(e) => { e.stopPropagation(); setStatusDialogRow(row); setStatusInput(row.po_status); }}
             className="p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
             title="Change status"
           >
