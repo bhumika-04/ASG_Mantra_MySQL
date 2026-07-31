@@ -39,6 +39,7 @@ import {
   RefreshCw,
   Calendar,
 } from 'lucide-react';
+import { getPoRowClass, getPoRowBgColor } from '@/lib/po-status';
 import api from '@/lib/api';
 import { fmtDate, toTitleCase } from '@/lib/format';
 
@@ -67,31 +68,6 @@ const BADGE_STYLES: Record<string, string> = {
 
 const STATUS_OPTIONS = ['Created', 'Dispatched', 'In Transit', 'Delivered', 'Delayed', 'Cancelled'];
 
-const NO_EXPIRY_OVERRIDE = new Set(['Delivered', 'Received', 'Cancelled', 'Closed', 'Expired', 'Dispatched', 'In Transit']);
-function effStatus(base: string, expiryISO: string | null): string {
-  if (NO_EXPIRY_OVERRIDE.has(base)) return base;
-  if (!expiryISO) return base;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  return today.getTime() > new Date(expiryISO + 'T00:00:00').getTime() ? 'Expired' : base;
-}
-function getPoRowClass(status: string, expiryISO: string | null): string | undefined {
-  if (['Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit'].includes(status)) return undefined;
-  if (!expiryISO) return undefined;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const d = Math.ceil((new Date(expiryISO + 'T00:00:00').getTime() - today.getTime()) / 86400000);
-  if (d < 0)  return 'bg-red-50 dark:bg-red-950/20';
-  if (d <= 7) return 'bg-yellow-50 dark:bg-yellow-950/20';
-  return undefined;
-}
-function getPoRowBgColor(status: string, expiryISO: string | null): string | undefined {
-  if (['Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit'].includes(status)) return undefined;
-  if (!expiryISO) return undefined;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const d = Math.ceil((new Date(expiryISO + 'T00:00:00').getTime() - today.getTime()) / 86400000);
-  if (d < 0)  return 'rgb(254,242,242)';
-  if (d <= 7) return 'rgb(254,252,232)';
-  return undefined;
-}
 
 interface POItem {
   id: number;
@@ -252,7 +228,7 @@ function BlinkitPOPageContent() {
     try {
       await api.purchaseOrders.updateBlinkitPOStatus(actionRow.po_id, { status: dbStatus });
       setPoData(prev => prev.map(p => p.po_id === actionRow.po_id
-        ? { ...p, status: effStatus(statusInput, p.expiryDateRaw), po_status: statusInput }
+        ? { ...p, status: statusInput, po_status: statusInput }
         : p));
       setStatsKey(k => k + 1);
       setPage(1);
@@ -386,7 +362,7 @@ function BlinkitPOPageContent() {
         expiryDateRaw: po.po_expiry_date || null,
         dispatch_date: po.dispatch_date || null,
         courier: po.courier || null,
-        status: effStatus(po.status || 'Created', po.po_expiry_date || null),
+        status: po.status || 'Created',
         po_status: po.po_status || 'Created',
       }));
       setPoData(transformedPOs);

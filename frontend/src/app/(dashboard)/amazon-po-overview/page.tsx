@@ -24,6 +24,7 @@ import {
   ShoppingCart,
   XCircle,
 } from 'lucide-react';
+import { getPoRowClass, getPoRowBgColor } from '@/lib/po-status';
 import api from '@/lib/api';
 import { fmtDate } from '@/lib/format';
 
@@ -47,35 +48,9 @@ interface POOverviewItem {
   state: string;
 }
 
-// Non-expiry-related terminal statuses — these don't need colour highlighting
-const NON_COLORED_STATUSES = new Set(['Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit']);
-const NO_EXPIRY_OVERRIDE = new Set([...NON_COLORED_STATUSES, 'Expired']);
 
-function effStatus(base: string, expiryISO: string | null): string {
-  if (NO_EXPIRY_OVERRIDE.has(base)) return base;
-  if (!expiryISO) return base;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  return today.getTime() > new Date(expiryISO + 'T00:00:00').getTime() ? 'Expired' : base;
-}
-
-function getExpiryRowClass(row: POOverviewItem): string | undefined {
-  if (NON_COLORED_STATUSES.has(row.status)) return undefined;
-  if (!row.expiryDateRaw) return undefined;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const d = Math.ceil((new Date(row.expiryDateRaw + 'T00:00:00').getTime() - today.getTime()) / 86400000);
-  if (d < 0)  return 'bg-red-50 dark:bg-red-950/20';
-  if (d <= 7) return 'bg-yellow-50 dark:bg-yellow-950/20';
-  return undefined;
-}
-function getExpiryRowBgColor(row: POOverviewItem): string | undefined {
-  if (NON_COLORED_STATUSES.has(row.status)) return undefined;
-  if (!row.expiryDateRaw) return undefined;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const d = Math.ceil((new Date(row.expiryDateRaw + 'T00:00:00').getTime() - today.getTime()) / 86400000);
-  if (d < 0)  return 'rgb(254,242,242)';
-  if (d <= 7) return 'rgb(254,252,232)';
-  return undefined;
-}
+const getExpiryRowClass   = (row: POOverviewItem) => getPoRowClass(row.status, row.expiryDateRaw);
+const getExpiryRowBgColor = (row: POOverviewItem) => getPoRowBgColor(row.status, row.expiryDateRaw);
 
 const KPI_CONFIG: Record<string, { icon: React.ReactNode; color: string; bg: string }> = {
   'Created':    { icon: <Clock className="h-5 w-5" />,        color: 'text-orange-600',  bg: 'bg-orange-100' },
@@ -124,7 +99,7 @@ export default function AmazonPOOverviewPage() {
     try {
       await api.purchaseOrders.updateAmazonPOStatus(statusDialogRow.po_id, { status: statusInput });
       setPoData(prev => prev.map(p => p.po_id === statusDialogRow.po_id
-        ? { ...p, status: effStatus(statusInput, p.expiryDateRaw), po_status: statusInput }
+        ? { ...p, status: statusInput, po_status: statusInput }
         : p));
       setStatsKey(k => k + 1);
       fetchGrid(page, globalSearch, filters.status || 'all', effectiveDateFrom, effectiveDateTo);
@@ -176,7 +151,7 @@ export default function AmazonPOOverviewPage() {
         courier: po.courier || null,
         products: po.item_count,
         totalQty: po.total_qty,
-        status: effStatus(po.status || 'Created', po.ship_window_end_date ? po.ship_window_end_date.slice(0, 10) : null),
+        status: po.status || 'Created',
         po_status: po.po_status ?? null,
         location: po.location || '—',
         state: po.ship_to_state || '—',

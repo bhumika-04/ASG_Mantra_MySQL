@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useRouter } from 'next/navigation';
+import { getPoRowClass, getPoRowBgColor } from '@/lib/po-status';
 import api from '@/lib/api';
 
 const STATUS_OPTIONS = ['Created', 'Dispatched', 'In Transit', 'Delivered', 'Delayed', 'Cancelled'];
@@ -54,31 +55,6 @@ interface PurchaseOrder {
   po_status: string;
 }
 
-const NO_EXPIRY_OVERRIDE = new Set(['Delivered', 'Received', 'Cancelled', 'Closed', 'Expired', 'Dispatched', 'In Transit']);
-function effStatus(base: string, expiryISO: string | null): string {
-  if (NO_EXPIRY_OVERRIDE.has(base)) return base;
-  if (!expiryISO) return base;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  return today.getTime() > new Date(expiryISO + 'T00:00:00').getTime() ? 'Expired' : base;
-}
-function getPoRowClass(status: string, expiryISO: string | null): string | undefined {
-  if (['Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit'].includes(status)) return undefined;
-  if (!expiryISO) return undefined;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const d = Math.ceil((new Date(expiryISO + 'T00:00:00').getTime() - today.getTime()) / 86400000);
-  if (d < 0)  return 'bg-red-50 dark:bg-red-950/20';
-  if (d <= 7) return 'bg-yellow-50 dark:bg-yellow-950/20';
-  return undefined;
-}
-function getPoRowBgColor(status: string, expiryISO: string | null): string | undefined {
-  if (['Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit'].includes(status)) return undefined;
-  if (!expiryISO) return undefined;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const d = Math.ceil((new Date(expiryISO + 'T00:00:00').getTime() - today.getTime()) / 86400000);
-  if (d < 0)  return 'rgb(254,242,242)';
-  if (d <= 7) return 'rgb(254,252,232)';
-  return undefined;
-}
 
 const PAGE_SIZE = 50;
 
@@ -104,8 +80,7 @@ const toRow = (po: any): PurchaseOrder => {
       : (po.ship_to_city || '-'),
     courier: po.courier || '-',
     tat: po.tat != null ? `${po.tat}d` : '-',
-    // Backend already applies the expiry override; effStatus is a no-op safety net
-    status: effStatus(po.status || 'Created', expiryISO),
+    status: po.status || 'Created',
     po_status: po.po_status || 'Created',
   };
 };
