@@ -63,16 +63,23 @@ def _po_expired_sql(status_col: str, item_expr: str, expiry_col: str) -> str:
             f"AND DATEDIFF(day, {expiry_col}, GETDATE()) >= {_EXPIRY_DAYS}))")
 
 
-def _po_status_filter_sql(status: str, status_col: str, item_expr: str, expiry_col: str) -> str:
-    """Complete predicate for a status filter, mirroring the stats CTE exactly.
+def _po_status_filter(status: str, status_col: str, item_expr: str, expiry_col: str):
+    """Bound predicate for a status filter, mirroring the stats CTE exactly.
 
     Every non-Expired status must also exclude POs the expiry override reclassifies as
     Expired, otherwise a PO counted as Expired by the KPI still shows up under its
-    stored status in the grid (13 Amazon POs sat in both 'Created' and 'Expired')."""
+    stored status in the grid (13 Amazon POs sat in both 'Created' and 'Expired').
+
+    The status value is bound as a parameter, never interpolated. It arrives straight
+    from a query string, so embedding it in the SQL text made every PO listing endpoint
+    injectable: ?status=' OR '1'='1 returned all rows regardless of status.
+    """
     expired = _po_expired_sql(status_col, item_expr, expiry_col)
     if status == 'Expired':
-        return expired
-    return f"({_po_status_expr(status_col, item_expr)} = '{status}' AND NOT {expired})"
+        return text(expired)
+    return text(
+        f"({_po_status_expr(status_col, item_expr)} = :po_status AND NOT {expired})"
+    ).bindparams(po_status=status)
 
 def _eff_status(base: Optional[str], expiry_date=None) -> str:
     """Compute display status: applies auto-expiry on top of the stored/derived status."""
@@ -328,9 +335,9 @@ async def get_amazon_po_overview(
     if search:
         query = query.filter(AmazonPOData.PONumber.ilike(f"%{search}%"))
     if status:
-        query = query.having(text(_po_status_filter_sql(
+        query = query.having(_po_status_filter(
             status, "AmazonPO.POStatus", "MAX(AmazonPOItem.ItemStatus)", "AmazonPO.ShipWindowEndDate"
-        )))
+        ))
     # Skip date filter when searching by PO number — the PO may predate the active range
     if not search:
         if start_date:
@@ -518,9 +525,9 @@ async def get_amazon_purchase_orders(
         )
 
     if status:
-        query = query.filter(text(_po_status_filter_sql(
+        query = query.filter(_po_status_filter(
             status, "AmazonPO.POStatus", "AmazonPOItem.ItemStatus", "AmazonPO.ShipWindowEndDate"
-        )))
+        ))
 
     if state:
         query = query.filter(AmazonPOData.ShipToState == state)
@@ -667,9 +674,9 @@ async def get_blinkit_po_overview(
     if search:
         query = query.filter(BlinkitPOData.PONumber.ilike(f"%{search}%"))
     if status:
-        query = query.having(text(_po_status_filter_sql(
+        query = query.having(_po_status_filter(
             status, "BlinkitPO.Status", "MAX(BlinkitPOItem.ItemStatus)", "BlinkitPO.POExpiryDate"
-        )))
+        ))
     # Skip date filter when searching by PO number — the PO may predate the active range
     if not search:
         if start_date:
@@ -1022,9 +1029,9 @@ async def get_blinkit_purchase_orders(
         )
 
     if status:
-        query = query.filter(text(_po_status_filter_sql(
+        query = query.filter(_po_status_filter(
             status, "BlinkitPO.Status", "BlinkitPOItem.ItemStatus", "BlinkitPO.POExpiryDate"
-        )))
+        ))
 
     if start_date:
         try:
@@ -1203,9 +1210,9 @@ async def get_all_purchase_orders(
                 AmazonPOItemData.ASIN.ilike(f"%{search}%")
             )
         if status:
-            aq = aq.filter(text(_po_status_filter_sql(
+            aq = aq.filter(_po_status_filter(
                 status, "AmazonPO.POStatus", "AmazonPOItem.ItemStatus", "AmazonPO.ShipWindowEndDate"
-            )))
+            ))
         if start:
             aq = aq.filter(AmazonPOData.OrderedOnDate >= start)
         if end:
@@ -1253,9 +1260,9 @@ async def get_all_purchase_orders(
                 BlinkitPOItemData.ItemCode.ilike(f"%{search}%")
             )
         if status:
-            bq = bq.filter(text(_po_status_filter_sql(
+            bq = bq.filter(_po_status_filter(
                 status, "BlinkitPO.Status", "BlinkitPOItem.ItemStatus", "BlinkitPO.POExpiryDate"
-            )))
+            ))
         if start:
             bq = bq.filter(BlinkitPOData.PODate >= start)
         if end:
