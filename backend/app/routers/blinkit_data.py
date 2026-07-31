@@ -78,9 +78,16 @@ def _get_packing_alerts_blinkit(db: Session, items: list) -> list:
         product = db.query(Product).filter(Product.AsgSku == item_code).first()
         packed_qty = 0
         if product:
-            packed_qty = db.query(sqlfunc.sum(Inventory.PackedQty)).filter(
+            # Only the product's most recent snapshot is current stock — summing every
+            # historical InventoryDate massively overstates what is available.
+            latest_date = db.query(sqlfunc.max(Inventory.InventoryDate)).filter(
                 Inventory.ProductId == product.Id
-            ).scalar() or 0
+            ).scalar()
+            if latest_date is not None:
+                packed_qty = db.query(sqlfunc.sum(Inventory.PackedQty)).filter(
+                    Inventory.ProductId == product.Id,
+                    Inventory.InventoryDate == latest_date,
+                ).scalar() or 0
         gap = int(ordered_qty) - packed_qty
         if gap > 0:
             alerts.append({
@@ -109,10 +116,20 @@ def _deduct_from_packed_inventory_blinkit(db: Session, items: list) -> list:
         if not product:
             continue
 
+        # Only deduct from the product's most recent snapshot. Querying every date would
+        # both overstate available stock and mutate historical rows, corrupting past
+        # inventory records.
+        latest_date = db.query(sqlfunc.max(Inventory.InventoryDate)).filter(
+            Inventory.ProductId == product.Id
+        ).scalar()
+        if latest_date is None:
+            continue
+
         inv_rows = db.query(Inventory).filter(
             Inventory.ProductId == product.Id,
+            Inventory.InventoryDate == latest_date,
             Inventory.PackedQty > 0
-        ).order_by(Inventory.InventoryDate.desc()).all()
+        ).all()
 
         total_packed = sum(i.PackedQty for i in inv_rows)
         qty_to_deduct = int(ordered_qty)
@@ -1754,7 +1771,8 @@ async def get_blinkit_sales_analytics(
             "total_records_in_range": total_records_in_range,
             "total_records_all_time": total_records_all_time,
             "date_range": {
-                "start": start_dt.isoformat(),
+                # start_dt is None in all-time mode (no lower bound) — must stay guarded
+                "start": start_dt.isoformat() if start_dt else None,
                 "end":   end_dt.isoformat(),
                 "days":  days,
             }

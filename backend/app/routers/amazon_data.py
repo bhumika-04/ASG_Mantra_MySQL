@@ -4,7 +4,8 @@ Writes to: AmazonSales, AmazonInventory, AmazonPO, AmazonPOItem
 """
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc, text
+from sqlalchemy import func, desc, text, and_
+from sqlalchemy.orm import aliased
 from datetime import datetime, date, timedelta
 from typing import Optional
 import pandas as pd
@@ -39,11 +40,26 @@ def _get_packing_alerts_amazon(db: Session, items: list) -> list:
     if not asins:
         return []
 
-    # Single query: join Product + Inventory to get packed qty per ASIN
+    # Only the most recent snapshot per product counts as current stock. Without this
+    # the sum spans every historical InventoryDate and massively overstates availability.
+    _inv = aliased(Inventory)
+    latest_date_for_product = (
+        db.query(func.max(_inv.InventoryDate))
+          .filter(_inv.ProductId == Inventory.ProductId)
+          .correlate(Inventory)
+          .scalar_subquery()
+    )
+
+    # Single query: join Product + Inventory to get packed qty per ASIN.
+    # The date predicate lives in the ON clause so products with no inventory row
+    # still come back (as NULL -> 0) instead of being dropped by the outer join.
     rows = db.query(
         Product.AmazonId,
         func.sum(Inventory.PackedQty).label('packed_qty')
-    ).outerjoin(Inventory, Inventory.ProductId == Product.Id)\
+    ).outerjoin(Inventory, and_(
+        Inventory.ProductId == Product.Id,
+        Inventory.InventoryDate == latest_date_for_product,
+    ))\
      .filter(Product.AmazonId.in_(asins))\
      .group_by(Product.AmazonId).all()
 
@@ -79,11 +95,20 @@ def _deduct_from_packed_inventory_amazon(db: Session, items: list) -> list:
         if not product:
             continue
 
-        # Get all inventory rows for this product (latest date per warehouse)
+        # Only deduct from the product's most recent snapshot. Querying every date would
+        # both overstate available stock and mutate historical rows, corrupting past
+        # inventory records.
+        latest_date = db.query(func.max(Inventory.InventoryDate)).filter(
+            Inventory.ProductId == product.Id
+        ).scalar()
+        if latest_date is None:
+            continue
+
         inv_rows = db.query(Inventory).filter(
             Inventory.ProductId == product.Id,
+            Inventory.InventoryDate == latest_date,
             Inventory.PackedQty > 0
-        ).order_by(Inventory.InventoryDate.desc()).all()
+        ).all()
 
         total_packed = sum(i.PackedQty for i in inv_rows)
         qty_to_deduct = int(ordered_qty)
@@ -1640,7 +1665,8 @@ async def get_amazon_sales_analytics(
             "total_records_in_range":   total_records_in_range,
             "total_records_all_time":   total_records_all_time,
             "date_range": {
-                "start": start_dt.isoformat(),
+                # start_dt is None in all-time mode (no lower bound) — must stay guarded
+                "start": start_dt.isoformat() if start_dt else None,
                 "end":   end_dt.isoformat(),
                 "days":  days,
             }

@@ -34,6 +34,14 @@ _EXPIRY_DAYS = 15  # PO is auto-shown as Expired when expiry date is this many d
 # just because the ship-window end date passed.
 _NO_EXPIRY_OVERRIDE = _TERMINAL_STATUSES | {'Dispatched', 'In Transit'}
 
+# Header statuses that take precedence over the max item status when deriving a PO's
+# effective status. Defined once because the overview, item-grid and stats queries each
+# carried their own copy and drifted: the item grid omitted Dispatched/In Transit, so
+# the same status filter returned different POs depending on which view you were in.
+# 'Expired' is absent by design — it is computed, never stored.
+_HEADER_WINS = ('Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit')
+_HEADER_WINS_SQL = "'" + "','".join(_HEADER_WINS) + "'"
+
 def _eff_status(base: Optional[str], expiry_date=None) -> str:
     """Compute display status: applies auto-expiry on top of the stored/derived status."""
     s = base or 'Created'
@@ -64,6 +72,33 @@ def _stats_set(key: str, data: dict):
 def _stats_invalidate():
     """Call after any mutation that changes PO status so next read is always fresh."""
     _stats_cache.clear()
+
+
+def _require_po_editor(current_user: User):
+    """Quantity edits cascade into inventory deductions — restrict to Admin/Manager,
+    matching the guard already applied to the PO status endpoints."""
+    if current_user.Role not in ["Admin", "Manager"]:
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+
+
+def _validate_qty(value, ordered_qty, field: str) -> int:
+    """Coerce a submitted quantity and bounds-check it against the line's ordered qty.
+
+    Without the upper bound an oversized value (e.g. 99999 on a 10-unit line) would
+    drive an equivalently oversized inventory deduction.
+    """
+    try:
+        qty = int(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail=f"{field} must be a whole number")
+    if qty < 0:
+        raise HTTPException(status_code=422, detail=f"{field} cannot be negative")
+    if ordered_qty is not None and qty > int(ordered_qty):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field} ({qty}) cannot exceed the ordered quantity ({int(ordered_qty)})",
+        )
+    return qty
 
 def _get_latest_inv_date(db):
     now = _time.monotonic()
@@ -271,7 +306,7 @@ async def get_amazon_po_overview(
             ))
         else:
             query = query.having(text(
-                f"CASE WHEN AmazonPO.POStatus IN ('Delivered','Received','Cancelled','Closed','Dispatched','In Transit') "
+                f"CASE WHEN AmazonPO.POStatus IN ({_HEADER_WINS_SQL}) "
                 f"THEN AmazonPO.POStatus ELSE COALESCE(MAX(AmazonPOItem.ItemStatus), AmazonPO.POStatus, 'Created') END = '{status}'"
             ))
     # Skip date filter when searching by PO number — the PO may predate the active range
@@ -374,12 +409,12 @@ async def get_amazon_po_stats(
         WITH base AS (
             SELECT
                 CASE
-                    WHEN CASE WHEN p.POStatus IN ('Delivered','Received','Cancelled','Closed','Dispatched','In Transit') THEN p.POStatus ELSE COALESCE(agg.max_status, p.POStatus, 'Created') END
-                         NOT IN ('Delivered','Received','Cancelled','Closed','Expired','Dispatched','In Transit')
+                    WHEN CASE WHEN p.POStatus IN ({_HEADER_WINS_SQL}) THEN p.POStatus ELSE COALESCE(agg.max_status, p.POStatus, 'Created') END
+                         NOT IN ({_HEADER_WINS_SQL},'Expired','Dispatched','In Transit')
                      AND p.ShipWindowEndDate IS NOT NULL
                      AND DATEDIFF(day, p.ShipWindowEndDate, GETDATE()) >= {_EXPIRY_DAYS}
                     THEN 'Expired'
-                    ELSE CASE WHEN p.POStatus IN ('Delivered','Received','Cancelled','Closed','Dispatched','In Transit') THEN p.POStatus ELSE COALESCE(agg.max_status, p.POStatus, 'Created') END
+                    ELSE CASE WHEN p.POStatus IN ({_HEADER_WINS_SQL}) THEN p.POStatus ELSE COALESCE(agg.max_status, p.POStatus, 'Created') END
                 END AS eff_status,
                 COALESCE(units.total_qty, 0) AS total_qty
             FROM AmazonPO p
@@ -470,7 +505,7 @@ async def get_amazon_purchase_orders(
             ))
         else:
             query = query.filter(text(
-                f"CASE WHEN AmazonPO.POStatus IN ('Delivered','Received','Cancelled','Closed') "
+                f"CASE WHEN AmazonPO.POStatus IN ({_HEADER_WINS_SQL}) "
                 f"THEN AmazonPO.POStatus ELSE COALESCE(AmazonPOItem.ItemStatus, AmazonPO.POStatus, 'Created') END = '{status}'"
             ))
 
@@ -497,9 +532,7 @@ async def get_amazon_purchase_orders(
     )
     # COUNT(*) OVER() rides along on returned rows only — paging past the end returns
     # none, so fall back to an explicit count rather than reporting a total of 0.
-    total = rows_with_count[0]._total if rows_with_count else (
-        db.query(func.count()).select_from(subq).scalar() or 0
-    )
+    total = rows_with_count[0]._total if rows_with_count else query.count()
     po_items = [r[0] for r in rows_with_count]
 
     # Batch load products by ASIN (eliminates N+1)
@@ -630,7 +663,7 @@ async def get_blinkit_po_overview(
             ))
         else:
             query = query.having(text(
-                f"CASE WHEN BlinkitPO.Status IN ('Delivered','Received','Cancelled','Closed','Dispatched','In Transit') "
+                f"CASE WHEN BlinkitPO.Status IN ({_HEADER_WINS_SQL}) "
                 f"THEN BlinkitPO.Status ELSE COALESCE(MAX(BlinkitPOItem.ItemStatus), BlinkitPO.Status, 'Created') END = '{status}'"
             ))
     # Skip date filter when searching by PO number — the PO may predate the active range
@@ -757,7 +790,7 @@ async def get_lifecycle_overview(
 
     # Mirrors the stats CTE: header status wins for shipped/terminal states, else max item status
     def _base_expr(status_col: str, item_alias: str = "i") -> str:
-        return (f"CASE WHEN p.{status_col} IN ('Delivered','Received','Cancelled','Closed','Dispatched','In Transit') "
+        return (f"CASE WHEN p.{status_col} IN ({_HEADER_WINS_SQL}) "
                 f"THEN p.{status_col} ELSE COALESCE(MAX({item_alias}.ItemStatus), p.{status_col}, 'Created') END")
 
     amz_sel = f"""
@@ -929,12 +962,12 @@ async def get_blinkit_po_stats(
         WITH base AS (
             SELECT
                 CASE
-                    WHEN CASE WHEN p.Status IN ('Delivered','Received','Cancelled','Closed','Dispatched','In Transit') THEN p.Status ELSE COALESCE(agg.max_status, p.Status, 'Created') END
-                         NOT IN ('Delivered','Received','Cancelled','Closed','Expired','Dispatched','In Transit')
+                    WHEN CASE WHEN p.Status IN ({_HEADER_WINS_SQL}) THEN p.Status ELSE COALESCE(agg.max_status, p.Status, 'Created') END
+                         NOT IN ({_HEADER_WINS_SQL},'Expired','Dispatched','In Transit')
                      AND p.POExpiryDate IS NOT NULL
                      AND DATEDIFF(day, p.POExpiryDate, GETDATE()) >= {_EXPIRY_DAYS}
                     THEN 'Expired'
-                    ELSE CASE WHEN p.Status IN ('Delivered','Received','Cancelled','Closed','Dispatched','In Transit') THEN p.Status ELSE COALESCE(agg.max_status, p.Status, 'Created') END
+                    ELSE CASE WHEN p.Status IN ({_HEADER_WINS_SQL}) THEN p.Status ELSE COALESCE(agg.max_status, p.Status, 'Created') END
                 END AS eff_status,
                 COALESCE(units.total_qty, 0) AS total_qty
             FROM BlinkitPO p
@@ -994,7 +1027,7 @@ async def get_blinkit_purchase_orders(
             ))
         else:
             query = query.filter(text(
-                f"CASE WHEN BlinkitPO.Status IN ('Delivered','Received','Cancelled','Closed') "
+                f"CASE WHEN BlinkitPO.Status IN ({_HEADER_WINS_SQL}) "
                 f"THEN BlinkitPO.Status ELSE COALESCE(BlinkitPOItem.ItemStatus, BlinkitPO.Status, 'Created') END = '{status}'"
             ))
 
@@ -1018,9 +1051,7 @@ async def get_blinkit_purchase_orders(
     )
     # COUNT(*) OVER() rides along on returned rows only — paging past the end returns
     # none, so fall back to an explicit count rather than reporting a total of 0.
-    total = rows_with_count[0]._total if rows_with_count else (
-        db.query(func.count()).select_from(subq).scalar() or 0
-    )
+    total = rows_with_count[0]._total if rows_with_count else query.count()
     po_items = [r[0] for r in rows_with_count]
 
     # Batch load products — priority: EagleCode→BlinkitId, ItemCode→BlinkitId, ItemCode→AsgSku
@@ -1512,10 +1543,15 @@ async def update_amazon_po_status(
         all_statuses = [i.ItemStatus for i in po.items]
         if all_statuses and all(s in _TERMINAL_STATUSES for s in all_statuses):
             sibling_statuses = set(all_statuses)
-            if sibling_statuses == {'Cancelled'}:
-                po.POStatus = 'Cancelled'
-            elif 'Received' in sibling_statuses or 'Delivered' in sibling_statuses:
+            # Precedence: any fulfilment wins, then a uniform Cancelled, then any
+            # remaining Closed/Cancelled mix closes the PO out. Without the third
+            # branch an all-Closed PO left the header stale.
+            if sibling_statuses & {'Received', 'Delivered'}:
                 po.POStatus = 'Delivered'
+            elif sibling_statuses == {'Cancelled'}:
+                po.POStatus = 'Cancelled'
+            elif sibling_statuses <= {'Closed', 'Cancelled'}:
+                po.POStatus = 'Closed'
 
     log_audit(db, current_user.Id, "STATUS_CHANGE", "AmazonPOItem", str(item.Id),
               old_values={"itemStatus": old_status},
@@ -1565,10 +1601,15 @@ async def update_blinkit_po_status(
         all_statuses = [i.ItemStatus for i in po.items]
         if all_statuses and all(s in _TERMINAL_STATUSES for s in all_statuses):
             sibling_statuses = set(all_statuses)
-            if sibling_statuses == {'Cancelled'}:
-                po.Status = 'Cancelled'
-            elif 'Received' in sibling_statuses or 'Delivered' in sibling_statuses:
+            # Precedence: any fulfilment wins, then a uniform Cancelled, then any
+            # remaining Closed/Cancelled mix closes the PO out. Without the third
+            # branch an all-Closed PO left the header stale.
+            if sibling_statuses & {'Received', 'Delivered'}:
                 po.Status = 'Delivered'
+            elif sibling_statuses == {'Cancelled'}:
+                po.Status = 'Cancelled'
+            elif sibling_statuses <= {'Closed', 'Cancelled'}:
+                po.Status = 'Closed'
 
     log_audit(db, current_user.Id, "STATUS_CHANGE", "BlinkitPOItem", str(item.Id),
               old_values={"itemStatus": old_status},
@@ -1770,6 +1811,8 @@ async def update_amazon_item_accepted_qty(
     current_user: User = Depends(get_current_user)
 ):
     """Set AcceptedQuantity on an Amazon PO line item and deduct from packed inventory."""
+    _require_po_editor(current_user)
+
     item = db.query(AmazonPOItemData).filter(AmazonPOItemData.Id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Amazon PO item not found")
@@ -1779,7 +1822,7 @@ async def update_amazon_item_accepted_qty(
         raise HTTPException(status_code=422, detail="accepted_qty is required")
 
     old_val = item.AcceptedQuantity or 0
-    new_val = int(accepted_qty)
+    new_val = _validate_qty(accepted_qty, item.QuantityRequested, "accepted_qty")
     item.AcceptedQuantity = new_val
 
     # Deduct the DIFFERENCE from packed inventory
@@ -1819,6 +1862,8 @@ async def update_amazon_item_received_qty(
     current_user: User = Depends(get_current_user)
 ):
     """Set QuantityReceived on an Amazon PO line item."""
+    _require_po_editor(current_user)
+
     item = db.query(AmazonPOItemData).filter(AmazonPOItemData.Id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Amazon PO item not found")
@@ -1828,7 +1873,7 @@ async def update_amazon_item_received_qty(
         raise HTTPException(status_code=422, detail="received_qty is required")
 
     old_val = item.QuantityReceived or 0
-    new_val = int(received_qty)
+    new_val = _validate_qty(received_qty, item.QuantityRequested, "received_qty")
     item.QuantityReceived = new_val
 
     log_audit(db, current_user.Id, "UPDATE", "AmazonPOItem", str(item_id),
@@ -1850,6 +1895,8 @@ async def update_blinkit_item_accepted_qty(
     current_user: User = Depends(get_current_user)
 ):
     """Set AcceptedQty on a Blinkit PO line item and deduct from packed inventory."""
+    _require_po_editor(current_user)
+
     item = db.query(BlinkitPOItemData).filter(BlinkitPOItemData.Id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Blinkit PO item not found")
@@ -1859,7 +1906,7 @@ async def update_blinkit_item_accepted_qty(
         raise HTTPException(status_code=422, detail="accepted_qty is required")
 
     old_val = item.AcceptedQty or 0
-    new_val = int(accepted_qty)
+    new_val = _validate_qty(accepted_qty, item.QTY, "accepted_qty")
     item.AcceptedQty = new_val
 
     # Deduct the DIFFERENCE from packed inventory
@@ -1908,8 +1955,7 @@ async def update_blinkit_item_received_qty(
     current_user: User = Depends(get_current_user)
 ):
     """Set ReceivedQty on a Blinkit PO line item."""
-    if current_user.Role not in ["Admin", "Manager"]:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    _require_po_editor(current_user)
 
     item = db.query(BlinkitPOItemData).filter(BlinkitPOItemData.Id == item_id).first()
     if not item:
@@ -1920,7 +1966,7 @@ async def update_blinkit_item_received_qty(
         raise HTTPException(status_code=422, detail="received_qty is required")
 
     old_val = item.ReceivedQty or 0
-    new_val = int(received_qty)
+    new_val = _validate_qty(received_qty, item.QTY, "received_qty")
     item.ReceivedQty = new_val
     log_audit(db, current_user.Id, "UPDATE", "BlinkitPOItem", str(item_id),
               old_values={"receivedQty": old_val},
