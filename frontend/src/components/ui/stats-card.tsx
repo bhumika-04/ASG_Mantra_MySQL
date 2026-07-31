@@ -106,11 +106,13 @@ export function StatsCard({
 // Grid of stats cards
 interface StatsGridProps {
   children: React.ReactNode;
-  columns?: 2 | 3 | 4 | 5 | 6 | 7;
+  columns?: 2 | 3 | 4 | 5 | 6 | 7 | 8;
   className?: string;
 }
 
 export function StatsGrid({ children, columns = 4, className }: StatsGridProps) {
+  // Intermediate breakpoints divide the count evenly so a row never leaves a single
+  // orphaned card on its own line — 8 wraps as 4+4, not 7+1.
   const gridCols = {
     2: 'md:grid-cols-2',
     3: 'md:grid-cols-3',
@@ -118,6 +120,7 @@ export function StatsGrid({ children, columns = 4, className }: StatsGridProps) 
     5: 'md:grid-cols-3 lg:grid-cols-5',
     6: 'md:grid-cols-3 lg:grid-cols-6',
     7: 'md:grid-cols-4 lg:grid-cols-7',
+    8: 'md:grid-cols-4 lg:grid-cols-8',
   };
 
   return (

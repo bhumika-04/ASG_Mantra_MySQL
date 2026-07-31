@@ -505,7 +505,9 @@ export default function POLifecyclePage() {
         {/* All PO is the unfiltered total for the date range; the seven status cards
             below sum to it. Other appears only if the backend returns a status without
             a card of its own (Closed / Received / Packed). */}
-        <StatsGrid columns={7}>
+        {/* 8 cards normally; 5 columns when the Other card appears so 9 wraps 5+4
+            rather than leaving one orphaned on its own row. */}
+        <StatsGrid columns={otherCount > 0 ? 5 : 8}>
           <StatsCard
             title="All PO"
             value={statsTotalPOs.toLocaleString('en-IN')}
