@@ -491,7 +491,7 @@ export default function POLifecyclePage() {
   return (
     <ProtectedRoute>
       <div className="p-6 space-y-6">
-        {/* Status Cards — all-time totals from stats endpoints */}
+        {/* Status Cards — totals from the stats endpoints for the active date range */}
         <StatsGrid columns={6}>
           <StatsCard
             title="Total POs"
@@ -556,7 +556,7 @@ export default function POLifecyclePage() {
           <Card>
             <CardHeader>
               <CardTitle>PO Status Distribution</CardTitle>
-              <p className="text-sm text-muted-foreground">Number of POs by status</p>
+              <p className="text-sm text-muted-foreground">Number of POs by status in the selected period</p>
             </CardHeader>
             <CardContent>
               <div className="h-80 relative">
@@ -574,6 +574,7 @@ export default function POLifecyclePage() {
                     { label: 'In Transit', count: inTransitCount, cls: 'bg-chart-3' },
                     { label: 'Delivered', count: deliveredCount, cls: 'bg-chart-4' },
                     { label: 'Delayed', count: delayedCount, cls: 'bg-red-400' },
+                    { label: 'Cancelled', count: cancelledCount, cls: 'bg-gray-400' },
                     { label: 'Expired', count: expiredCount, cls: 'bg-rose-400' },
                   ].map(({ label, count, cls }) => (
                     <div key={label} className="flex-1 flex flex-col items-center gap-2">
@@ -622,17 +623,22 @@ export default function POLifecyclePage() {
         <Card>
           <CardHeader>
             <CardTitle>Lifecycle Flow</CardTitle>
-            <p className="text-sm text-muted-foreground">PO count at each lifecycle stage (all-time)</p>
+            <p className="text-sm text-muted-foreground">PO count at each lifecycle stage in the selected period</p>
           </CardHeader>
           <CardContent>
             <div className="relative">
               <div className="absolute top-8 left-8 right-8 h-1 bg-gradient-to-r from-chart-1 via-chart-2 via-chart-3 via-chart-4 to-chart-5 hidden md:block" />
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-6 md:gap-4 relative">
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-6 md:gap-4 relative">
                 {[
+                  // Created → Dispatched → In Transit → Delivered is the progression;
+                  // Cancelled and Expired are terminal off-ramps. All six are shown so
+                  // the stages account for every PO in the grid — Cancelled was absent,
+                  // so 4 of the 31 POs in this range appeared in no stage at all.
                   { label: 'Created', count: createdCount, bg: 'bg-chart-1', Icon: FileCheck },
                   { label: 'Dispatched', count: dispatchedCount, bg: 'bg-chart-2', Icon: Send },
                   { label: 'In Transit', count: inTransitCount, bg: 'bg-chart-3', Icon: Truck },
                   { label: 'Delivered', count: deliveredCount, bg: 'bg-chart-4', Icon: CheckCircle2 },
+                  { label: 'Cancelled', count: cancelledCount, bg: 'bg-gray-400', Icon: XCircle },
                   { label: 'Expired', count: expiredCount, bg: 'bg-rose-400', Icon: CalendarX },
                 ].map(({ label, count, bg, Icon }) => (
                   <div key={label} className="flex flex-col items-center gap-3">
