@@ -225,7 +225,16 @@ export default function POLifecyclePage() {
   const inTransitCount = merged['In Transit'] || 0;
   const cancelledCount = merged['Cancelled'] || 0;
   const expiredCount = merged['Expired'] || 0;
-  const maxCount = Math.max(createdCount, dispatchedCount, inTransitCount, deliveredCount, delayedCount, cancelledCount, expiredCount, 1);
+
+  // The backend can return Closed, Received and Packed as well as the statuses above.
+  // Anything without its own stage lands here so the stages always reconcile to the
+  // total, rather than reconciling only while those statuses happen to be unused —
+  // Cancelled and Delayed were both silently dropped that way.
+  const STAGE_STATUSES = ['Created', 'Dispatched', 'In Transit', 'Delivered', 'Delayed', 'Cancelled', 'Expired'];
+  const statsTotalPOs = Object.values(merged).reduce((a, b) => a + b, 0);
+  const otherCount = Math.max(0, statsTotalPOs - STAGE_STATUSES.reduce((a, s) => a + (merged[s] || 0), 0));
+
+  const maxCount = Math.max(createdCount, dispatchedCount, inTransitCount, deliveredCount, delayedCount, cancelledCount, expiredCount, otherCount, 1);
 
   // Hub chart from current page data
   const hubMap = allOrders.reduce((acc, order) => {
@@ -493,7 +502,7 @@ export default function POLifecyclePage() {
     <ProtectedRoute>
       <div className="p-6 space-y-6">
         {/* Status Cards — totals from the stats endpoints for the active date range */}
-        <StatsGrid columns={6}>
+        <StatsGrid columns={7}>
           <StatsCard
             title="Total POs"
             value={total.toString()}
@@ -528,6 +537,13 @@ export default function POLifecyclePage() {
             icon={XCircle}
             description="Beyond expected date"
             variant="red"
+          />
+          <StatsCard
+            title="Cancelled"
+            value={cancelledCount.toString()}
+            icon={XCircle}
+            description="Cancelled POs"
+            variant="default"
           />
           <StatsCard
             title="Expired"
@@ -577,6 +593,7 @@ export default function POLifecyclePage() {
                     { label: 'Delayed', count: delayedCount, cls: 'bg-red-400' },
                     { label: 'Cancelled', count: cancelledCount, cls: 'bg-gray-400' },
                     { label: 'Expired', count: expiredCount, cls: 'bg-rose-400' },
+                    ...(otherCount > 0 ? [{ label: 'Other', count: otherCount, cls: 'bg-slate-400' }] : []),
                   ].map(({ label, count, cls }) => (
                     <div key={label} className="flex-1 flex flex-col items-center gap-2">
                       <div className={`w-full ${cls} rounded-t`} style={{ height: `${(count / maxCount) * 240}px` }} />
@@ -629,7 +646,7 @@ export default function POLifecyclePage() {
           <CardContent>
             <div className="relative">
               <div className="absolute top-8 left-8 right-8 h-1 bg-gradient-to-r from-chart-1 via-chart-2 via-chart-3 via-chart-4 to-chart-5 hidden md:block" />
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-6 md:gap-4 relative">
+              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-6 md:gap-4 relative">
                 {[
                   // Created → Dispatched → In Transit → Delivered is the progression;
                   // Cancelled and Expired are terminal off-ramps. All six are shown so
@@ -639,8 +656,10 @@ export default function POLifecyclePage() {
                   { label: 'Dispatched', count: dispatchedCount, bg: 'bg-chart-2', Icon: Send },
                   { label: 'In Transit', count: inTransitCount, bg: 'bg-chart-3', Icon: Truck },
                   { label: 'Delivered', count: deliveredCount, bg: 'bg-chart-4', Icon: CheckCircle2 },
+                  { label: 'Delayed', count: delayedCount, bg: 'bg-red-400', Icon: AlertTriangle },
                   { label: 'Cancelled', count: cancelledCount, bg: 'bg-gray-400', Icon: XCircle },
                   { label: 'Expired', count: expiredCount, bg: 'bg-rose-400', Icon: CalendarX },
+                  ...(otherCount > 0 ? [{ label: 'Other', count: otherCount, bg: 'bg-slate-400', Icon: FileText }] : []),
                 ].map(({ label, count, bg, Icon }) => (
                   <div key={label} className="flex flex-col items-center gap-3">
                     <div className={`w-16 h-16 rounded-full ${bg} flex items-center justify-center shadow-lg relative z-10`}>
