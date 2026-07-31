@@ -10,7 +10,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { TrendingUp, ShoppingCart, Package, Box, Download, Search, X } from 'lucide-react';
 import { exportToCSV } from '@/lib/export';
-import { fmtCurrency } from '@/lib/format';
+import { fmtCurrency, fmtMonthYear } from '@/lib/format';
 import {
   BarChart,
   Bar,
@@ -37,8 +37,7 @@ interface TopProduct {
 }
 
 function isoToMonthLabel(iso: string): string {
-  const d = new Date(iso + 'T00:00:00');
-  return d.toLocaleDateString('en-GB', { month: 'short', year: 'numeric' });
+  return fmtMonthYear(iso);
 }
 
 function aggregateDailyToMonthly(

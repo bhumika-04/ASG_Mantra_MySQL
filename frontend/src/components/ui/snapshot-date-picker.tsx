@@ -1,6 +1,7 @@
 'use client';
 
 import * as React from 'react';
+import { fmtDate } from '@/lib/format';
 import { ChevronLeft, ChevronRight, CalendarDays, ChevronDown, RotateCcw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -31,8 +32,7 @@ function parseISO(iso: string): { year: number; month: number; day: number } {
 }
 
 function formatDisplay(iso: string) {
-  const { year, month, day } = parseISO(iso);
-  return `${String(day).padStart(2, '0')} ${MONTHS[month].slice(0, 3)} ${year}`;
+  return fmtDate(iso);
 }
 
 export function SnapshotDatePicker({

@@ -1,6 +1,7 @@
 ﻿'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import { fmtDate, fmtDayMonth, fmtMonthYear } from '@/lib/format';
 import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
@@ -96,18 +97,13 @@ function stripBrand(name: string): string {
 
 function formatPeriodLabel(p: string, granularity: 'daily' | 'weekly' | 'monthly'): string {
   if ((granularity === 'daily' || granularity === 'weekly') && p.length === 10) {
-    const d = new Date(p + 'T00:00:00');
-    return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+    return fmtDayMonth(p);
   }
-  const [year, month] = p.split('-');
-  const d = new Date(parseInt(year), parseInt(month) - 1, 1);
-  return d.toLocaleDateString('en-IN', { month: 'short', year: '2-digit' });
+  return fmtMonthYear(p);
 }
 
 function fmtRangeDate(iso: string): string {
-  const [year, m, d] = iso.split('-');
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  return `${parseInt(d)} ${months[parseInt(m) - 1]} ${year}`;
+  return fmtDate(iso);
 }
 
 export default function DashboardPage() {

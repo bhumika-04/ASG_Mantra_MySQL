@@ -28,7 +28,7 @@ import {
   CheckCheck,
 } from 'lucide-react';
 import { exportToCSV } from '@/lib/export';
-import { toTitleCase } from '@/lib/format';
+import { toTitleCase, fmtDate } from '@/lib/format';
 import { toast } from 'sonner';
 import api from '@/lib/api';
 
@@ -182,10 +182,6 @@ export default function LowStockAlertsPage() {
 
   const totalPages = Math.ceil(totalAlerts / PAGE_SIZE);
 
-  const fmtDate = (iso: string | null) => {
-    if (!iso) return '—';
-    return new Date(iso).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: '2-digit' });
-  };
 
   return (
     <ProtectedRoute>
