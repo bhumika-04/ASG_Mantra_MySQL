@@ -99,7 +99,17 @@ export default function DistributorPage() {
         {row.itemName || '—'}
       </span>
     ) },
-    { id: 'reportDate', header: 'Report Date', accessorKey: 'reportDate', sortable: true, width: 120 },
+    {
+      id: 'reportDate',
+      header: 'Report Date',
+      accessorKey: 'reportDate',
+      sortable: true,
+      width: 120,
+      // The API returns this as ISO (2026-05-04). Without a cell renderer the grid
+      // printed it raw, so this was the one column still showing year-month-day.
+      // Sorting still uses the underlying ISO value, which sorts correctly.
+      cell: (row) => <span className="text-muted-foreground">{fmtDate(row.reportDate)}</span>,
+    },
     {
       id: 'closingQty',
       header: 'Total Stock',
