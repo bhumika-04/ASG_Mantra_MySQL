@@ -113,9 +113,21 @@ export default function SalesOverviewPage() {
       try {
         setIsLoading(true);
         const { start_date, end_date } = getDateParams();
-        const searchArgs = globalSearch.trim()
-          ? { asin: globalSearch.trim(), item_id: globalSearch.trim() }
-          : {};
+        // Amazon is queried by ASIN and Blinkit by item_id. Sending the same raw term to
+        // both hides half a cross-listed product's sales: searching by ASIN returned ₹0
+        // Blinkit revenue, and searching by Blinkit id returned ₹0 Amazon revenue.
+        // Resolve the term first so each channel is queried by the id it actually stores.
+        // Free text (e.g. "Epsom") does not resolve and falls through to name matching.
+        let searchArgs: { asin?: string; item_id?: string } = {};
+        if (globalSearch.trim()) {
+          const term = globalSearch.trim();
+          const resolved: any = await api.products.resolve(term).catch(() => null);
+          searchArgs = resolved?.matched
+            // Fall back to the raw term when a channel has no id — it matches nothing
+            // there, which is correct for a product that channel does not carry.
+            ? { asin: resolved.amazon_id || term, item_id: resolved.blinkit_id || term }
+            : { asin: term, item_id: term };
+        }
 
         const [amzResult, blkResult] = await Promise.allSettled([
           api.amazonSalesData.getAnalytics({ start_date, end_date, ...(searchArgs.asin ? { asin: searchArgs.asin } : {}) }),
@@ -139,38 +151,53 @@ export default function SalesOverviewPage() {
           blinkit_revenue: blkRevenue,
           amazon_units:    amzUnits,
           blinkit_units:   blkQty,
-          activeProducts:  (amazonAnalytics?.summary?.active_products || 0) + (blinkitAnalytics?.summary?.active_items || 0),
+          // Placeholder — replaced below with the distinct count after the SKU merge.
+          // Summing the per-channel counts double-counted cross-listed SKUs.
+          activeProducts:  0,
         });
 
+        // Merge on ASG SKU, not product name — the same product is listed under a
+        // different name on each channel, so name matching split it into two rows.
+        // Falls back to the lowercased name only when a row has no ASG SKU.
         const productMap = new Map<string, any>();
+        const mergeKey = (sku: string | undefined, name: string) =>
+          sku && sku.trim() ? `sku:${sku.trim().toLowerCase()}` : `name:${name.toLowerCase()}`;
+
         (amazonAnalytics?.top_products || []).forEach((p: any) => {
           const name = (p.product_title || p.asin || 'Unknown').trim();
-          const key = name.toLowerCase();
-          if (productMap.has(key)) {
-            const ex = productMap.get(key);
-            ex.amazon += Math.round(p.total_units || 0);
-            ex.total  += Math.round(p.total_units || 0);
+          const units = Math.round(p.total_units || 0);
+          const key = mergeKey(p.sku, name);
+          const ex = productMap.get(key);
+          if (ex) {
+            ex.amazon += units;
+            ex.total  += units;
             ex.amazonRevenue += (p.total_revenue || 0);
           } else {
-            // Use MAX(SKU) from analytics — already the product SKU stored at upload time
-            productMap.set(key, { name, sku: p.sku || p.asin || '', amazon: Math.round(p.total_units || 0), blinkit: 0, total: Math.round(p.total_units || 0), amazonRevenue: p.total_revenue || 0, blinkitRevenue: 0 });
+            productMap.set(key, { name, sku: p.sku || p.asin || '', amazon: units, blinkit: 0, total: units, amazonRevenue: p.total_revenue || 0, blinkitRevenue: 0 });
           }
         });
         (blinkitAnalytics?.top_products || []).forEach((p: any) => {
           const name = (p.item_name || String(p.item_id)).trim();
-          const key = name.toLowerCase();
-          if (productMap.has(key)) {
-            const ex = productMap.get(key);
-            ex.blinkit += Math.round(p.total_qty || 0);
-            ex.total   += Math.round(p.total_qty || 0);
+          const qty = Math.round(p.total_qty || 0);
+          const key = mergeKey(p.asg_sku, name);
+          const ex = productMap.get(key);
+          if (ex) {
+            ex.blinkit += qty;
+            ex.total   += qty;
             ex.blinkitRevenue += (p.total_revenue || 0);
           } else {
-            productMap.set(key, { name, sku: String(p.item_id), amazon: 0, blinkit: Math.round(p.total_qty || 0), total: Math.round(p.total_qty || 0), amazonRevenue: 0, blinkitRevenue: p.total_revenue || 0 });
+            productMap.set(key, { name, sku: p.asg_sku || String(p.item_id), amazon: 0, blinkit: qty, total: qty, amazonRevenue: 0, blinkitRevenue: p.total_revenue || 0 });
           }
         });
 
+        const merged = Array.from(productMap.values());
+
+        // Distinct products after the SKU merge. Summing the two channel counts
+        // double-counted every cross-listed SKU.
+        setStats(prev => ({ ...prev, activeProducts: merged.filter(p => p.total > 0).length }));
+
         setTopProducts(
-          Array.from(productMap.values())
+          merged
             .sort((a, b) => b.total - a.total)
             .map((p, i) => ({ rank: i + 1, ...p }))
         );

@@ -20,6 +20,19 @@ from app.utils.dependencies import get_current_user
 router = APIRouter()
 
 
+def _norm_identifier(value: Optional[str]) -> Optional[str]:
+    """Store a blank channel identifier as NULL, never ''.
+
+    Product resolution matches on equality (Product.AmazonId == asin) across ~25 call
+    sites. An empty string sitting in this column is matched by any lookup that
+    receives an empty value, silently resolving to the wrong product and moving that
+    product's stock. Clearing the field in the UI previously wrote '' rather than NULL.
+    """
+    if value is None:
+        return None
+    return value.strip() or None
+
+
 @router.get("/categories/list")
 async def get_categories(
     db: Session = Depends(get_db),
@@ -42,6 +55,48 @@ async def get_brands(
     """
     brands = db.query(Product.Brand).distinct().filter(Product.Brand.isnot(None)).all()
     return [brand[0] for brand in brands if brand[0]]
+
+
+@router.get("/resolve")
+async def resolve_product_identifiers(
+    q: str = Query(..., min_length=1, description="ASIN, Blinkit item id, or ASG SKU"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Resolve a search term to one product's per-channel identifiers.
+
+    Sales Overview queries Amazon by ASIN and Blinkit by item_id. Sending the same raw
+    term to both means searching a cross-listed product by its ASIN reports zero Blinkit
+    revenue, and searching by its Blinkit id reports zero Amazon revenue — each view
+    hides half the product's sales. Resolving the term first lets every channel be
+    queried by the identifier it actually stores.
+
+    Returns matched=False when the term is ambiguous or unmatched (e.g. free-text like
+    "Epsom"), so the caller falls back to plain name matching on both channels.
+    """
+    term = q.strip()
+    if not term:
+        return {"matched": False}
+
+    matches = db.query(Product).filter(
+        or_(
+            Product.AmazonId == term,
+            Product.BlinkitId == term,
+            func.lower(Product.AsgSku) == term.lower(),
+        )
+    ).all()
+
+    if len(matches) != 1:
+        return {"matched": False}
+
+    p = matches[0]
+    return {
+        "matched": True,
+        "asg_sku": p.AsgSku,
+        "amazon_id": p.AmazonId,
+        "blinkit_id": p.BlinkitId,
+        "product_name": p.ProductName,
+    }
 
 
 @router.get("", response_model=PaginatedResponse)
@@ -170,8 +225,8 @@ async def create_product(
     new_product = Product(
         ProductName=product_data.productName,
         AsgSku=product_data.asgSku,
-        AmazonId=product_data.amazonId,
-        BlinkitId=product_data.blinkitId,
+        AmazonId=_norm_identifier(product_data.amazonId),
+        BlinkitId=_norm_identifier(product_data.blinkitId),
         Gs1=product_data.gs1,
         Category=product_data.category,
         Brand=product_data.brand,
@@ -237,10 +292,10 @@ async def update_product(
         product.AsgSku = product_data.asgSku
 
     if product_data.amazonId is not None:
-        product.AmazonId = product_data.amazonId
+        product.AmazonId = _norm_identifier(product_data.amazonId)
 
     if product_data.blinkitId is not None:
-        product.BlinkitId = product_data.blinkitId
+        product.BlinkitId = _norm_identifier(product_data.blinkitId)
 
     if product_data.category is not None:
         product.Category = product_data.category

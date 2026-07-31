@@ -100,59 +100,6 @@ def _get_packing_alerts_blinkit(db: Session, items: list) -> list:
     return alerts
 
 
-def _deduct_from_packed_inventory_blinkit(db: Session, items: list) -> list:
-    """Deduct ordered qty from PackedQty in Inventory for each Blinkit PO item.
-    items: list of (item_code, item_name, ordered_qty)
-    Lookup by AsgSku first, then BlinkitId.
-    Returns list of shortfall warnings where packed_qty < ordered_qty.
-    """
-    warnings = []
-    for item_code, item_name, ordered_qty in items:
-        if not item_code or not ordered_qty:
-            continue
-        product = db.query(Product).filter(Product.AsgSku == item_code).first()
-        if not product:
-            product = db.query(Product).filter(Product.BlinkitId == item_code).first()
-        if not product:
-            continue
-
-        # Only deduct from the product's most recent snapshot. Querying every date would
-        # both overstate available stock and mutate historical rows, corrupting past
-        # inventory records.
-        latest_date = db.query(sqlfunc.max(Inventory.InventoryDate)).filter(
-            Inventory.ProductId == product.Id
-        ).scalar()
-        if latest_date is None:
-            continue
-
-        inv_rows = db.query(Inventory).filter(
-            Inventory.ProductId == product.Id,
-            Inventory.InventoryDate == latest_date,
-            Inventory.PackedQty > 0
-        ).all()
-
-        total_packed = sum(i.PackedQty for i in inv_rows)
-        qty_to_deduct = int(ordered_qty)
-        remaining = qty_to_deduct
-
-        for inv in inv_rows:
-            if remaining <= 0:
-                break
-            deduct = min(inv.PackedQty, remaining)
-            inv.PackedQty -= deduct
-            inv.CurrentStock = max(0, inv.CurrentStock - deduct)
-            remaining -= deduct
-
-        if remaining > 0 or total_packed == 0:
-            warnings.append({
-                "item_code": item_code,
-                "item_name": item_name or item_code,
-                "ordered_qty": qty_to_deduct,
-                "packed_qty": total_packed,
-                "shortfall": max(remaining, qty_to_deduct - total_packed),
-            })
-    return warnings
-
 router = APIRouter()
 
 
@@ -1685,25 +1632,30 @@ async def get_blinkit_sales_analytics(
         monthly_growth = round(((current_q - prev_q) / prev_q) * 100, 1) if prev_q > 0 else 0.0
 
         # ----- All products -----
+        # asg_sku is joined in so cross-channel views can merge on the ASG SKU rather
+        # than on product name — the same product is named differently per channel.
         top_rows = db.execute(text(f"""
             SELECT
-                ItemId,
-                MAX(ItemName)   AS item_name,
-                SUM(QtySold)    AS total_qty,
-                SUM(MRP)        AS total_revenue,
-                MIN(SaleDate)   AS first_sale,
-                MAX(SaleDate)   AS last_sale
-            FROM BlinkitSales
-            WHERE SaleDate >= :start_dt AND SaleDate <= :end_dt
-            {item_filter}
-            GROUP BY ItemId
-            ORDER BY SUM(QtySold) DESC
+                s.ItemId,
+                MAX(s.ItemName)   AS item_name,
+                SUM(s.QtySold)    AS total_qty,
+                SUM(s.MRP)        AS total_revenue,
+                MIN(s.SaleDate)   AS first_sale,
+                MAX(s.SaleDate)   AS last_sale,
+                MAX(p.AsgSku)     AS asg_sku
+            FROM BlinkitSales s
+            LEFT JOIN Products p ON p.BlinkitId = CAST(s.ItemId AS NVARCHAR(50))
+            WHERE s.SaleDate >= :start_dt AND s.SaleDate <= :end_dt
+            {item_filter.replace('ItemId', 's.ItemId').replace('ItemName', 's.ItemName')}
+            GROUP BY s.ItemId
+            ORDER BY SUM(s.QtySold) DESC
         """), {"start_dt": start_dt_s, "end_dt": end_dt_s, **item_params}).fetchall()
 
         top_products = [
             {
                 "item_id":       int(row[0] or 0),
                 "item_name":     row[1] or str(row[0]),
+                "asg_sku":       row[6] or "",
                 "total_qty":     float(row[2] or 0),
                 "total_revenue": float(row[3] or 0),
                 "first_sale":    row[4].strftime('%d-%m-%Y') if row[4] else None,

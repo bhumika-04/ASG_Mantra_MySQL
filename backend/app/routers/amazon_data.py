@@ -82,56 +82,6 @@ def _get_packing_alerts_amazon(db: Session, items: list) -> list:
     return alerts
 
 
-def _deduct_from_packed_inventory_amazon(db: Session, items: list) -> list:
-    """Deduct ordered qty from PackedQty in Inventory for each Amazon PO item.
-    items: list of (asin, title, ordered_qty)
-    Returns list of shortfall warnings for items where packed_qty < ordered_qty.
-    """
-    warnings = []
-    for asin, title, ordered_qty in items:
-        if not asin or not ordered_qty:
-            continue
-        product = db.query(Product).filter(Product.AmazonId == asin).first()
-        if not product:
-            continue
-
-        # Only deduct from the product's most recent snapshot. Querying every date would
-        # both overstate available stock and mutate historical rows, corrupting past
-        # inventory records.
-        latest_date = db.query(func.max(Inventory.InventoryDate)).filter(
-            Inventory.ProductId == product.Id
-        ).scalar()
-        if latest_date is None:
-            continue
-
-        inv_rows = db.query(Inventory).filter(
-            Inventory.ProductId == product.Id,
-            Inventory.InventoryDate == latest_date,
-            Inventory.PackedQty > 0
-        ).all()
-
-        total_packed = sum(i.PackedQty for i in inv_rows)
-        qty_to_deduct = int(ordered_qty)
-        remaining = qty_to_deduct
-
-        for inv in inv_rows:
-            if remaining <= 0:
-                break
-            deduct = min(inv.PackedQty, remaining)
-            inv.PackedQty -= deduct
-            inv.CurrentStock = max(0, inv.CurrentStock - deduct)
-            remaining -= deduct
-
-        if remaining > 0 or total_packed == 0:
-            warnings.append({
-                "asin": asin,
-                "title": title or asin,
-                "ordered_qty": qty_to_deduct,
-                "packed_qty": total_packed,
-                "shortfall": max(remaining, qty_to_deduct - total_packed),
-            })
-    return warnings
-
 logger = logging.getLogger(__name__)
 router = APIRouter()
 

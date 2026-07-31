@@ -319,6 +319,8 @@ export const api = {
       return apiFetch(`/api/products${query ? `?${query}` : ''}`);
     },
     getById: (id: number) => apiFetch(`/api/products/${id}`),
+    /** Resolve an ASIN / Blinkit item id / ASG SKU to that product's per-channel identifiers. */
+    resolve: (q: string) => apiFetch(`/api/products/resolve?q=${encodeURIComponent(q)}`),
     create: (data: any) =>
       apiFetch('/api/products', {
         method: 'POST',
