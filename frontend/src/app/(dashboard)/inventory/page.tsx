@@ -18,6 +18,7 @@ import { api } from '@/lib/api';
 import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
 import { exportToCSV } from '@/lib/export';
 import { toTitleCase } from '@/lib/format';
+import { LOW_STOCK_THRESHOLD } from '@/lib/constants';
 import { SnapshotDatePicker } from '@/components/ui/snapshot-date-picker';
 
 interface InventoryItem {
@@ -102,7 +103,7 @@ export default function InHouseInventoryPage() {
       filtered = filtered.filter((item) => {
         const stock = item.packedQty + item.unpackedQty;
         if (filters.status === 'out-of-stock') return stock === 0;
-        if (filters.status === 'low-stock') return stock > 0 && stock <= 10;
+        if (filters.status === 'low-stock') return stock > 0 && stock <= LOW_STOCK_THRESHOLD;
         if (filters.status === 'in-stock') return stock > 0;
         return true;
       });

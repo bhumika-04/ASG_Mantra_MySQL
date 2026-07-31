@@ -130,7 +130,11 @@ async def get_low_stock_dashboard(
     High-level low stock alerts for dashboard.
     Uses LEFT JOIN from Products → latest Inventory record.
     Includes products with no inventory record (treated as 0 packed = critical).
-    Severity: 'critical' = packed == 0 or no record, 'low' = packed 1-200.
+    Severity: 'critical' = packed == 0 or no record, 'low' = packed 1..LOW_STOCK_THRESHOLD.
+
+    Note this measures PackedQty (dispatch readiness), whereas /api/alerts measures total
+    sellable stock. Both now use the same threshold so the dashboard widget and the Low
+    Stock Alerts page cannot disagree on where the line sits.
     """
     from sqlalchemy.orm import outerjoin
 
@@ -158,8 +162,8 @@ async def get_low_stock_dashboard(
             .filter(~Product.AsgSku.like('UNLINKED-%'))
             .filter(
                 or_(
-                    inv_sq.c.inv_id == None,          # no inventory record
-                    inv_sq.c.PackedQty <= 200,        # low packed stock
+                    inv_sq.c.inv_id == None,                        # no inventory record
+                    inv_sq.c.PackedQty <= LOW_STOCK_THRESHOLD,      # low packed stock
                 )
             )
             .order_by(func.coalesce(inv_sq.c.PackedQty, -1).asc())

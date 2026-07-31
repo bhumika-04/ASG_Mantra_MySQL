@@ -274,7 +274,7 @@ async def sync_alerts(
             )
             db.add(alert)
             created_count += 1
-        elif total_stock < LOW_STOCK_THRESHOLD:
+        elif total_stock <= LOW_STOCK_THRESHOLD:
             alert = LowStockAlert(
                 ProductId=product_id,
                 Channel=None,
@@ -291,7 +291,10 @@ async def sync_alerts(
     if existing_alert_product_ids:
         for product in products:
             total_stock = int(product.total_stock or 0)
-            if product.Id in existing_alert_product_ids and total_stock >= LOW_STOCK_THRESHOLD:
+            # Strictly greater — the exact complement of the `<= threshold` create rule
+            # above. Using >= here would both raise and resolve an alert at exactly the
+            # threshold value on every run.
+            if product.Id in existing_alert_product_ids and total_stock > LOW_STOCK_THRESHOLD:
                 unresolved = (
                     db.query(LowStockAlert)
                     .filter(
