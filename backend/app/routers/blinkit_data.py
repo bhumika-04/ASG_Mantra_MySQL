@@ -690,7 +690,7 @@ async def preview_blinkit_inventory(
             try:
                 detected_date = datetime.strptime(date_match.group(1).replace('_', '-'), '%Y-%m-%d').date()
                 date_found = True
-            except:
+            except (ValueError, TypeError, AttributeError):
                 pass
 
         # If not in filename, try created_at column
@@ -703,7 +703,7 @@ async def preview_blinkit_inventory(
                     else:
                         detected_date = first_date.date() if hasattr(first_date, 'date') else first_date
                     date_found = True
-                except:
+                except (ValueError, TypeError, AttributeError):
                     pass
 
         col_map = {}
@@ -1120,6 +1120,10 @@ async def upload_blinkit_po(
     products_created = []
     warehouses_created = []
     seen_facility_names: set = set()
+    # PO numbers whose header this run created — used to tell "second row of a PO in this
+    # file" apart from "PO already uploaded previously".
+    po_numbers_created_this_run: set = set()
+    duplicate_pos_skipped: set = set()
 
     for idx, row in df.iterrows():
         try:
@@ -1130,6 +1134,17 @@ async def upload_blinkit_po(
 
             # Find or create PO header
             po = db.query(BlinkitPOData).filter(BlinkitPOData.PONumber == po_number).first()
+
+            # A PO spans several rows of the file, so finding the header is normal once
+            # we have created it from an earlier row. Finding one we did NOT create in
+            # this run means the PO was uploaded previously: the header dedupes but the
+            # line items below do not, so continuing would append a second full set of
+            # items and double every quantity on that PO. Skip those rows instead.
+            if po is not None and po_number not in po_numbers_created_this_run:
+                duplicate_pos_skipped.add(po_number)
+                rows_skipped += 1
+                continue
+
             if not po:
                 ship_to_name = safe_str(row.get('ShipToName') or row.get('Ship To Name'), 200)
                 ship_to_address = safe_str(row.get('ShipToAddress') or row.get('Ship To Address'), 500)
@@ -1175,6 +1190,7 @@ async def upload_blinkit_po(
                 db.add(po)
                 db.flush()
                 po_created += 1
+                po_numbers_created_this_run.add(po_number)
 
                 # Auto-create DistributorFacility from ShipToName (Eagle Network receiving point)
                 if ship_to_name:
@@ -1256,13 +1272,20 @@ async def upload_blinkit_po(
     db.commit()
     # Notify about low/insufficient packed inventory (no auto-deduction — manual via AcceptedQty)
     packing_alerts = _get_packing_alerts_blinkit(db, packing_items)
+    dupes = sorted(duplicate_pos_skipped)
+    message = f"Blinkit PO uploaded: {po_created} POs, {rows_processed} line items"
+    if dupes:
+        message += f" — skipped {len(dupes)} already-uploaded PO(s): {', '.join(dupes[:5])}"
+        if len(dupes) > 5:
+            message += f" and {len(dupes) - 5} more"
     return {
         "success": True,
-        "message": f"Blinkit PO uploaded: {po_created} POs, {rows_processed} line items",
+        "message": message,
         "data": {
             "po_created": po_created,
             "rows_processed": rows_processed,
             "rows_skipped": rows_skipped,
+            "duplicate_pos_skipped": dupes,
             "errors": errors,
             "packing_alerts": packing_alerts,
             "products_created": products_created,

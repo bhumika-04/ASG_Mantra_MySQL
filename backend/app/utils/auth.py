@@ -23,8 +23,17 @@ _USER_CACHE_TTL = 300  # seconds
 
 logger = logging.getLogger(__name__)
 
-# Security scheme
-security = HTTPBearer()
+# Security scheme.
+#
+# auto_error=False so a missing or malformed Authorization header returns None here and
+# we can raise 401 ourselves. FastAPI's default raises 403, which meant an expired
+# session produced 401 from /api/auth/me but 403 from every data endpoint. The frontend
+# only clears the session and redirects on 401 (see api.ts), so a 403 surfaced as a raw
+# "HTTP 403" error instead of sending the user to log in.
+#
+# 401 = not authenticated, 403 = authenticated but not permitted. The role checks across
+# the routers keep raising 403 and are unaffected.
+security = HTTPBearer(auto_error=False)
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -126,10 +135,16 @@ def verify_token(token: str) -> TokenData:
 
 
 def get_current_user_for_refresh(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
     """Like get_current_user but accepts expired tokens — only for use in /refresh."""
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     token = credentials.credentials
     token_data = verify_token_ignore_expiry(token)
     user = db.query(User).filter(User.Id == token_data.user_id).first()
@@ -141,7 +156,7 @@ def get_current_user_for_refresh(
 
 
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: Session = Depends(get_db),
 ) -> User:
     """
@@ -149,6 +164,14 @@ def get_current_user(
     Caches the User object per-token for 5 minutes to avoid a DB round-trip
     on every single API call (User.Id is a PK lookup but still adds latency).
     """
+    if credentials is None:
+        # Missing/malformed Authorization header. 401 (not 403) so the frontend treats
+        # it as an expired session and redirects to login.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     token = credentials.credentials
 
     # Fast path: serve from cache if not expired
