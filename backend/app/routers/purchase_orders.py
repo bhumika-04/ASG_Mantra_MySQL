@@ -507,7 +507,9 @@ async def get_amazon_po_states(
     return {"states": [r[0] for r in rows]}
 
 
-@router.get("/amazon", response_model=PaginatedResponse)
+# No response_model: this returns total_units/total_pos on top of the standard
+# pagination fields, and PaginatedResponse would silently strip them.
+@router.get("/amazon")
 async def get_amazon_purchase_orders(
     search: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
@@ -1039,7 +1041,9 @@ async def get_blinkit_po_stats(
     return result
 
 
-@router.get("/blinkit", response_model=PaginatedResponse)
+# No response_model: this returns total_units/total_pos on top of the standard
+# pagination fields, and PaginatedResponse would silently strip them.
+@router.get("/blinkit")
 async def get_blinkit_purchase_orders(
     search: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
