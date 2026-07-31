@@ -200,6 +200,21 @@ export default function BlinkitUploadPage() {
       const updated = result.data?.rows_updated || 0;
       toast.success(`Upload complete: ${processed + updated} records processed`);
 
+      // A PO that already exists is skipped rather than re-imported, because its line
+      // items would otherwise be appended a second time and every quantity would double.
+      // Say so explicitly — otherwise a file of already-uploaded POs reports
+      // "0 records processed" with no indication of why nothing happened.
+      const skipped: string[] = result.data?.duplicate_pos_skipped || [];
+      if (skipped.length > 0) {
+        const shown = skipped.slice(0, 5).join(', ');
+        const more = skipped.length > 5 ? ` and ${skipped.length - 5} more` : '';
+        toast.warning(
+          `${skipped.length} PO(s) already uploaded and were skipped: ${shown}${more}. ` +
+          `Re-uploading does not update an existing PO — edit it on the Blinkit PO page instead.`,
+          { duration: 10000 },
+        );
+      }
+
       // Notify about auto-created products and warehouses
       if (result.data?.products_created?.length > 0) {
         toast.info(`${result.data.products_created.length} new product(s) auto-created: ${result.data.products_created.map((p: any) => p.name).join(', ')}`);
