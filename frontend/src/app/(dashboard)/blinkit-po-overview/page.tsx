@@ -22,6 +22,7 @@ import {
   Download,
   Pencil,
   ShoppingCart,
+  XCircle,
 } from 'lucide-react';
 import api from '@/lib/api';
 import { fmtDate } from '@/lib/format';
@@ -82,6 +83,7 @@ const KPI_CONFIG: Record<string, { icon: React.ReactNode; color: string; bg: str
   'In Transit': { icon: <AlertCircle className="h-5 w-5" />,  color: 'text-yellow-600',  bg: 'bg-yellow-100' },
   'Delivered':  { icon: <CheckCircle2 className="h-5 w-5" />, color: 'text-emerald-600', bg: 'bg-emerald-100' },
   'Delayed':    { icon: <AlertCircle className="h-5 w-5" />,  color: 'text-red-600',     bg: 'bg-red-100' },
+  'Expired':    { icon: <XCircle className="h-5 w-5" />,      color: 'text-rose-600',    bg: 'bg-rose-100' },
 };
 
 const BADGE_STYLES: Record<string, string> = {
@@ -231,6 +233,7 @@ export default function BlinkitPOOverviewPage() {
     { label: 'Delivered',  value: 'Delivered' },
     { label: 'Delayed',    value: 'Delayed' },
     { label: 'Cancelled',  value: 'Cancelled' },
+    { label: 'Expired',    value: 'Expired' },
   ];
 
   // State filter is client-side (current page only)
@@ -261,6 +264,7 @@ export default function BlinkitPOOverviewPage() {
       inTransit:  sc['In Transit'] || 0,
       delivered:  sc['Delivered']  || 0,
       delayed:    sc['Delayed']    || 0,
+      expired:    sc['Expired']    || 0,
     };
   }, [statsData]);
 
@@ -416,13 +420,14 @@ export default function BlinkitPOOverviewPage() {
     { label: 'In Transit', count: stats.inTransit,  status: 'In Transit' },
     { label: 'Delivered',  count: stats.delivered,  status: 'Delivered' },
     { label: 'Delayed',    count: stats.delayed,    status: 'Delayed' },
+    { label: 'Expired',    count: stats.expired,    status: 'Expired' },
   ];
 
   return (
     <ProtectedRoute>
       <div className="p-6 space-y-6">
         {/* KPI Cards */}
-        <div className="grid grid-cols-3 md:grid-cols-6 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
           <div className="flex items-center gap-3 p-4 bg-card border rounded-xl">
             <div className="flex items-center justify-center h-10 w-10 rounded-full bg-yellow-100 text-yellow-600">
               <ShoppingCart className="h-5 w-5" />

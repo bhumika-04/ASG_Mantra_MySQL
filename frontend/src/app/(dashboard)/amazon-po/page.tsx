@@ -31,6 +31,7 @@ import {
   ShoppingCart,
   CheckCircle2,
   Clock,
+  XCircle,
   AlertCircle,
   Truck,
   Download,
@@ -50,6 +51,7 @@ const KPI_CONFIG: Record<string, { icon: React.ReactNode; color: string; bg: str
   'In Transit': { icon: <AlertCircle className="h-5 w-5" />,  color: 'text-yellow-600',  bg: 'bg-yellow-100',  desc: 'In transit' },
   'Delivered':  { icon: <CheckCircle2 className="h-5 w-5" />, color: 'text-emerald-600', bg: 'bg-emerald-100', desc: 'Completed' },
   'Delayed':    { icon: <AlertCircle className="h-5 w-5" />,  color: 'text-red-600',     bg: 'bg-red-100',     desc: 'Delayed' },
+  'Expired':    { icon: <XCircle className="h-5 w-5" />,      color: 'text-rose-600',    bg: 'bg-rose-100',    desc: 'Past expiry date' },
 };
 
 // Badge styles keyed by DB status name
@@ -696,6 +698,7 @@ function AmazonPOPageContent() {
     { label: 'Delivered',  value: 'Delivered' },
     { label: 'Delayed',    value: 'Delayed' },
     { label: 'Cancelled',  value: 'Cancelled' },
+    { label: 'Expired',    value: 'Expired' },
   ];
 
   // Global search + server filters are applied server-side. Grid search is client-side only.
@@ -721,6 +724,7 @@ function AmazonPOPageContent() {
     inTransit:  statsData?.status_counts?.['In Transit'] ?? 0,
     delivered:  statsData?.status_counts?.['Delivered'] ?? 0,
     delayed:    statsData?.status_counts?.['Delayed'] ?? 0,
+    expired:    statsData?.status_counts?.['Expired'] ?? 0,
   }), [statsData]);
 
   const kpiCards = [
@@ -729,14 +733,15 @@ function AmazonPOPageContent() {
     { label: 'In Transit', count: stats.inTransit,  status: 'In Transit' },
     { label: 'Delivered',  count: stats.delivered,  status: 'Delivered' },
     { label: 'Delayed',    count: stats.delayed,    status: 'Delayed' },
+    { label: 'Expired',    count: stats.expired,    status: 'Expired' },
   ];
 
   if (isLoading) {
     return (
       <ProtectedRoute>
         <div className="p-6 space-y-6">
-          <div className="grid grid-cols-3 md:grid-cols-6 gap-4">
-            {Array.from({ length: 6 }).map((_, i) => (
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
+            {Array.from({ length: 7 }).map((_, i) => (
               <div key={i} className="flex items-center gap-3 p-4 bg-card border rounded-xl">
                 <Skeleton className="h-10 w-10 rounded-full flex-shrink-0" />
                 <div className="space-y-2 flex-1">
@@ -778,7 +783,7 @@ function AmazonPOPageContent() {
     <ProtectedRoute>
       <div className="p-6 space-y-6">
         {/* KPI Cards */}
-        <div className="grid grid-cols-3 md:grid-cols-6 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
           <div className="flex items-center gap-3 p-4 bg-card border rounded-xl">
             <div className="flex items-center justify-center h-10 w-10 rounded-full bg-blue-100 text-blue-600">
               <ShoppingCart className="h-5 w-5" />

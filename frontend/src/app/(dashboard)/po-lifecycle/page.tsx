@@ -23,6 +23,7 @@ import {
   Send,
   CheckCircle2,
   XCircle,
+  CalendarX,
   Download,
   Pencil,
 } from 'lucide-react';
@@ -245,8 +246,9 @@ export default function POLifecyclePage() {
   const createdCount = merged['Created'] || 0;
   const dispatchedCount = merged['Dispatched'] || 0;
   const inTransitCount = merged['In Transit'] || 0;
-  const diffLossCount = merged['Diff Loss'] || 0;
-  const maxCount = Math.max(createdCount, dispatchedCount, inTransitCount, deliveredCount, delayedCount, diffLossCount, 1);
+  const cancelledCount = merged['Cancelled'] || 0;
+  const expiredCount = merged['Expired'] || 0;
+  const maxCount = Math.max(createdCount, dispatchedCount, inTransitCount, deliveredCount, delayedCount, cancelledCount, expiredCount, 1);
 
   // Hub chart from current page data
   const hubMap = allOrders.reduce((acc, order) => {
@@ -265,7 +267,8 @@ export default function POLifecyclePage() {
     { label: 'In Transit', value: 'In Transit' },
     { label: 'Delivered', value: 'Delivered' },
     { label: 'Delayed', value: 'Delayed' },
-    { label: 'Diff Loss', value: 'Diff Loss' },
+    { label: 'Cancelled', value: 'Cancelled' },
+    { label: 'Expired', value: 'Expired' },
   ];
 
   const getStatusColor = (status: string) => {
@@ -460,7 +463,7 @@ export default function POLifecyclePage() {
     <ProtectedRoute>
       <div className="p-6 space-y-6">
         {/* Status Cards — all-time totals from stats endpoints */}
-        <StatsGrid columns={5}>
+        <StatsGrid columns={6}>
           <StatsCard
             title="Total POs"
             value={total.toString()}
@@ -494,6 +497,13 @@ export default function POLifecyclePage() {
             value={delayedCount.toString()}
             icon={XCircle}
             description="Beyond expected date"
+            variant="red"
+          />
+          <StatsCard
+            title="Expired"
+            value={expiredCount.toString()}
+            icon={CalendarX}
+            description="Past expiry date"
             variant="red"
           />
         </StatsGrid>
@@ -535,7 +545,7 @@ export default function POLifecyclePage() {
                     { label: 'In Transit', count: inTransitCount, cls: 'bg-chart-3' },
                     { label: 'Delivered', count: deliveredCount, cls: 'bg-chart-4' },
                     { label: 'Delayed', count: delayedCount, cls: 'bg-red-400' },
-                    { label: 'Diff Loss', count: diffLossCount, cls: 'bg-orange-400' },
+                    { label: 'Expired', count: expiredCount, cls: 'bg-rose-400' },
                   ].map(({ label, count, cls }) => (
                     <div key={label} className="flex-1 flex flex-col items-center gap-2">
                       <div className={`w-full ${cls} rounded-t`} style={{ height: `${(count / maxCount) * 240}px` }} />
@@ -594,7 +604,7 @@ export default function POLifecyclePage() {
                   { label: 'Dispatched', count: dispatchedCount, bg: 'bg-chart-2', Icon: Send },
                   { label: 'In Transit', count: inTransitCount, bg: 'bg-chart-3', Icon: Truck },
                   { label: 'Delivered', count: deliveredCount, bg: 'bg-chart-4', Icon: CheckCircle2 },
-                  { label: 'Diff Loss', count: diffLossCount, bg: 'bg-chart-5', Icon: XCircle },
+                  { label: 'Expired', count: expiredCount, bg: 'bg-rose-400', Icon: CalendarX },
                 ].map(({ label, count, bg, Icon }) => (
                   <div key={label} className="flex flex-col items-center gap-3">
                     <div className={`w-16 h-16 rounded-full ${bg} flex items-center justify-center shadow-lg relative z-10`}>

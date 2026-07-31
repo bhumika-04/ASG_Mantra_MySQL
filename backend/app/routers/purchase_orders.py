@@ -38,9 +38,41 @@ _NO_EXPIRY_OVERRIDE = _TERMINAL_STATUSES | {'Dispatched', 'In Transit'}
 # effective status. Defined once because the overview, item-grid and stats queries each
 # carried their own copy and drifted: the item grid omitted Dispatched/In Transit, so
 # the same status filter returned different POs depending on which view you were in.
-# 'Expired' is absent by design — it is computed, never stored.
-_HEADER_WINS = ('Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit')
+# 'Expired' is included because it is a real stored header status, not only a computed
+# one — an explicitly expired PO must not be overridden by a stale item status.
+_HEADER_WINS = ('Delivered', 'Received', 'Cancelled', 'Closed', 'Dispatched', 'In Transit', 'Expired')
 _HEADER_WINS_SQL = "'" + "','".join(_HEADER_WINS) + "'"
+_NO_EXPIRY_SQL = "'" + "','".join(sorted(_NO_EXPIRY_OVERRIDE)) + "'"
+
+
+def _po_status_expr(status_col: str, item_expr: str) -> str:
+    """Effective PO status in SQL: an authoritative header status wins, otherwise fall
+    back to the item status. Shared by the overview, item-grid and stats queries."""
+    return (f"CASE WHEN {status_col} IN ({_HEADER_WINS_SQL}) THEN {status_col} "
+            f"ELSE COALESCE({item_expr}, {status_col}, 'Created') END")
+
+
+def _po_expired_sql(status_col: str, item_expr: str, expiry_col: str) -> str:
+    """Predicate matching Expired POs. Expired arises two ways and both must match:
+    stored explicitly on the header, or derived because the expiry date passed while
+    the PO was still open. The filter previously tested only the derived case, so it
+    returned 13 of 236 expired Amazon POs and 0 of 264 for Blinkit."""
+    return (f"({status_col} = 'Expired' OR ("
+            f"{_po_status_expr(status_col, item_expr)} NOT IN ({_NO_EXPIRY_SQL}) "
+            f"AND {expiry_col} IS NOT NULL "
+            f"AND DATEDIFF(day, {expiry_col}, GETDATE()) >= {_EXPIRY_DAYS}))")
+
+
+def _po_status_filter_sql(status: str, status_col: str, item_expr: str, expiry_col: str) -> str:
+    """Complete predicate for a status filter, mirroring the stats CTE exactly.
+
+    Every non-Expired status must also exclude POs the expiry override reclassifies as
+    Expired, otherwise a PO counted as Expired by the KPI still shows up under its
+    stored status in the grid (13 Amazon POs sat in both 'Created' and 'Expired')."""
+    expired = _po_expired_sql(status_col, item_expr, expiry_col)
+    if status == 'Expired':
+        return expired
+    return f"({_po_status_expr(status_col, item_expr)} = '{status}' AND NOT {expired})"
 
 def _eff_status(base: Optional[str], expiry_date=None) -> str:
     """Compute display status: applies auto-expiry on top of the stored/derived status."""
@@ -296,19 +328,9 @@ async def get_amazon_po_overview(
     if search:
         query = query.filter(AmazonPOData.PONumber.ilike(f"%{search}%"))
     if status:
-        if status == 'Expired':
-            # 'Expired' is computed — never stored in DB; raw SQL mirrors stats CTE logic exactly
-            _ov = "','".join(sorted(_NO_EXPIRY_OVERRIDE))
-            query = query.having(text(
-                f"COALESCE(AmazonPO.POStatus, MAX(AmazonPOItem.ItemStatus), 'Created') NOT IN ('{_ov}') "
-                f"AND AmazonPO.ShipWindowEndDate IS NOT NULL "
-                f"AND DATEDIFF(day, AmazonPO.ShipWindowEndDate, GETDATE()) >= {_EXPIRY_DAYS}"
-            ))
-        else:
-            query = query.having(text(
-                f"CASE WHEN AmazonPO.POStatus IN ({_HEADER_WINS_SQL}) "
-                f"THEN AmazonPO.POStatus ELSE COALESCE(MAX(AmazonPOItem.ItemStatus), AmazonPO.POStatus, 'Created') END = '{status}'"
-            ))
+        query = query.having(text(_po_status_filter_sql(
+            status, "AmazonPO.POStatus", "MAX(AmazonPOItem.ItemStatus)", "AmazonPO.ShipWindowEndDate"
+        )))
     # Skip date filter when searching by PO number — the PO may predate the active range
     if not search:
         if start_date:
@@ -496,18 +518,9 @@ async def get_amazon_purchase_orders(
         )
 
     if status:
-        if status == 'Expired':
-            _ov = "','".join(sorted(_NO_EXPIRY_OVERRIDE))
-            query = query.filter(text(
-                f"COALESCE(AmazonPOItem.ItemStatus, AmazonPO.POStatus, 'Created') NOT IN ('{_ov}') "
-                f"AND AmazonPO.ShipWindowEndDate IS NOT NULL "
-                f"AND DATEDIFF(day, AmazonPO.ShipWindowEndDate, GETDATE()) >= {_EXPIRY_DAYS}"
-            ))
-        else:
-            query = query.filter(text(
-                f"CASE WHEN AmazonPO.POStatus IN ({_HEADER_WINS_SQL}) "
-                f"THEN AmazonPO.POStatus ELSE COALESCE(AmazonPOItem.ItemStatus, AmazonPO.POStatus, 'Created') END = '{status}'"
-            ))
+        query = query.filter(text(_po_status_filter_sql(
+            status, "AmazonPO.POStatus", "AmazonPOItem.ItemStatus", "AmazonPO.ShipWindowEndDate"
+        )))
 
     if state:
         query = query.filter(AmazonPOData.ShipToState == state)
@@ -654,18 +667,9 @@ async def get_blinkit_po_overview(
     if search:
         query = query.filter(BlinkitPOData.PONumber.ilike(f"%{search}%"))
     if status:
-        if status == 'Expired':
-            _ov = "','".join(sorted(_NO_EXPIRY_OVERRIDE))
-            query = query.having(text(
-                f"COALESCE(BlinkitPO.Status, MAX(BlinkitPOItem.ItemStatus), 'Created') NOT IN ('{_ov}') "
-                f"AND BlinkitPO.POExpiryDate IS NOT NULL "
-                f"AND DATEDIFF(day, BlinkitPO.POExpiryDate, GETDATE()) >= {_EXPIRY_DAYS}"
-            ))
-        else:
-            query = query.having(text(
-                f"CASE WHEN BlinkitPO.Status IN ({_HEADER_WINS_SQL}) "
-                f"THEN BlinkitPO.Status ELSE COALESCE(MAX(BlinkitPOItem.ItemStatus), BlinkitPO.Status, 'Created') END = '{status}'"
-            ))
+        query = query.having(text(_po_status_filter_sql(
+            status, "BlinkitPO.Status", "MAX(BlinkitPOItem.ItemStatus)", "BlinkitPO.POExpiryDate"
+        )))
     # Skip date filter when searching by PO number — the PO may predate the active range
     if not search:
         if start_date:
@@ -1018,18 +1022,9 @@ async def get_blinkit_purchase_orders(
         )
 
     if status:
-        if status == 'Expired':
-            _ov = "','".join(sorted(_NO_EXPIRY_OVERRIDE))
-            query = query.filter(text(
-                f"COALESCE(BlinkitPOItem.ItemStatus, BlinkitPO.Status, 'Created') NOT IN ('{_ov}') "
-                f"AND BlinkitPO.POExpiryDate IS NOT NULL "
-                f"AND DATEDIFF(day, BlinkitPO.POExpiryDate, GETDATE()) >= {_EXPIRY_DAYS}"
-            ))
-        else:
-            query = query.filter(text(
-                f"CASE WHEN BlinkitPO.Status IN ({_HEADER_WINS_SQL}) "
-                f"THEN BlinkitPO.Status ELSE COALESCE(BlinkitPOItem.ItemStatus, BlinkitPO.Status, 'Created') END = '{status}'"
-            ))
+        query = query.filter(text(_po_status_filter_sql(
+            status, "BlinkitPO.Status", "BlinkitPOItem.ItemStatus", "BlinkitPO.POExpiryDate"
+        )))
 
     if start_date:
         try:
@@ -1208,18 +1203,9 @@ async def get_all_purchase_orders(
                 AmazonPOItemData.ASIN.ilike(f"%{search}%")
             )
         if status:
-            if status == 'Expired':
-                aq = aq.filter(
-                    and_(
-                        func.coalesce(AmazonPOItemData.ItemStatus, AmazonPOData.POStatus, literal('Created')).notin_(
-                            list(_NO_EXPIRY_OVERRIDE)
-                        ),
-                        AmazonPOData.ShipWindowEndDate.isnot(None),
-                        func.datediff(text('day'), AmazonPOData.ShipWindowEndDate, func.current_timestamp()) >= _EXPIRY_DAYS
-                    )
-                )
-            else:
-                aq = aq.filter(func.coalesce(AmazonPOItemData.ItemStatus, AmazonPOData.POStatus, literal('Created')) == status)
+            aq = aq.filter(text(_po_status_filter_sql(
+                status, "AmazonPO.POStatus", "AmazonPOItem.ItemStatus", "AmazonPO.ShipWindowEndDate"
+            )))
         if start:
             aq = aq.filter(AmazonPOData.OrderedOnDate >= start)
         if end:
@@ -1267,18 +1253,9 @@ async def get_all_purchase_orders(
                 BlinkitPOItemData.ItemCode.ilike(f"%{search}%")
             )
         if status:
-            if status == 'Expired':
-                bq = bq.filter(
-                    and_(
-                        func.coalesce(BlinkitPOItemData.ItemStatus, BlinkitPOData.Status, literal('Created')).notin_(
-                            list(_NO_EXPIRY_OVERRIDE)
-                        ),
-                        BlinkitPOData.POExpiryDate.isnot(None),
-                        func.datediff(text('day'), BlinkitPOData.POExpiryDate, func.current_timestamp()) >= _EXPIRY_DAYS
-                    )
-                )
-            else:
-                bq = bq.filter(func.coalesce(BlinkitPOItemData.ItemStatus, BlinkitPOData.Status, literal('Created')) == status)
+            bq = bq.filter(text(_po_status_filter_sql(
+                status, "BlinkitPO.Status", "BlinkitPOItem.ItemStatus", "BlinkitPO.POExpiryDate"
+            )))
         if start:
             bq = bq.filter(BlinkitPOData.PODate >= start)
         if end:
