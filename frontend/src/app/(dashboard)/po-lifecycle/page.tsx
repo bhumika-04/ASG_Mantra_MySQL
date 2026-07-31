@@ -215,10 +215,8 @@ export default function POLifecyclePage() {
     merged[s] = (sc_a[s] || 0) + (sc_b[s] || 0);
   });
 
-  const inTransitPOs = merged['In Transit'] || 0;
   const deliveredCount = merged['Delivered'] || 0;
   const delayedCount = merged['Delayed'] || 0;
-  const linkedPOs = merged['Created'] || 0;
 
   const createdCount = merged['Created'] || 0;
   const dispatchedCount = merged['Dispatched'] || 0;
@@ -232,6 +230,8 @@ export default function POLifecyclePage() {
   // Cancelled and Delayed were both silently dropped that way.
   const STAGE_STATUSES = ['Created', 'Dispatched', 'In Transit', 'Delivered', 'Delayed', 'Cancelled', 'Expired'];
   const statsTotalPOs = Object.values(merged).reduce((a, b) => a + b, 0);
+  const statsTotalUnits = (channel !== 'blinkit' ? stats.amazon.total_units || 0 : 0)
+                        + (channel !== 'amazon'  ? stats.blinkit.total_units || 0 : 0);
   const otherCount = Math.max(0, statsTotalPOs - STAGE_STATUSES.reduce((a, s) => a + (merged[s] || 0), 0));
 
   const maxCount = Math.max(createdCount, dispatchedCount, inTransitCount, deliveredCount, delayedCount, cancelledCount, expiredCount, otherCount, 1);
@@ -502,24 +502,34 @@ export default function POLifecyclePage() {
     <ProtectedRoute>
       <div className="p-6 space-y-6">
         {/* Status Cards — totals from the stats endpoints for the active date range */}
+        {/* All PO is the unfiltered total for the date range; the seven status cards
+            below sum to it. Other appears only if the backend returns a status without
+            a card of its own (Closed / Received / Packed). */}
         <StatsGrid columns={7}>
           <StatsCard
-            title="Total POs"
-            value={total.toString()}
+            title="All PO"
+            value={statsTotalPOs.toLocaleString('en-IN')}
             icon={Package}
-            description={`${totalUnits.toLocaleString('en-IN')} units`}
+            description={`${statsTotalUnits.toLocaleString('en-IN')} units`}
             variant="blue"
           />
           <StatsCard
-            title="Linked POs"
-            value={linkedPOs.toString()}
-            icon={FileText}
+            title="Created"
+            value={createdCount.toString()}
+            icon={FileCheck}
             description="Awaiting dispatch"
             variant="purple"
           />
           <StatsCard
+            title="Dispatched"
+            value={dispatchedCount.toString()}
+            icon={Send}
+            description="Left the warehouse"
+            variant="blue"
+          />
+          <StatsCard
             title="In Transit"
-            value={inTransitPOs.toString()}
+            value={inTransitCount.toString()}
             icon={Truck}
             description="On the way"
             variant="yellow"
@@ -534,7 +544,7 @@ export default function POLifecyclePage() {
           <StatsCard
             title="Delayed"
             value={delayedCount.toString()}
-            icon={XCircle}
+            icon={AlertTriangle}
             description="Beyond expected date"
             variant="red"
           />
@@ -552,6 +562,15 @@ export default function POLifecyclePage() {
             description="Past expiry date"
             variant="red"
           />
+          {otherCount > 0 && (
+            <StatsCard
+              title="Other"
+              value={otherCount.toString()}
+              icon={FileText}
+              description="Closed / Received / Packed"
+              variant="default"
+            />
+          )}
         </StatsGrid>
 
         {/* Delay Alert Banner */}

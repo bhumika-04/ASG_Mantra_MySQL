@@ -51,6 +51,7 @@ const KPI_CONFIG: Record<string, { icon: React.ReactNode; color: string; bg: str
   'In Transit': { icon: <AlertCircle className="h-5 w-5" />,  color: 'text-yellow-600',  bg: 'bg-yellow-100',  desc: 'In transit' },
   'Delivered':  { icon: <CheckCircle2 className="h-5 w-5" />, color: 'text-emerald-600', bg: 'bg-emerald-100', desc: 'Completed' },
   'Delayed':    { icon: <AlertCircle className="h-5 w-5" />,  color: 'text-red-600',     bg: 'bg-red-100',     desc: 'Delayed' },
+  'Cancelled':  { icon: <XCircle className="h-5 w-5" />,      color: 'text-gray-600',    bg: 'bg-gray-100',    desc: 'Cancelled' },
   'Expired':    { icon: <XCircle className="h-5 w-5" />,      color: 'text-rose-600',    bg: 'bg-rose-100',    desc: 'Past expiry date' },
 };
 
@@ -138,8 +139,6 @@ function BlinkitPOPageContent() {
   const [poData, setPoData] = useState<POItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [total, setTotal] = useState(0);
-  const [totalUnits, setTotalUnits] = useState(0);
-  const [totalPos, setTotalPos] = useState(0);
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 50;
   const [statsData, setStatsData] = useState<{ status_counts: Record<string, number>; total_pos: number; total_units: number } | null>(null);
@@ -374,8 +373,6 @@ function BlinkitPOPageContent() {
       const transformedPOs = (response.items || []).map(toPOItem);
       setPoData(transformedPOs);
       setTotal(response.total || 0);
-      setTotalUnits(response.total_units || 0);
-      setTotalPos(response.total_pos || 0);
     } catch (error) {
       if (fetchSeqRef.current !== seq) return;
       console.error('Error fetching Blinkit purchase orders:', error);
@@ -790,13 +787,18 @@ function BlinkitPOPageContent() {
     return [{ label: 'All', value: 'all' }, ...states.map(s => ({ label: s, value: s }))];
   }, [poData]);
 
-  const totalPOs = totalPos;
+  // All PO is the unfiltered total for the active date range, so the seven status
+  // cards below always sum to it. Taking it from the status-filtered grid response
+  // would break that the moment a status card is clicked.
+  const totalPOs = statsData?.total_pos ?? 0;
+  const totalUnits = statsData?.total_units ?? 0;
   const stats = useMemo(() => ({
     created:    statsData?.status_counts?.['Created'] ?? 0,
     dispatched: statsData?.status_counts?.['Dispatched'] ?? 0,
     inTransit:  statsData?.status_counts?.['In Transit'] ?? 0,
     delivered:  statsData?.status_counts?.['Delivered'] ?? 0,
     delayed:    statsData?.status_counts?.['Delayed'] ?? 0,
+    cancelled:  statsData?.status_counts?.['Cancelled'] ?? 0,
     expired:    statsData?.status_counts?.['Expired'] ?? 0,
   }), [statsData]);
 
@@ -806,6 +808,7 @@ function BlinkitPOPageContent() {
     { label: 'In Transit', count: stats.inTransit,  status: 'In Transit' },
     { label: 'Delivered',  count: stats.delivered,  status: 'Delivered' },
     { label: 'Delayed',    count: stats.delayed,    status: 'Delayed' },
+    { label: 'Cancelled',  count: stats.cancelled,  status: 'Cancelled' },
     { label: 'Expired',    count: stats.expired,    status: 'Expired' },
   ];
 
@@ -813,7 +816,7 @@ function BlinkitPOPageContent() {
     return (
       <ProtectedRoute>
         <div className="p-6 space-y-6">
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4">
             {Array.from({ length: 7 }).map((_, i) => (
               <div key={i} className="flex items-center gap-3 p-4 bg-card border rounded-xl">
                 <Skeleton className="h-10 w-10 rounded-full flex-shrink-0" />
@@ -856,15 +859,15 @@ function BlinkitPOPageContent() {
     <ProtectedRoute>
       <div className="p-6 space-y-6">
         {/* KPI Cards */}
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4">
           <div className="flex items-center gap-3 p-4 bg-card border rounded-xl">
             <div className="flex items-center justify-center h-10 w-10 rounded-full bg-yellow-100 text-yellow-600">
               <ShoppingCart className="h-5 w-5" />
             </div>
             <div>
-              <p className="text-xs text-muted-foreground">Total POs</p>
+              <p className="text-xs text-muted-foreground">All PO</p>
               <p className="text-xl font-bold">{totalPOs}</p>
-              <p className="text-xs text-muted-foreground">{totalUnits.toLocaleString('en-IN')} units · {total.toLocaleString('en-IN')} items</p>
+              <p className="text-xs text-muted-foreground">{totalUnits.toLocaleString('en-IN')} units</p>
             </div>
           </div>
           {kpiCards.map(({ label, count, status }) => {

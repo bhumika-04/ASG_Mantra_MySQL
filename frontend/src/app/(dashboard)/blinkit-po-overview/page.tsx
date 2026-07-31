@@ -59,6 +59,7 @@ const KPI_CONFIG: Record<string, { icon: React.ReactNode; color: string; bg: str
   'In Transit': { icon: <AlertCircle className="h-5 w-5" />,  color: 'text-yellow-600',  bg: 'bg-yellow-100' },
   'Delivered':  { icon: <CheckCircle2 className="h-5 w-5" />, color: 'text-emerald-600', bg: 'bg-emerald-100' },
   'Delayed':    { icon: <AlertCircle className="h-5 w-5" />,  color: 'text-red-600',     bg: 'bg-red-100' },
+  'Cancelled':  { icon: <XCircle className="h-5 w-5" />,      color: 'text-gray-600',    bg: 'bg-gray-100' },
   'Expired':    { icon: <XCircle className="h-5 w-5" />,      color: 'text-rose-600',    bg: 'bg-rose-100' },
 };
 
@@ -105,7 +106,6 @@ export default function BlinkitPOOverviewPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
-  const [totalUnits, setTotalUnits] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const PAGE_SIZE = 50;
 
@@ -163,7 +163,6 @@ export default function BlinkitPOOverviewPage() {
       const data = (response.items || []).map(toOverviewItem);
       setPoData(data);
       setTotal(response.total || 0);
-      setTotalUnits(response.total_units || 0);
       setTotalPages(response.total_pages || 1);
     } catch (error) {
       if (fetchSeqRef.current !== seq) return;
@@ -296,12 +295,17 @@ export default function BlinkitPOOverviewPage() {
       inTransit:  sc['In Transit'] || 0,
       delivered:  sc['Delivered']  || 0,
       delayed:    sc['Delayed']    || 0,
+      cancelled:  sc['Cancelled']  || 0,
       expired:    sc['Expired']    || 0,
     };
   }, [statsData]);
 
   // Both come from the grid response so they carry the same filters, including status.
-  const totalPOs = total;
+  // All PO is the unfiltered total for the active date range, so the seven status
+  // cards below always sum to it. Taking it from the status-filtered grid response
+  // would break that the moment a status card is clicked.
+  const totalPOs = statsData?.total_pos ?? 0;
+  const totalUnits = statsData?.total_units ?? 0;
 
   const getStatusBadge = (status: string) => {
     const style = BADGE_STYLES[status] || 'bg-gray-50 text-gray-700 border-gray-200';
@@ -451,6 +455,7 @@ export default function BlinkitPOOverviewPage() {
     { label: 'In Transit', count: stats.inTransit,  status: 'In Transit' },
     { label: 'Delivered',  count: stats.delivered,  status: 'Delivered' },
     { label: 'Delayed',    count: stats.delayed,    status: 'Delayed' },
+    { label: 'Cancelled',  count: stats.cancelled,  status: 'Cancelled' },
     { label: 'Expired',    count: stats.expired,    status: 'Expired' },
   ];
 
@@ -458,13 +463,13 @@ export default function BlinkitPOOverviewPage() {
     <ProtectedRoute>
       <div className="p-6 space-y-6">
         {/* KPI Cards */}
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-4">
           <div className="flex items-center gap-3 p-4 bg-card border rounded-xl">
             <div className="flex items-center justify-center h-10 w-10 rounded-full bg-yellow-100 text-yellow-600">
               <ShoppingCart className="h-5 w-5" />
             </div>
             <div>
-              <p className="text-xs text-muted-foreground">Total POs</p>
+              <p className="text-xs text-muted-foreground">All PO</p>
               <p className="text-xl font-bold">{totalPOs.toLocaleString('en-IN')}</p>
               <p className="text-xs text-muted-foreground">{totalUnits.toLocaleString('en-IN')} units</p>
             </div>
