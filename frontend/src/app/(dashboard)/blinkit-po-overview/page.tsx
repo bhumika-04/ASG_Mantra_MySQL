@@ -105,6 +105,7 @@ export default function BlinkitPOOverviewPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
+  const [totalUnits, setTotalUnits] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
   const PAGE_SIZE = 50;
 
@@ -162,6 +163,7 @@ export default function BlinkitPOOverviewPage() {
       const data = (response.items || []).map(toOverviewItem);
       setPoData(data);
       setTotal(response.total || 0);
+      setTotalUnits(response.total_units || 0);
       setTotalPages(response.total_pages || 1);
     } catch (error) {
       if (fetchSeqRef.current !== seq) return;
@@ -298,9 +300,8 @@ export default function BlinkitPOOverviewPage() {
     };
   }, [statsData]);
 
-  // Falls back to the grid total until the stats call lands
-  const totalPOs = statsData?.total_pos ?? total;
-  const totalUnits = statsData?.total_units ?? 0;
+  // Both come from the grid response so they carry the same filters, including status.
+  const totalPOs = total;
 
   const getStatusBadge = (status: string) => {
     const style = BADGE_STYLES[status] || 'bg-gray-50 text-gray-700 border-gray-200';

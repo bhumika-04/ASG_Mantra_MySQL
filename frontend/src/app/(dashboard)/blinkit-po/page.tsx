@@ -138,6 +138,8 @@ function BlinkitPOPageContent() {
   const [poData, setPoData] = useState<POItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [total, setTotal] = useState(0);
+  const [totalUnits, setTotalUnits] = useState(0);
+  const [totalPos, setTotalPos] = useState(0);
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 50;
   const [statsData, setStatsData] = useState<{ status_counts: Record<string, number>; total_pos: number; total_units: number } | null>(null);
@@ -372,6 +374,8 @@ function BlinkitPOPageContent() {
       const transformedPOs = (response.items || []).map(toPOItem);
       setPoData(transformedPOs);
       setTotal(response.total || 0);
+      setTotalUnits(response.total_units || 0);
+      setTotalPos(response.total_pos || 0);
     } catch (error) {
       if (fetchSeqRef.current !== seq) return;
       console.error('Error fetching Blinkit purchase orders:', error);
@@ -786,8 +790,7 @@ function BlinkitPOPageContent() {
     return [{ label: 'All', value: 'all' }, ...states.map(s => ({ label: s, value: s }))];
   }, [poData]);
 
-  const totalPOs = statsData?.total_pos ?? new Set(poData.map(po => po.po_number)).size;
-  const totalUnits = statsData?.total_units ?? poData.reduce((sum, po) => sum + po.ordered_qty, 0);
+  const totalPOs = totalPos;
   const stats = useMemo(() => ({
     created:    statsData?.status_counts?.['Created'] ?? 0,
     dispatched: statsData?.status_counts?.['Dispatched'] ?? 0,

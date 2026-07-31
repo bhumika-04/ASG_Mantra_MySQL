@@ -363,15 +363,20 @@ async def get_amazon_po_overview(
     offset = (page - 1) * page_size
     subq = query.subquery()
     rows_with_count = (
-        db.query(subq, func.count().over().label('_total'))
+        db.query(subq,
+                 func.count().over().label('_total'),
+                 func.sum(subq.c.total_qty).over().label('_total_units'))
         .order_by(subq.c.order_date.desc())
         .offset(offset).limit(page_size).all()
     )
-    # COUNT(*) OVER() rides along on returned rows only — paging past the end returns
-    # none, so fall back to an explicit count rather than reporting a total of 0.
-    total = rows_with_count[0]._total if rows_with_count else (
-        db.query(func.count()).select_from(subq).scalar() or 0
-    )
+    # Window aggregates ride along on returned rows only — paging past the end returns
+    # none, so fall back to explicit aggregates rather than reporting 0.
+    if rows_with_count:
+        total = rows_with_count[0]._total
+        total_units = int(rows_with_count[0]._total_units or 0)
+    else:
+        total = db.query(func.count()).select_from(subq).scalar() or 0
+        total_units = int(db.query(func.coalesce(func.sum(subq.c.total_qty), 0)).select_from(subq).scalar() or 0)
 
     items = []
     for r in rows_with_count:
@@ -398,7 +403,8 @@ async def get_amazon_po_overview(
             "total_qty": int(r.total_qty or 0),
         })
 
-    return {"items": items, "total": total, "page": page, "page_size": page_size,
+    return {"items": items, "total": total, "total_units": total_units,
+            "page": page, "page_size": page_size,
             "total_pages": (total + page_size - 1) // page_size}
 
 
@@ -553,6 +559,15 @@ async def get_amazon_purchase_orders(
     # COUNT(*) OVER() rides along on returned rows only — paging past the end returns
     # none, so fall back to an explicit count rather than reporting a total of 0.
     total = rows_with_count[0]._total if rows_with_count else query.count()
+
+    # Units and distinct POs under the same filters, so the KPI card cannot pair a
+    # filtered count with an unfiltered unit figure. Kept as a separate aggregate
+    # because MSSQL has no COUNT(DISTINCT x) OVER().
+    agg = query.with_entities(
+        func.coalesce(func.sum(AmazonPOItemData.QuantityRequested), 0),
+        func.count(func.distinct(AmazonPOItemData.PONumber)),
+    ).one()
+    total_units, total_pos = int(agg[0] or 0), int(agg[1] or 0)
     po_items = [r[0] for r in rows_with_count]
 
     # Batch load products by ASIN (eliminates N+1)
@@ -631,9 +646,13 @@ async def get_amazon_purchase_orders(
             "ship_to_location_code": po.ShipToLocationCode if po else None,
         })
 
+    # total_units and total_pos carry the same filters as total, including status, so
+    # the KPI card cannot pair a filtered count with an unfiltered unit figure.
     return {
         "items": items,
         "total": total,
+        "total_units": total_units,
+        "total_pos": total_pos,
         "page": page,
         "page_size": page_size,
         "total_pages": (total + page_size - 1) // page_size
@@ -702,15 +721,20 @@ async def get_blinkit_po_overview(
     offset = (page - 1) * page_size
     subq = query.subquery()
     rows_with_count = (
-        db.query(subq, func.count().over().label('_total'))
+        db.query(subq,
+                 func.count().over().label('_total'),
+                 func.sum(subq.c.total_qty).over().label('_total_units'))
         .order_by(subq.c.order_date.desc())
         .offset(offset).limit(page_size).all()
     )
-    # COUNT(*) OVER() rides along on returned rows only — paging past the end returns
-    # none, so fall back to an explicit count rather than reporting a total of 0.
-    total = rows_with_count[0]._total if rows_with_count else (
-        db.query(func.count()).select_from(subq).scalar() or 0
-    )
+    # Window aggregates ride along on returned rows only — paging past the end returns
+    # none, so fall back to explicit aggregates rather than reporting 0.
+    if rows_with_count:
+        total = rows_with_count[0]._total
+        total_units = int(rows_with_count[0]._total_units or 0)
+    else:
+        total = db.query(func.count()).select_from(subq).scalar() or 0
+        total_units = int(db.query(func.coalesce(func.sum(subq.c.total_qty), 0)).select_from(subq).scalar() or 0)
 
     items = []
     for r in rows_with_count:
@@ -741,7 +765,8 @@ async def get_blinkit_po_overview(
             "total_qty": int(r.total_qty or 0),
         })
 
-    return {"items": items, "total": total, "page": page, "page_size": page_size,
+    return {"items": items, "total": total, "total_units": total_units,
+            "page": page, "page_size": page_size,
             "total_pages": (total + page_size - 1) // page_size}
 
 
@@ -878,17 +903,18 @@ async def get_lifecycle_overview(
                 END AS eff_status
             FROM combined
         )
-        SELECT *, COUNT(*) OVER() AS _total
+        SELECT *, COUNT(*) OVER() AS _total, SUM(total_qty) OVER() AS _total_units
         FROM scored
         {status_filter}
         ORDER BY order_date DESC, po_number DESC
         OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY
     """), params).fetchall()
 
-    # COUNT(*) OVER() only rides along on returned rows. Paging past the end yields no
-    # rows and therefore no count — re-derive it so `total` never collapses to 0.
+    # Window aggregates only ride along on returned rows. Paging past the end yields no
+    # rows and therefore no totals — re-derive them so they never collapse to 0.
     if rows:
         total = rows[0]._total
+        total_units = int(rows[0]._total_units or 0)
     else:
         total = db.execute(text(f"""
             WITH combined AS (
@@ -904,8 +930,9 @@ async def get_lifecycle_overview(
                     END AS eff_status
                 FROM combined
             )
-            SELECT COUNT(*) FROM scored {status_filter}
-        """), {k: v for k, v in params.items() if k not in ('offset', 'limit')}).scalar() or 0
+            SELECT COUNT(*) AS c, COALESCE(SUM(total_qty), 0) AS u FROM scored {status_filter}
+        """), {k: v for k, v in params.items() if k not in ('offset', 'limit')}).fetchone()
+        total, total_units = (total[0] or 0, int(total[1] or 0)) if total else (0, 0)
 
     items = []
     for r in rows:
@@ -933,7 +960,12 @@ async def get_lifecycle_overview(
             "total_qty": int(r.total_qty or 0),
         })
 
-    return {"items": items, "total": total, "page": page, "page_size": page_size,
+    # total_units is scoped by the same filters as total, including status. The stats
+    # endpoints are date-filtered only, so pairing their unit figure with this count
+    # described two different populations: filtering to Expired showed 4 POs alongside
+    # the unfiltered 33,012 units.
+    return {"items": items, "total": total, "total_units": total_units,
+            "page": page, "page_size": page_size,
             "total_pages": (total + page_size - 1) // page_size}
 
 
@@ -1054,6 +1086,15 @@ async def get_blinkit_purchase_orders(
     # COUNT(*) OVER() rides along on returned rows only — paging past the end returns
     # none, so fall back to an explicit count rather than reporting a total of 0.
     total = rows_with_count[0]._total if rows_with_count else query.count()
+
+    # Units and distinct POs under the same filters, so the KPI card cannot pair a
+    # filtered count with an unfiltered unit figure. Kept as a separate aggregate
+    # because MSSQL has no COUNT(DISTINCT x) OVER().
+    agg = query.with_entities(
+        func.coalesce(func.sum(BlinkitPOItemData.QTY), 0),
+        func.count(func.distinct(BlinkitPOItemData.PONumber)),
+    ).one()
+    total_units, total_pos = int(agg[0] or 0), int(agg[1] or 0)
     po_items = [r[0] for r in rows_with_count]
 
     # Batch load products — priority: EagleCode→BlinkitId, ItemCode→BlinkitId, ItemCode→AsgSku
@@ -1158,9 +1199,13 @@ async def get_blinkit_purchase_orders(
             "ship_to_state": state,
         })
 
+    # total_units and total_pos carry the same filters as total, including status, so
+    # the KPI card cannot pair a filtered count with an unfiltered unit figure.
     return {
         "items": items,
         "total": total,
+        "total_units": total_units,
+        "total_pos": total_pos,
         "page": page,
         "page_size": page_size,
         "total_pages": (total + page_size - 1) // page_size

@@ -96,6 +96,7 @@ export default function POLifecyclePage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isGridLoading, setIsGridLoading] = useState(false);
   const [total, setTotal] = useState(0);
+  const [totalUnits, setTotalUnits] = useState(0);
   const [stats, setStats] = useState({
     amazon: { status_counts: {} as Record<string, number>, total_pos: 0, total_units: 0 },
     blinkit: { status_counts: {} as Record<string, number>, total_pos: 0, total_units: 0 },
@@ -190,6 +191,7 @@ export default function POLifecyclePage() {
         if (fetchSeqRef.current !== seq) return;
 
         setTotal(res.total || 0);
+        setTotalUnits(res.total_units || 0);
         setAllOrders((res.items || []).map(toRow));
       } catch (error) {
         if (fetchSeqRef.current !== seq) return;
@@ -213,7 +215,6 @@ export default function POLifecyclePage() {
     merged[s] = (sc_a[s] || 0) + (sc_b[s] || 0);
   });
 
-  const totalUnits = (channel !== 'blinkit' ? stats.amazon.total_units || 0 : 0) + (channel !== 'amazon' ? stats.blinkit.total_units || 0 : 0);
   const inTransitPOs = merged['In Transit'] || 0;
   const deliveredCount = merged['Delivered'] || 0;
   const delayedCount = merged['Delayed'] || 0;
