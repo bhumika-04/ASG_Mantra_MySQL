@@ -81,7 +81,9 @@ async def get_inventory(
         .order_by(Inventory.LastUpdated.desc())
         .offset(offset).limit(page_size).all()
     )
-    total = rows_with_count[0][-1] if rows_with_count else 0
+    # COUNT(*) OVER() only rides along on returned rows, so paging past the end reported
+    # a total of 0 and broke the pagination controls. Fall back to an explicit count.
+    total = rows_with_count[0][-1] if rows_with_count else query.count()
     inventory_items = [r[0] for r in rows_with_count]
 
     # Available dates for the date picker

@@ -4,7 +4,7 @@ Handles inventory alerts and notifications
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, and_
 from typing import Optional
 from pydantic import BaseModel
 from datetime import datetime
@@ -221,17 +221,35 @@ async def sync_alerts(
     - Products with total stock < LOW_STOCK_THRESHOLD → Warning "Low Stock" alert
     Skips products that already have an unresolved alert.
     """
-    # Use latest inventory date only (date-wise snapshots)
-    latest_date = db.query(func.max(Inventory.InventoryDate)).scalar()
+    # Each product's own latest snapshot. Filtering everything to a single global MAX
+    # date drops any product absent from the most recent upload; the outer join below
+    # then coalesces it to 0 and raises a false Critical "Out of Stock" alert for a
+    # product that actually holds stock (two products here last appeared on 2026-05-30
+    # holding 88 and 47 units).
+    latest_per_product = (
+        db.query(
+            Inventory.ProductId.label("pid"),
+            func.max(Inventory.InventoryDate).label("d"),
+        )
+        .group_by(Inventory.ProductId)
+        .subquery()
+    )
 
-    # Get packed+unpacked stock per product from latest snapshot
-    stock_q = db.query(
-        Inventory.ProductId,
-        func.sum(Inventory.PackedQty + Inventory.UnpackedQty).label("total_stock"),
-    ).group_by(Inventory.ProductId)
-    if latest_date:
-        stock_q = stock_q.filter(Inventory.InventoryDate == latest_date)
-    stock_sub = stock_q.subquery()
+    stock_sub = (
+        db.query(
+            Inventory.ProductId,
+            func.sum(Inventory.PackedQty + Inventory.UnpackedQty).label("total_stock"),
+        )
+        .join(
+            latest_per_product,
+            and_(
+                Inventory.ProductId == latest_per_product.c.pid,
+                Inventory.InventoryDate == latest_per_product.c.d,
+            ),
+        )
+        .group_by(Inventory.ProductId)
+        .subquery()
+    )
 
     # Get all active products with their stock (exclude auto-created unlinked)
     products = (

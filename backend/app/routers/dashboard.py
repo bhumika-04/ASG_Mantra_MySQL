@@ -440,7 +440,9 @@ async def get_product_overview(
         .order_by(Product.ProductName)
         .offset(offset).limit(page_size).all()
     )
-    total = rows[0]._total if rows else 0
+    # COUNT(*) OVER() only rides along on returned rows, so paging past the end reported
+    # a total of 0 and broke the pagination controls. Fall back to an explicit count.
+    total = rows[0]._total if rows else query.count()
 
     items = []
     for row in rows:
