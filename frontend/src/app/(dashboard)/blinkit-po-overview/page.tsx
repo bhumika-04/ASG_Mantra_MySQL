@@ -12,6 +12,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { exportToCSV } from '@/lib/export';
+import { fetchAllPages } from '@/lib/export-all';
 import { toast } from 'sonner';
 import {
   Clock,
@@ -72,6 +73,27 @@ const BADGE_STYLES: Record<string, string> = {
   'Closed':     'bg-slate-50 text-slate-600 border-slate-200',
   'Expired':    'bg-red-50 text-red-700 border-red-200',
 };
+
+// Shared by the grid fetch and the export so a CSV can never drift from what is
+// on screen.
+const toOverviewItem = (po: any): POOverviewItem => ({
+  id: po.po_id,
+  po_id: po.po_id,
+  po_number: po.po_number,
+  po_date: po.order_date ? fmtDate(po.order_date) : 'N/A',
+  orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
+  deliveryDate: po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : 'N/A',
+  po_expiry: po.po_expiry_date ? fmtDate(po.po_expiry_date) : '—',
+  expiryDateRaw: po.po_expiry_date ? po.po_expiry_date.slice(0, 10) : null,
+  dispatch_date: po.dispatch_date || null,
+  courier: po.courier || null,
+  shipTo: po.ship_to_name || '—',
+  state: po.ship_to_state || '—',
+  items: po.item_count,
+  totalQty: po.total_qty,
+  status: po.status || 'Created',
+  po_status: po.po_status ?? null,
+});
 
 export default function BlinkitPOOverviewPage() {
   const router = useRouter();
@@ -137,24 +159,7 @@ export default function BlinkitPOOverviewPage() {
 
       const response = await (api.purchaseOrders as any).getBlinkitOverview(params) as any;
       if (fetchSeqRef.current !== seq) return;
-      const data = (response.items || []).map((po: any) => ({
-        id: po.po_id,
-        po_id: po.po_id,
-        po_number: po.po_number,
-        po_date: po.order_date ? fmtDate(po.order_date) : 'N/A',
-        orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
-        deliveryDate: po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : 'N/A',
-        po_expiry: po.po_expiry_date ? fmtDate(po.po_expiry_date) : '—',
-        expiryDateRaw: po.po_expiry_date ? po.po_expiry_date.slice(0, 10) : null,
-        dispatch_date: po.dispatch_date || null,
-        courier: po.courier || null,
-        shipTo: po.ship_to_name || '—',
-        state: po.ship_to_state || '—',
-        items: po.item_count,
-        totalQty: po.total_qty,
-        status: po.status || 'Created',
-        po_status: po.po_status ?? null,
-      }));
+      const data = (response.items || []).map(toOverviewItem);
       setPoData(data);
       setTotal(response.total || 0);
       setTotalPages(response.total_pages || 1);
@@ -194,6 +199,56 @@ export default function BlinkitPOOverviewPage() {
       fetchGrid(1, globalSearch, filters.status, effectiveDateFrom, effectiveDateTo);
     }
   }, [filterMode, customStart, globalSearch, filters.status, effectiveDateFrom, effectiveDateTo, fetchGrid]);
+
+  // Exports every row matching the active filters, not just the page on screen.
+  const [isExporting, setIsExporting] = useState(false);
+  const handleExport = useCallback(async () => {
+    setIsExporting(true);
+    try {
+      const base: Record<string, any> = {};
+      if (filters.status && filters.status !== 'all') base.status = filters.status;
+      if (globalSearch.trim()) {
+        base.search = globalSearch.trim();
+      } else {
+        if (effectiveDateFrom) base.start_date = effectiveDateFrom;
+        if (effectiveDateTo) base.end_date = effectiveDateTo;
+      }
+      const { rows, total, truncated } = await fetchAllPages<any>(
+        (page, page_size) => (api.purchaseOrders as any).getBlinkitOverview({ ...base, page, page_size }) as any,
+      );
+      let items = rows.map(toOverviewItem);
+      // State and grid search are client-side, so apply them to the full set too
+      if (filters.state && filters.state !== 'all') items = items.filter(p => p.state === filters.state);
+      if (gridSearch.trim()) {
+        const q = gridSearch.toLowerCase();
+        items = items.filter(p =>
+          (p.po_number || '').toLowerCase().includes(q) ||
+          (p.shipTo || '').toLowerCase().includes(q) ||
+          (p.status || '').toLowerCase().includes(q));
+      }
+      exportToCSV(items.map(p => ({
+        'PO Number': p.po_number,
+        'PO Date': p.po_date,
+        'Delivery Date': p.deliveryDate,
+        'PO Expiry': p.po_expiry,
+        'Dispatch Date': p.dispatch_date ? fmtDate(p.dispatch_date) : '',
+        'Courier': p.courier || '',
+        'Ship To': p.shipTo,
+        'State': p.state,
+        'Total Items': p.items,
+        'Total Qty': p.totalQty,
+        'Status': p.status,
+      })), 'blinkit_po_overview');
+      toast.success(
+        truncated
+          ? `Exported ${items.length.toLocaleString('en-IN')} of ${total.toLocaleString('en-IN')} rows (export limit reached)`
+          : `Exported ${items.length.toLocaleString('en-IN')} rows`);
+    } catch {
+      toast.error('Export failed');
+    } finally {
+      setIsExporting(false);
+    }
+  }, [filters.status, filters.state, globalSearch, gridSearch, effectiveDateFrom, effectiveDateTo]);
 
   const handlePageChange = useCallback((newPage: number) => {
     setPage(newPage);
@@ -465,25 +520,11 @@ export default function BlinkitPOOverviewPage() {
                 variant="outline"
                 size="sm"
                 className="h-9"
-                onClick={() => exportToCSV(
-                  filteredData.map(p => ({
-                    'PO Number': p.po_number,
-                    'PO Date': p.po_date,
-                    'Delivery Date': p.deliveryDate,
-                    'PO Expiry': p.po_expiry,
-                    'Dispatch Date': p.dispatch_date ? fmtDate(p.dispatch_date) : '',
-                    'Courier': p.courier || '',
-                    'Ship To': p.shipTo,
-                    'State': p.state,
-                    'Total Items': p.items,
-                    'Total Qty': p.totalQty,
-                    'Status': p.status,
-                  })),
-                  'blinkit_po_overview'
-                )}
+                onClick={handleExport}
+                disabled={isExporting}
               >
                 <Download className="h-4 w-4 mr-2" />
-                Export
+                {isExporting ? 'Exporting…' : 'Export'}
               </Button>
             )}
           </div>

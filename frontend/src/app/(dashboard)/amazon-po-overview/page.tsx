@@ -12,6 +12,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { exportToCSV } from '@/lib/export';
+import { fetchAllPages } from '@/lib/export-all';
 import { toast } from 'sonner';
 import {
   Clock,
@@ -72,6 +73,27 @@ const BADGE_STYLES: Record<string, string> = {
   'Closed':     'bg-slate-50 text-slate-600 border-slate-200',
   'Expired':    'bg-red-50 text-red-700 border-red-200',
 };
+
+// Shared by the grid fetch and the export so a CSV can never drift from what is
+// on screen.
+const toOverviewItem = (po: any): POOverviewItem => ({
+  id: po.po_id,
+  po_id: po.po_id,
+  po_number: po.po_number,
+  po_date: po.order_date ? fmtDate(po.order_date) : 'N/A',
+  orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
+  po_expiry: po.ship_window_end_date ? fmtDate(po.ship_window_end_date)
+    : po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : 'N/A',
+  expiryDateRaw: po.ship_window_end_date ? po.ship_window_end_date.slice(0, 10) : null,
+  dispatch_date: po.dispatch_date || null,
+  courier: po.courier || null,
+  products: po.item_count,
+  totalQty: po.total_qty,
+  status: po.status || 'Created',
+  po_status: po.po_status ?? null,
+  location: po.location || '—',
+  state: po.ship_to_state || '—',
+});
 
 export default function AmazonPOOverviewPage() {
   const router = useRouter();
@@ -138,24 +160,7 @@ export default function AmazonPOOverviewPage() {
 
       const response = await (api.purchaseOrders as any).getAmazonOverview(params) as any;
       if (fetchSeqRef.current !== seq) return;
-      const data = (response.items || []).map((po: any) => ({
-        id: po.po_id,
-        po_id: po.po_id,
-        po_number: po.po_number,
-        po_date: po.order_date ? fmtDate(po.order_date) : 'N/A',
-        orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
-        po_expiry: po.ship_window_end_date ? fmtDate(po.ship_window_end_date)
-          : po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : 'N/A',
-        expiryDateRaw: po.ship_window_end_date ? po.ship_window_end_date.slice(0, 10) : null,
-        dispatch_date: po.dispatch_date || null,
-        courier: po.courier || null,
-        products: po.item_count,
-        totalQty: po.total_qty,
-        status: po.status || 'Created',
-        po_status: po.po_status ?? null,
-        location: po.location || '—',
-        state: po.ship_to_state || '—',
-      }));
+      const data = (response.items || []).map(toOverviewItem);
       setPoData(data);
       setTotal(response.total || 0);
       setTotalPages(response.total_pages || 1);
@@ -195,6 +200,54 @@ export default function AmazonPOOverviewPage() {
       fetchGrid(1, globalSearch, filters.status, effectiveDateFrom, effectiveDateTo);
     }
   }, [filterMode, customStart, globalSearch, filters.status, effectiveDateFrom, effectiveDateTo, fetchGrid]);
+
+  // Exports every row matching the active filters, not just the page on screen.
+  const [isExporting, setIsExporting] = useState(false);
+  const handleExport = useCallback(async () => {
+    setIsExporting(true);
+    try {
+      const base: Record<string, any> = {};
+      if (filters.status && filters.status !== 'all') base.status = filters.status;
+      if (globalSearch.trim()) {
+        base.search = globalSearch.trim();
+      } else {
+        if (effectiveDateFrom) base.start_date = effectiveDateFrom;
+        if (effectiveDateTo) base.end_date = effectiveDateTo;
+      }
+      const { rows, total, truncated } = await fetchAllPages<any>(
+        (page, page_size) => (api.purchaseOrders as any).getAmazonOverview({ ...base, page, page_size }) as any,
+      );
+      let items = rows.map(toOverviewItem);
+      // State and grid search are client-side, so apply them to the full set too
+      if (filters.state && filters.state !== 'all') items = items.filter(p => p.state === filters.state);
+      if (gridSearch.trim()) {
+        const q = gridSearch.toLowerCase();
+        items = items.filter(p =>
+          (p.po_number || '').toLowerCase().includes(q) ||
+          (p.location || '').toLowerCase().includes(q) ||
+          (p.status || '').toLowerCase().includes(q));
+      }
+      exportToCSV(items.map(p => ({
+        'PO Number': p.po_number,
+        'PO Date': p.po_date,
+        'PO Expiry': p.po_expiry,
+        'Dispatch Date': p.dispatch_date ? fmtDate(p.dispatch_date) : '',
+        'Courier': p.courier || '',
+        'Location': p.location,
+        'Products': p.products,
+        'Total Qty': p.totalQty,
+        'Status': p.status,
+      })), 'amazon_po_overview');
+      toast.success(
+        truncated
+          ? `Exported ${items.length.toLocaleString('en-IN')} of ${total.toLocaleString('en-IN')} rows (export limit reached)`
+          : `Exported ${items.length.toLocaleString('en-IN')} rows`);
+    } catch {
+      toast.error('Export failed');
+    } finally {
+      setIsExporting(false);
+    }
+  }, [filters.status, filters.state, globalSearch, gridSearch, effectiveDateFrom, effectiveDateTo]);
 
   const handlePageChange = useCallback((newPage: number) => {
     setPage(newPage);
@@ -449,23 +502,11 @@ export default function AmazonPOOverviewPage() {
                 variant="outline"
                 size="sm"
                 className="h-9"
-                onClick={() => exportToCSV(
-                  filteredData.map(p => ({
-                    'PO Number': p.po_number,
-                    'PO Date': p.po_date,
-                    'PO Expiry': p.po_expiry,
-                    'Dispatch Date': p.dispatch_date ? fmtDate(p.dispatch_date) : '',
-                    'Courier': p.courier || '',
-                    'Location': p.location,
-                    'Products': p.products,
-                    'Total Qty': p.totalQty,
-                    'Status': p.status,
-                  })),
-                  'amazon_po_overview'
-                )}
+                onClick={handleExport}
+                disabled={isExporting}
               >
                 <Download className="h-4 w-4 mr-2" />
-                Export
+                {isExporting ? 'Exporting…' : 'Export'}
               </Button>
             )}
           </div>

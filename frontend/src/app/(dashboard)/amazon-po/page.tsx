@@ -26,6 +26,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { exportToCSV } from '@/lib/export';
+import { fetchAllPages } from '@/lib/export-all';
 import { toast } from 'sonner';
 import {
   ShoppingCart,
@@ -97,6 +98,38 @@ interface POItem {
   city: string;
   state: string;
 }
+
+// Shared by the grid fetch and the export so a CSV can never drift from what is
+// on screen.
+const toPOItem = (po: any): POItem => ({
+id: po.id,
+  po_id: po.po_id,
+  po_number: po.po_number,
+  po_date: po.order_date ? fmtDate(po.order_date) : '-',
+  orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
+  asin: po.amazon_id || '',
+  product_name: toTitleCase(po.product_name || po.productName || ''),
+  ordered_qty: po.quantity,
+  accepted_qty: po.accepted_quantity ?? null,
+  mapped_sku: po.asg_sku || po.asgSku || '',
+  received_qty: po.received_quantity ?? null,
+  pending_qty: po.accepted_quantity != null
+    ? Math.max(0, (po.quantity || 0) - po.accepted_quantity)
+    : Math.max(0, (po.quantity || 0) - (po.received_quantity || 0)),
+  unit_cost: po.unit_price ?? null,
+  total_cost: po.total_amount ?? null,
+  po_expiry: po.po_cancellation_date ? fmtDate(po.po_cancellation_date)
+    : po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : '-',
+  expectedDateRaw: po.expected_delivery_date || null,
+  cancellationDateRaw: po.po_cancellation_date || null,
+  shipWindowEndDateRaw: po.ship_window_end_date ? po.ship_window_end_date.slice(0, 10) : null,
+  dispatch_date: po.dispatch_date || null,
+  courier: po.courier || null,
+  status: po.status || 'Created',
+  po_status: po.po_status || 'Created',
+  city: po.ship_to_city || '—',
+  state: po.ship_to_state || '—',
+});
 
 function AmazonPOPageContent() {
   const { filterMode, customStart, customEnd, globalSearch, setGlobalSearchRaw } = useFilter();
@@ -325,35 +358,7 @@ function AmazonPOPageContent() {
 
       const response = await api.purchaseOrders.getAmazon(params) as any;
       if (fetchSeqRef.current !== seq) return;
-      const transformedPOs = (response.items || []).map((po: any) => ({
-        id: po.id,
-        po_id: po.po_id,
-        po_number: po.po_number,
-        po_date: po.order_date ? fmtDate(po.order_date) : '-',
-        orderDateRaw: po.order_date ? po.order_date.slice(0, 10) : null,
-        asin: po.amazon_id || '',
-        product_name: toTitleCase(po.product_name || po.productName || ''),
-        ordered_qty: po.quantity,
-        accepted_qty: po.accepted_quantity ?? null,
-        mapped_sku: po.asg_sku || po.asgSku || '',
-        received_qty: po.received_quantity ?? null,
-        pending_qty: po.accepted_quantity != null
-          ? Math.max(0, (po.quantity || 0) - po.accepted_quantity)
-          : Math.max(0, (po.quantity || 0) - (po.received_quantity || 0)),
-        unit_cost: po.unit_price ?? null,
-        total_cost: po.total_amount ?? null,
-        po_expiry: po.po_cancellation_date ? fmtDate(po.po_cancellation_date)
-          : po.expected_delivery_date ? fmtDate(po.expected_delivery_date) : '-',
-        expectedDateRaw: po.expected_delivery_date || null,
-        cancellationDateRaw: po.po_cancellation_date || null,
-        shipWindowEndDateRaw: po.ship_window_end_date ? po.ship_window_end_date.slice(0, 10) : null,
-        dispatch_date: po.dispatch_date || null,
-        courier: po.courier || null,
-        status: po.status || 'Created',
-        po_status: po.po_status || 'Created',
-        city: po.ship_to_city || '—',
-        state: po.ship_to_state || '—',
-      }));
+      const transformedPOs = (response.items || []).map(toPOItem);
       setPoData(transformedPOs);
       setTotal(response.total || 0);
     } catch (error) {
@@ -664,6 +669,60 @@ function AmazonPOPageContent() {
 
   const gridState = useDataGrid(gridColumns, 'amazon-po');
 
+  // Exports every row matching the active filters, not just the page on screen.
+  const [isExporting, setIsExporting] = useState(false);
+  const handleExport = useCallback(async () => {
+    setIsExporting(true);
+    try {
+      const base: Record<string, any> = {};
+      if (filters.status !== 'all') base.status = filters.status;
+      if (filters.state !== 'all') base.state = filters.state;
+      if (globalSearch.trim()) {
+        base.search = globalSearch.trim();
+      } else {
+        if (effectiveDateFrom) base.start_date = effectiveDateFrom;
+        if (effectiveDateTo) base.end_date = effectiveDateTo;
+      }
+      const { rows, total, truncated } = await fetchAllPages<any>(
+        (page, page_size) => api.purchaseOrders.getAmazon({ ...base, page, page_size }) as any,
+      );
+      let items = rows.map(toPOItem);
+      // Grid search is client-side, so apply it to the full set too
+      if (gridSearch.trim()) {
+        const q = gridSearch.toLowerCase();
+        items = items.filter(p =>
+          (p.po_number || '').toLowerCase().includes(q) ||
+          (p.product_name || '').toLowerCase().includes(q) ||
+          (p.asin || '').toLowerCase().includes(q) ||
+          (p.mapped_sku || '').toLowerCase().includes(q));
+      }
+      exportToCSV(items.map(p => ({
+        'PO Number': p.po_number,
+        'PO Date': p.po_date,
+        'ASIN': p.asin,
+        'Product': p.product_name,
+        'Ordered Qty': p.ordered_qty,
+        'Accepted Qty': p.accepted_qty ?? '',
+        'ASG SKU': p.mapped_sku,
+        'Received Qty': p.received_qty,
+        'Pending Qty': p.pending_qty,
+        'Unit Cost': p.unit_cost ?? '',
+        'Total Cost': p.total_cost ?? '',
+        'Dispatch Date': p.dispatch_date ? fmtDate(p.dispatch_date) : '',
+        'Courier': p.courier || '',
+        'Status': p.status,
+      })), 'amazon_po');
+      toast.success(
+        truncated
+          ? `Exported ${items.length.toLocaleString('en-IN')} of ${total.toLocaleString('en-IN')} rows (export limit reached)`
+          : `Exported ${items.length.toLocaleString('en-IN')} rows`);
+    } catch {
+      toast.error('Export failed');
+    } finally {
+      setIsExporting(false);
+    }
+  }, [filters.status, filters.state, globalSearch, gridSearch, effectiveDateFrom, effectiveDateTo]);
+
   const handlePageChange = useCallback((newPage: number) => {
     setPage(newPage);
     fetchAmazonPOs(newPage, filters.status, globalSearch, effectiveDateFrom, effectiveDateTo, filters.state);
@@ -832,28 +891,11 @@ function AmazonPOPageContent() {
                 variant="outline"
                 size="sm"
                 className="h-9"
-                onClick={() => exportToCSV(
-                  filteredPoData.map(p => ({
-                    'PO Number': p.po_number,
-                    'PO Date': p.po_date,
-                    'ASIN': p.asin,
-                    'Product': p.product_name,
-                    'Ordered Qty': p.ordered_qty,
-                    'Accepted Qty': p.accepted_qty ?? '',
-                    'ASG SKU': p.mapped_sku,
-                    'Received Qty': p.received_qty,
-                    'Pending Qty': p.pending_qty,
-                    'Unit Cost': p.unit_cost ?? '',
-                    'Total Cost': p.total_cost ?? '',
-                    'Dispatch Date': p.dispatch_date ? fmtDate(p.dispatch_date) : '',
-                    'Courier': p.courier || '',
-                    'Status': p.status,
-                  })),
-                  'amazon_po'
-                )}
+                onClick={handleExport}
+                disabled={isExporting}
               >
                 <Download className="h-4 w-4 mr-2" />
-                Export
+                {isExporting ? 'Exporting…' : 'Export'}
               </Button>
             )}
           </div>

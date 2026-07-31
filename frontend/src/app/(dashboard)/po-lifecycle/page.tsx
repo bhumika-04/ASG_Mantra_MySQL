@@ -12,6 +12,7 @@ import { FilterBar } from '@/components/ui/filter-bar';
 import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { exportToCSV } from '@/lib/export';
+import { fetchAllPages } from '@/lib/export-all';
 import { fmtDate } from '@/lib/format';
 import { toast } from 'sonner';
 import {
@@ -234,6 +235,59 @@ export default function POLifecyclePage() {
   const maxHub = hubData.length > 0 ? Math.max(...hubData.map(h => h.value)) : 1;
 
   const handlePageChange = (newPage: number) => setPage(newPage);
+
+  // Exports every row matching the active filters, not just the page on screen.
+  const [isExporting, setIsExporting] = useState(false);
+  const handleExport = async () => {
+    setIsExporting(true);
+    try {
+      const base: Record<string, any> = { channel: filters.channel || 'all' };
+      if (filters.status !== 'all') base.status = filters.status;
+      if (globalSearch) {
+        base.search = globalSearch;
+      } else if (filterMode !== 'all') {
+        const { start_date, end_date } = computeDateRange(filterMode as FilterMode, customStart, customEnd);
+        if (start_date) base.start_date = start_date;
+        if (end_date) base.end_date = end_date;
+      }
+      const { rows, total, truncated } = await fetchAllPages<any>(
+        (page, page_size) => (api.purchaseOrders as any).getLifecycleOverview({ ...base, page, page_size }) as any,
+      );
+      let items = rows.map(toRow);
+      // Grid search is client-side, so apply it to the full set too
+      if (gridSearch.trim()) {
+        const q = gridSearch.toLowerCase();
+        items = items.filter(o =>
+          (o.po_number || '').toLowerCase().includes(q) ||
+          (o.channel || '').toLowerCase().includes(q) ||
+          (o.hub || '').toLowerCase().includes(q) ||
+          (o.courier || '').toLowerCase().includes(q) ||
+          (o.state || '').toLowerCase().includes(q));
+      }
+      exportToCSV(items.map(o => ({
+        'PO Number': o.po_number,
+        'Channel': o.channel,
+        'Quantity': o.quantity,
+        'Dispatch Date': o.actualDispatch !== '-' ? o.actualDispatch : '',
+        'PO Creation Date': o.dispatchDate,
+        'Expected Date': o.expectedDate,
+        'State': o.state,
+        'City': o.city,
+        'Hub': o.hub,
+        'Courier': o.courier,
+        'TAT': o.tat,
+        'Status': o.status,
+      })), 'purchase_orders');
+      toast.success(
+        truncated
+          ? `Exported ${items.length.toLocaleString('en-IN')} of ${total.toLocaleString('en-IN')} rows (export limit reached)`
+          : `Exported ${items.length.toLocaleString('en-IN')} rows`);
+    } catch {
+      toast.error('Export failed');
+    } finally {
+      setIsExporting(false);
+    }
+  };
 
   const poStatusOptions = [
     { label: 'All', value: 'all' },
@@ -635,26 +689,11 @@ export default function POLifecyclePage() {
                   variant="outline"
                   size="sm"
                   className="h-9"
-                  onClick={() => exportToCSV(
-                    displayOrders.map(o => ({
-                      'PO Number': o.po_number,
-                      'Channel': o.channel,
-                      'Quantity': o.quantity,
-                      'Dispatch Date': o.actualDispatch !== '-' ? o.actualDispatch : '',
-                      'PO Creation Date': o.dispatchDate,
-                      'Expected Date': o.expectedDate,
-                      'State': o.state,
-                      'City': o.city,
-                      'Hub': o.hub,
-                      'Courier': o.courier,
-                      'TAT': o.tat,
-                      'Status': o.status,
-                    })),
-                    'purchase_orders'
-                  )}
+                  onClick={handleExport}
+                  disabled={isExporting}
                 >
                   <Download className="h-4 w-4 mr-2" />
-                  Export
+                  {isExporting ? 'Exporting…' : 'Export'}
                 </Button>
               </div>
             </FilterBar>
