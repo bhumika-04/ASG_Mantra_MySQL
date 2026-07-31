@@ -557,7 +557,18 @@ def _upload_vendor_csv(df: pd.DataFrame, report_date: date, db: Session, filenam
                 NetShippedGMS=clean_numeric(row.get('Net Shipped GMS')) or None,
                 NetPPMPercent=clean_percentage(row.get('Net PPM %')) or None,
                 ASINConfirmationPercent=clean_percentage(row.get('ASIN Confirmation %')) or None,
-                # Computed DRR from OrderedUnits
+                # Derived from OrderedUnits. Each VendorCSV row is ONE DAY for one ASIN
+                # (the file is delivered weekly but contains daily rows), so DRR_D1 is a
+                # genuine daily run rate.
+                #
+                # DRR_7Days/DRR_30Days are straight-line PROJECTIONS of that single day,
+                # not trailing 7/30-day averages — despite the names. The RKExcel path
+                # below reads real vendor-supplied averages into these same columns, so
+                # the two sources are not directly comparable.
+                #
+                # Nothing currently reads these columns: AmazonSalesData.to_dict() has no
+                # endpoint calling it and no query selects them. Before wiring them into
+                # any report, decide which of the two meanings you want.
                 DRR_D1=float(ordered_units) if ordered_units else None,
                 DRR_7Days=float(ordered_units * 7) if ordered_units else None,
                 DRR_30Days=float(ordered_units * 30) if ordered_units else None,
