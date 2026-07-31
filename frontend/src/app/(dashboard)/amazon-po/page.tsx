@@ -201,12 +201,15 @@ function AmazonPOPageContent() {
       setPoData(prev => prev.map(p => p.id === actionRow.id
         ? { ...p, accepted_qty: qty, pending_qty: Math.max(0, p.ordered_qty - qty) }
         : p));
-      if (result?.inventory_deducted > 0) {
+      const moved = result?.inventory_deducted ?? 0;
+      if (moved > 0) {
         if (result.inventory_shortfall > 0) {
-          toast.warning(`Accepted qty set to ${qty}. Deducted ${result.inventory_deducted} from inventory. Shortfall: ${result.inventory_shortfall} units.`);
+          toast.warning(`Accepted qty set to ${qty}. Deducted ${moved} from inventory. Shortfall: ${result.inventory_shortfall} units.`);
         } else {
-          toast.success(`Accepted qty set to ${qty}. Deducted ${result.inventory_deducted} units from packed inventory.`);
+          toast.success(`Accepted qty set to ${qty}. Deducted ${moved} units from packed inventory.`);
         }
+      } else if (moved < 0) {
+        toast.success(`Accepted qty set to ${qty}. Returned ${-moved} units to packed inventory.`);
       } else {
         toast.success(`Accepted qty updated to ${qty}`);
       }

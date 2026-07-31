@@ -1749,32 +1749,56 @@ async def update_blinkit_po_header(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _deduct_inventory_for_product(db: Session, product_id: int, deduct_qty: int) -> dict:
-    """Deduct deduct_qty from PackedQty (then CurrentStock) for a product across all inventory rows.
-    Returns info about how much was deducted and any shortfall."""
-    from sqlalchemy import func as sqlfunc
-    latest_date = db.query(func.max(Inventory.InventoryDate)).scalar()
-    inv_q = db.query(Inventory).filter(
+def _adjust_inventory_for_product(db: Session, product_id: int, delta_qty: int) -> dict:
+    """Apply a stock movement against a product's most recent inventory snapshot.
+
+    delta_qty > 0 deducts (an accepted quantity went up); delta_qty < 0 restores (an
+    accepted quantity was corrected downward). Restoring mirrors deducting so a
+    correction cannot leak stock — previously only the deduct direction was handled,
+    so lowering an accepted qty from 100 to 10 kept all 100 units deducted.
+
+    The snapshot date is resolved per product. A global MAX(InventoryDate) silently
+    matches nothing for any product missing from the latest upload, so the adjustment
+    became a no-op that still reported success.
+    """
+    latest_date = db.query(func.max(Inventory.InventoryDate)).filter(
+        Inventory.ProductId == product_id
+    ).scalar()
+    if latest_date is None:
+        return {"deducted": 0, "shortfall": max(0, delta_qty), "was_packed": 0}
+
+    # No PackedQty > 0 filter: on the restore path the rows drained to zero are
+    # precisely the ones the stock has to go back into.
+    inv_rows = db.query(Inventory).filter(
         Inventory.ProductId == product_id,
-        Inventory.PackedQty > 0
-    )
-    if latest_date:
-        inv_q = inv_q.filter(Inventory.InventoryDate == latest_date)
-    inv_rows = inv_q.order_by(Inventory.InventoryDate.desc()).all()
+        Inventory.InventoryDate == latest_date,
+    ).order_by(Inventory.Id).all()
+    if not inv_rows:
+        return {"deducted": 0, "shortfall": max(0, delta_qty), "was_packed": 0}
 
-    total_packed = sum(i.PackedQty for i in inv_rows)
-    remaining = deduct_qty
+    total_packed = sum(i.PackedQty or 0 for i in inv_rows)
 
+    if delta_qty < 0:
+        restore = -delta_qty
+        target = inv_rows[0]
+        target.PackedQty = (target.PackedQty or 0) + restore
+        target.CurrentStock = (target.CurrentStock or 0) + restore
+        return {"deducted": delta_qty, "shortfall": 0, "was_packed": total_packed}
+
+    remaining = delta_qty
     for inv in inv_rows:
         if remaining <= 0:
             break
-        deduct = min(inv.PackedQty, remaining)
-        inv.PackedQty -= deduct
-        inv.CurrentStock = max(0, inv.CurrentStock - deduct)
+        available = inv.PackedQty or 0
+        if available <= 0:
+            continue
+        deduct = min(available, remaining)
+        inv.PackedQty = available - deduct
+        inv.CurrentStock = max(0, (inv.CurrentStock or 0) - deduct)
         remaining -= deduct
 
     return {
-        "deducted": deduct_qty - remaining,
+        "deducted": delta_qty - remaining,
         "shortfall": max(0, remaining),
         "was_packed": total_packed,
     }
@@ -1802,18 +1826,20 @@ async def update_amazon_item_accepted_qty(
     new_val = _validate_qty(accepted_qty, item.QuantityRequested, "accepted_qty")
     item.AcceptedQuantity = new_val
 
-    # Deduct the DIFFERENCE from packed inventory
-    deduct_qty = new_val - old_val
+    # Apply the DIFFERENCE to packed inventory — negative deltas restore stock
+    delta_qty = new_val - old_val
     inventory_result = {}
-    if deduct_qty > 0:
-        # Resolve product: from ProductId link or by ASIN lookup
+    if delta_qty != 0:
+        # Resolve product: from ProductId link or by ASIN lookup.
+        # Guard the ASIN lookup — some products carry AmazonId = '' and an empty
+        # lookup value would match one of them arbitrarily.
         product_id = item.ProductId
-        if not product_id:
+        if not product_id and (item.ASIN or '').strip():
             product = db.query(Product).filter(Product.AmazonId == item.ASIN).first()
             if product:
                 product_id = product.Id
         if product_id:
-            inventory_result = _deduct_inventory_for_product(db, product_id, deduct_qty)
+            inventory_result = _adjust_inventory_for_product(db, product_id, delta_qty)
 
     log_audit(db, current_user.Id, "UPDATE", "AmazonPOItem", str(item_id),
               old_values={"acceptedQuantity": old_val},
@@ -1886,27 +1912,30 @@ async def update_blinkit_item_accepted_qty(
     new_val = _validate_qty(accepted_qty, item.QTY, "accepted_qty")
     item.AcceptedQty = new_val
 
-    # Deduct the DIFFERENCE from packed inventory
-    deduct_qty = new_val - old_val
+    # Apply the DIFFERENCE to packed inventory — negative deltas restore stock
+    delta_qty = new_val - old_val
     inventory_result = {}
-    if deduct_qty > 0:
+    if delta_qty != 0:
         product_id = item.ProductId
         if not product_id:
-            # Lookup by EagleCode → BlinkitId, then ItemCode → BlinkitId, then ItemCode → AsgSku
-            if item.EagleCode:
+            # Lookup by EagleCode → BlinkitId, then ItemCode → BlinkitId, then ItemCode → AsgSku.
+            # Each lookup value is checked for emptiness first — some products carry
+            # BlinkitId = '' and an empty lookup would match one of them arbitrarily.
+            item_code = (item.ItemCode or '').strip()
+            if item.EagleCode and str(item.EagleCode).strip():
                 p = db.query(Product).filter(Product.BlinkitId == str(item.EagleCode)).first()
                 if p:
                     product_id = p.Id
-            if not product_id and item.ItemCode:
-                p = db.query(Product).filter(Product.BlinkitId == item.ItemCode).first()
+            if not product_id and item_code:
+                p = db.query(Product).filter(Product.BlinkitId == item_code).first()
                 if p:
                     product_id = p.Id
-            if not product_id and item.ItemCode:
-                p = db.query(Product).filter(Product.AsgSku == item.ItemCode).first()
+            if not product_id and item_code:
+                p = db.query(Product).filter(Product.AsgSku == item_code).first()
                 if p:
                     product_id = p.Id
         if product_id:
-            inventory_result = _deduct_inventory_for_product(db, product_id, deduct_qty)
+            inventory_result = _adjust_inventory_for_product(db, product_id, delta_qty)
 
     log_audit(db, current_user.Id, "UPDATE", "BlinkitPOItem", str(item_id),
               old_values={"acceptedQty": old_val},
