@@ -30,7 +30,6 @@ export default function BlinkitInventoryPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [items, setItems] = useState<BlinkitInventoryItem[]>([]);
   const [total, setTotal] = useState(0);
-  const [totalPages, setTotalPages] = useState(1);
   const [page, setPage] = useState(1);
   const { globalSearch } = useFilter();
   const [gridSearch, setGridSearch] = useState('');
@@ -61,7 +60,6 @@ export default function BlinkitInventoryPage() {
       if (fetchSeqRef.current !== seq) return;
       setItems(res.items || []);
       setTotal(res.total || 0);
-      setTotalPages(res.total_pages || 1);
       setStats(res.stats || { totalBackendQty: 0, totalFrontendQty: 0, totalQty: 0, uniqueFacilities: 0 });
       if (res.filters?.report_dates?.length) {
         setReportDates(res.filters.report_dates);
@@ -326,23 +324,13 @@ export default function BlinkitInventoryPage() {
               </p>
             </div>
           ) : (
-            <DataGrid data={displayItems} gridState={gridState} />
+            <DataGrid
+              data={displayItems}
+              gridState={gridState}
+              serverPagination={gridSearch.trim() ? undefined : { total, page, pageSize: PAGE_SIZE, onPageChange: setPage }}
+            />
           )}
 
-          {/* Pagination */}
-          {totalPages > 1 && (
-            <div className="flex items-center justify-between pt-2">
-              <p className="text-sm text-muted-foreground">Page {page} of {totalPages}</p>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>
-                  Previous
-                </Button>
-                <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>
-                  Next
-                </Button>
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </ProtectedRoute>

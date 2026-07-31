@@ -51,7 +51,6 @@ export default function BlinkitSalesPage() {
   // Products grid state
   const [products, setProducts] = useState<BlinkitProduct[]>([]);
   const [productsTotal, setProductsTotal] = useState(0);
-  const [productsTotalPages, setProductsTotalPages] = useState(1);
   const [productsPage, setProductsPage] = useState(1);
   const [isProductsLoading, setIsProductsLoading] = useState(false);
   const [gridSearch, setGridSearch] = useState('');
@@ -152,7 +151,6 @@ export default function BlinkitSalesPage() {
       });
       setProducts(data.items || []);
       setProductsTotal(data.total || 0);
-      setProductsTotalPages(data.total_pages || 1);
     } catch {
       setProducts([]);
     } finally {
@@ -342,19 +340,17 @@ export default function BlinkitSalesPage() {
               </div>
             ) : (
               <>
-                <DataGrid data={products} gridState={gridState} pageSize={PAGE_SIZE} />
-                <div className="flex items-center justify-between pt-2">
-                  <p className="text-sm text-gray-500">{productsTotal.toLocaleString('en-IN')} products</p>
-                  <div className="flex items-center gap-2">
-                    <Button variant="outline" size="sm" onClick={() => { const p = Math.max(1, productsPage - 1); setProductsPage(p); fetchProducts(p, gridSearch.trim() || globalSearch); }} disabled={productsPage === 1}>
-                      Previous
-                    </Button>
-                    <span className="text-sm text-gray-500">Page {productsPage} of {productsTotalPages}</span>
-                    <Button variant="outline" size="sm" onClick={() => { const p = Math.min(productsTotalPages, productsPage + 1); setProductsPage(p); fetchProducts(p, gridSearch.trim() || globalSearch); }} disabled={productsPage === productsTotalPages}>
-                      Next
-                    </Button>
-                  </div>
-                </div>
+                <DataGrid
+                  data={products}
+                  gridState={gridState}
+                  serverPagination={{
+                    total: productsTotal,
+                    page: productsPage,
+                    pageSize: PAGE_SIZE,
+                    onPageChange: (p) => { setProductsPage(p); fetchProducts(p, gridSearch.trim() || globalSearch); },
+                  }}
+                />
+                <p className="text-sm text-gray-500 pt-2">{productsTotal.toLocaleString('en-IN')} products</p>
               </>
             )}
           </CardContent>

@@ -71,7 +71,6 @@ export default function DistributorPage() {
   const [stats, setStats] = useState({ totalClosingQty: 0, totalDlQty: 0, totalMhQty: 0, totalKtQty: 0, totalWbQty: 0, totalHrQty: 0, totalSkus: 0 });
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -176,7 +175,6 @@ export default function DistributorPage() {
       const data: any = await api.distributorStock.getAll(params);
       setItems(data.items || []);
       setTotal(data.total || 0);
-      setTotalPages(data.total_pages || 1);
       setStats(data.stats || { totalClosingQty: 0, totalDlQty: 0, totalMhQty: 0, totalKtQty: 0, totalWbQty: 0, totalHrQty: 0, totalSkus: 0 });
     } catch (error: any) {
       toast.error(error.message || 'Failed to load Eagle stock');
@@ -503,35 +501,9 @@ export default function DistributorPage() {
                 <DataGrid
                   data={displayItems}
                   gridState={gridState}
-                  pageSize={PAGE_SIZE}
+                  serverPagination={gridSearch.trim() ? undefined : { total, page, pageSize: PAGE_SIZE, onPageChange: setPage }}
                 />
-                {/* Pagination */}
-                <div className="flex items-center justify-between pt-2">
-                  <p className="text-sm text-gray-500">
-                    {total.toLocaleString('en-IN')} items
-                  </p>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setPage((p) => Math.max(1, p - 1))}
-                      disabled={page === 1}
-                    >
-                      Previous
-                    </Button>
-                    <span className="text-sm text-gray-500">
-                      Page {page} of {totalPages}
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                      disabled={page === totalPages}
-                    >
-                      Next
-                    </Button>
-                  </div>
-                </div>
+                <p className="text-sm text-gray-500 pt-2">{total.toLocaleString('en-IN')} items</p>
               </>
             )}
           </CardContent>
