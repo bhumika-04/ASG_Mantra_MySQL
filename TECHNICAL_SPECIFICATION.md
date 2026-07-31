@@ -126,6 +126,28 @@ Purchase Order statuses unified across all 6 PO-related pages:
 4. **Delivered** - PO successfully received
 5. **Delayed** - PO delayed beyond expected delivery
 6. **Cancelled** - PO cancelled
+7. **Expired** - expiry date passed while the PO was still open
+
+`Expired` arises two ways and both must be matched when filtering: it is stored on the PO
+header (a large share of imported POs carry it), **or** derived because the expiry date
+passed more than `_EXPIRY_DAYS` (15) ago. Statuses meaning the PO has moved on —
+Delivered, Received, Cancelled, Closed, Dispatched, In Transit — are never overridden by
+expiry.
+
+The effective status is computed **only** in the backend (`_po_status_expr` /
+`_po_expired_sql` in `purchase_orders.py`) and returned on every PO payload. The frontend
+must not re-derive it: five pages once held their own copy that expired a PO one day past
+its date while the backend required 15, so a row's badge contradicted the KPI counting it.
+
+The backend can additionally return `Closed`, `Received` and `Packed`. The PO pages show a
+conditional **Other** card so the status breakdown always reconciles to the total rather
+than only while those statuses stay unused.
+
+**KPI row (all five PO pages):**
+`All PO · Created · Dispatched · In Transit · Delivered · Delayed · Cancelled · Expired`
+
+`All PO` is the unfiltered total for the active date range, so the seven status cards sum
+to it.
 
 **Pages updated:**
 - [amazon-po/page.tsx](frontend/src/app/(dashboard)/amazon-po/page.tsx)
@@ -2611,6 +2633,48 @@ const defaultConfig = {
 | 1.0 | 2024-01-25 | Initial specification |
 | 1.1 | 2024-01-25 | Updates from client discussion (see below) |
 | 1.2 | 2025-02-04 | **PRODUCTION READY** - API verification, timeout handling, status standardization |
+| 1.3 | 2026-07-31 | Correctness pass — see v1.3 below. Sections 1–10 above predate it; where they disagree with v1.3, v1.3 is current. |
+
+### v1.3 Changes Summary (Correctness Pass, 31 Jul 2026)
+
+Findings were verified against the live database rather than by reading code, which also
+cleared three reported issues as false positives.
+
+**Security**
+
+| Area | Change |
+|---|---|
+| SQL injection | The `status` query parameter was interpolated into the SQL text of every PO listing endpoint; `?status=' OR '1'='1` bypassed the filter. Now a bound parameter. |
+| Authorization | `received-qty` / `accepted-qty` endpoints had no Admin/Manager guard and no bounds check, so any role could set an arbitrary quantity and drive an equivalent inventory deduction. |
+| Auth errors | `HTTPBearer(auto_error=False)`; missing/expired tokens now return **401**, role denials remain **403**. |
+
+**Inventory correctness**
+
+| Area | Change |
+|---|---|
+| Packed stock | Availability summed every historical `InventoryDate` (67 snapshots), overstating one product by 108×. Now resolved per product against its own latest snapshot. |
+| Stock movement | Adjustments only ran in the deduct direction, so lowering an accepted quantity never returned the stock. Now symmetric. |
+| Silent no-op | A global `MAX(InventoryDate)` matched nothing for products absent from the newest upload, so their deductions silently did nothing. |
+| Alerts | The same global-max issue reported products holding stock as **Out of Stock**. |
+| Threshold | Low stock was evaluated against 10 (frontend), 50 (backend) and 200 (dashboard widget). Now a single value of **50**. |
+
+**PO consistency**
+
+| Area | Change |
+|---|---|
+| Status derivation | One SQL expression shared by the overview, item-grid and stats queries; they had drifted and returned different POs for the same filter. |
+| Expired | Treated as a first-class status — matched both stored and derived, filterable, and present in the KPI row. |
+| Client status | The frontend no longer re-derives status; it uses the backend value verbatim. |
+| Pagination | Server-side across ten grid pages; the duplicate client-side control is gone. |
+| Totals | `total_units` / `total_pos` carry the same filters as the rows they describe. |
+| Export | Exports every filtered row rather than the page on screen. |
+| Re-upload | A Blinkit PO already in the database is skipped rather than re-imported, which previously doubled its line items. |
+
+**Not defects — checked and cleared**
+
+- Blinkit `MRP` already stores the line total (`qty × unit price`), so `SUM(MRP)` is correct.
+- `Inventory` holds one row per SKU per date, so the out-of-stock count needs no `DISTINCT`.
+- `AmazonSales` rows are daily, not weekly, so `DRR_D1 = OrderedUnits` is right. `DRR_7Days`/`DRR_30Days` remain straight-line projections rather than trailing averages, and nothing reads them.
 
 ### v1.2 Changes Summary (Production Ready)
 

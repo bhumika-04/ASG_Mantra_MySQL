@@ -155,6 +155,14 @@ App runs at: `http://localhost:3000`
 - Top products by revenue
 - Low inventory alert panel
 
+Low stock is one threshold, **50 units**, defined in `backend/app/routers/inventory.py`,
+`backend/app/routers/alerts.py` and `frontend/src/lib/constants.ts`. Keep the three in
+step — they previously held 10, 50 and 200, so the same product read as low in one view
+and healthy in another.
+
+Dashboard responses are cached in-process for 60s and PO stats for 15s. The stats cache
+is cleared immediately on any PO status change, so KPIs never lag an edit.
+
 ### Inventory
 - Cross-channel stock view per product: ASG (packed / unpacked) + Amazon + Blinkit (FE dark store / BE hub)
 - **Snapshot date picker** — highlights dates that have uploaded data with green dots; latest snapshot shown in blue
@@ -170,10 +178,29 @@ App runs at: `http://localhost:3000`
 ### Purchase Orders
 - Amazon: PDF upload → auto-parse line items → preview → confirm
 - Blinkit: CSV/PDF upload → preview → confirm
-- Duplicate PO detection before confirm
+- Duplicate PO detection before confirm. A PO already in the database is **skipped**
+  rather than re-imported — its line items would otherwise be appended a second time and
+  every quantity would double. Skipped PO numbers are reported after upload; amend an
+  existing PO on the Blinkit PO page rather than by re-uploading. The PDF path rejects a
+  duplicate outright with `409`.
 - Status update per PO and per line item
 - PO overview (paginated, with search, status and date filters)
-- PO Lifecycle page with status funnel KPIs
+- PO Lifecycle page combining both channels, with a status funnel and stage flow
+- All five PO pages share one KPI row: **All PO · Created · Dispatched · In Transit ·
+  Delivered · Delayed · Cancelled · Expired**. `All PO` is the unfiltered total for the
+  active date range and the seven statuses sum to it. Export sends every filtered row,
+  not just the page on screen.
+
+#### PO status
+
+Status is computed by the backend and returned on every PO payload; the frontend never
+re-derives it. A PO becomes **Expired** either because the header stores that status or
+because its expiry date passed more than `_EXPIRY_DAYS` (15) ago while the PO was still
+open. Statuses that mean the PO has moved on — Delivered, Received, Cancelled, Closed,
+Dispatched, In Transit — are never overridden by expiry.
+
+Row colour follows that same status: red means Expired, yellow means within 7 days of
+expiry or past it but still inside the grace period.
 
 ### Distributors
 - Eagle Network weekly stock report upload (XLSX)
@@ -199,11 +226,13 @@ App runs at: `http://localhost:3000`
 | `GET /api/dashboard/charts` | Sales trend + top products |
 | `/api/upload/amazon-data/...` | Amazon sales, inventory, PO upload/confirm |
 | `/api/upload/blinkit-data/...` | Blinkit sales, inventory, PO upload/confirm |
-| `/api/purchase-orders/amazon` | Amazon PO list (paginated) |
-| `/api/purchase-orders/blinkit` | Blinkit PO list (paginated) |
+| `/api/purchase-orders/amazon` | Amazon PO line items (paginated) |
+| `/api/purchase-orders/blinkit` | Blinkit PO line items (paginated) |
 | `/api/purchase-orders/amazon/stats` | Amazon PO status counts |
 | `/api/purchase-orders/amazon/states` | Distinct ship-to states |
-| `/api/purchase-orders/amazon/overview` | Aggregated Amazon PO overview |
+| `/api/purchase-orders/amazon/overview` | Aggregated Amazon PO overview (one row per PO) |
+| `/api/purchase-orders/lifecycle/overview` | Amazon + Blinkit POs in one paginated set |
+| `/api/products/resolve` | Map an ASIN / Blinkit item id / ASG SKU to a product's per-channel identifiers |
 | `/api/inventory/dispatch-overview` | Cross-channel inventory per product |
 | `/api/inventory/low-stock` | Products below threshold |
 | `/api/notifications` | Notification CRUD, mark-as-read |
@@ -211,6 +240,32 @@ App runs at: `http://localhost:3000`
 | `/api/upload-logs` | Upload history |
 | `/api/users` | User CRUD |
 | `/api/roles` | Role management |
+
+### Pagination and totals
+
+List endpoints return `{ items, total, page, page_size, total_pages }`. The PO endpoints
+also return figures carrying the **same filters as the rows**, so a KPI built from them
+cannot pair a filtered count with an unfiltered one:
+
+| Endpoint | Extra fields |
+|---|---|
+| `/purchase-orders/amazon`, `/blinkit` | `total_units`, `total_pos` |
+| `/purchase-orders/*/overview`, `/lifecycle/overview` | `total_units` |
+
+Those two item-grid endpoints deliberately declare **no** `response_model` — the shared
+`PaginatedResponse` lists only the five standard fields and FastAPI silently strips
+anything else.
+
+### Authentication errors
+
+| Code | Meaning |
+|---|---|
+| `401` | Not authenticated — missing, malformed or expired token. The frontend clears the session and redirects to login. |
+| `403` | Authenticated but not permitted — the role lacks access. |
+
+`HTTPBearer` is configured with `auto_error=False` so a missing header returns 401 rather
+than FastAPI's default 403; otherwise an expired session surfaced as a permission error
+and never triggered the redirect.
 
 ---
 
