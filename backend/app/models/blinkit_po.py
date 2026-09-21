@@ -60,7 +60,7 @@ class BlinkitPOData(Base):
     Courier = Column(String(100), nullable=True)
 
     # Metadata
-    CreatedAt = Column(DateTime, default=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
 
     # Relationships
     items = relationship("BlinkitPOItemData", back_populates="po", cascade="all, delete-orphan")

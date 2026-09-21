@@ -3,7 +3,7 @@ Sales Model - SQLAlchemy ORM
 GAP 1 SOLUTION: OrderId is NULLABLE (Amazon sales have no Order IDs - aggregated data)
 GAP 2 SOLUTION: Customer fields NULLABLE (Blinkit only has customer data)
 """
-from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey, DECIMAL, Computed
+from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey, DECIMAL
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from ..database import Base
@@ -29,9 +29,15 @@ class Sales(Base):
     PaymentMode = Column(String(50), nullable=True)  # Blinkit: COD/Online
     Status = Column(String(50), nullable=False, index=True)
     Commission = Column(DECIMAL(10, 2), nullable=True)
-    NetRevenue = Column(DECIMAL(10, 2), Computed("TotalAmount - ISNULL(Commission, 0)"))
-    CreatedAt = Column(DateTime, default=func.getdate())
-    UpdatedAt = Column(DateTime, default=func.getdate(), onupdate=func.getdate())
+    # DB-generated column (both engines already have it as a real generated/
+    # computed column — MSSQL via the archived MSSQL schema script (moved outside the repo, no longer part of this project), MySQL via
+    # database/WholeDbMySQL.sql's `GENERATED ALWAYS AS (...) STORED`). Mapped
+    # here as a plain read-only column instead of SQLAlchemy's Computed(),
+    # whose MSSQL-flavoured ISNULL() text is DDL-only and dialect-specific —
+    # this mapping just reads the value, which works identically either way.
+    NetRevenue = Column(DECIMAL(10, 2))
+    CreatedAt = Column(DateTime, default=func.now())
+    UpdatedAt = Column(DateTime, default=func.now(), onupdate=func.now())
 
     # Relationships
     product = relationship("Product", back_populates="sales")

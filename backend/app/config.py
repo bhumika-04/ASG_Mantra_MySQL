@@ -9,13 +9,14 @@ from typing import List
 class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
 
-    # Database Configuration
-    DB_SERVER: str
-    DB_PORT: int = 1433
-    DB_NAME: str
-    DB_USER: str
-    DB_PASSWORD: str
-    DB_DRIVER: str = "ODBC Driver 18 for SQL Server"
+    # Database Configuration — MySQL only. No Microsoft products in this project
+    # (client requirement) — see docs/MYSQL_MIGRATION_BRIEF.md for the migration
+    # off MSSQL/pyodbc.
+    MYSQL_HOST: str
+    MYSQL_PORT: int = 3306
+    MYSQL_DB: str
+    MYSQL_USER: str
+    MYSQL_PASSWORD: str
 
     # JWT Configuration
     SECRET_KEY: str
@@ -48,17 +49,19 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> str:
-        """Generate SQLAlchemy database URL"""
+        """Generate the SQLAlchemy MySQL database URL.
+
+        quote_plus is required on user/password — an unescaped @, :, / or #
+        in either breaks the URL's own parsing (bit a migration script once
+        already; see docs/MYSQL_MIGRATION_BRIEF.md).
+        """
         from urllib.parse import quote_plus
-        # Use Windows Authentication (Integrated Security) if no user/password provided
-        if not self.DB_USER or not self.DB_PASSWORD:
-            conn_str = f"DRIVER={{{self.DB_DRIVER}}};SERVER={self.DB_SERVER};DATABASE={self.DB_NAME};Trusted_Connection=yes;TrustServerCertificate=yes"
-            return f"mssql+pyodbc:///?odbc_connect={quote_plus(conn_str)}"
-        else:
-            # Use ODBC connection string format to safely handle special characters
-            # in passwords (e.g. @) and MSSQL server notation (IP,port)
-            conn_str = f"DRIVER={{{self.DB_DRIVER}}};SERVER={self.DB_SERVER},{self.DB_PORT};DATABASE={self.DB_NAME};UID={self.DB_USER};PWD={self.DB_PASSWORD};TrustServerCertificate=yes"
-            return f"mssql+pyodbc:///?odbc_connect={quote_plus(conn_str)}"
+        user = quote_plus(self.MYSQL_USER)
+        password = quote_plus(self.MYSQL_PASSWORD)
+        return (
+            f"mysql+pymysql://{user}:{password}"
+            f"@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DB}?charset=utf8mb4"
+        )
 
     @property
     def allowed_origins_list(self) -> List[str]:

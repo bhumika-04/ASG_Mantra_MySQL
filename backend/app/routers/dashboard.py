@@ -79,19 +79,19 @@ async def get_inventory_stats(
           (SELECT COUNT(DISTINCT p.PONumber) FROM AmazonPO p
            LEFT JOIN amz_cancel ac ON ac.POId = p.Id
            WHERE p.POStatus IN ('Created','Packed','Dispatched','In Transit')
-             AND NOT (ac.min_cancel IS NOT NULL AND DATEDIFF(day, ac.min_cancel, GETDATE()) >= 15))
+             AND NOT (ac.min_cancel IS NOT NULL AND DATEDIFF(NOW(), ac.min_cancel) >= 15))
           + (SELECT COUNT(DISTINCT PONumber) FROM BlinkitPO
              WHERE Status IN ('Created','Packed','Dispatched','In Transit')
-               AND NOT (POExpiryDate IS NOT NULL AND DATEDIFF(day, POExpiryDate, GETDATE()) >= 15)) AS pending_pos,
+               AND NOT (POExpiryDate IS NOT NULL AND DATEDIFF(NOW(), POExpiryDate) >= 15)) AS pending_pos,
           (SELECT COUNT(DISTINCT PONumber) FROM AmazonPO WHERE POStatus = 'Delayed')
           + (SELECT COUNT(DISTINCT PONumber) FROM BlinkitPO WHERE Status = 'Delayed') AS delayed_pos,
           (SELECT COUNT(DISTINCT p.PONumber) FROM AmazonPO p
            LEFT JOIN amz_cancel ac ON ac.POId = p.Id
            WHERE p.POStatus IN ('Created','Packed','Dispatched','In Transit')
-             AND NOT (ac.min_cancel IS NOT NULL AND DATEDIFF(day, ac.min_cancel, GETDATE()) >= 15)) AS amazon_pending,
+             AND NOT (ac.min_cancel IS NOT NULL AND DATEDIFF(NOW(), ac.min_cancel) >= 15)) AS amazon_pending,
           (SELECT COUNT(DISTINCT PONumber) FROM BlinkitPO
            WHERE Status IN ('Created','Packed','Dispatched','In Transit')
-             AND NOT (POExpiryDate IS NOT NULL AND DATEDIFF(day, POExpiryDate, GETDATE()) >= 15))  AS blinkit_pending,
+             AND NOT (POExpiryDate IS NOT NULL AND DATEDIFF(NOW(), POExpiryDate) >= 15))  AS blinkit_pending,
           (SELECT COALESCE(SUM(SellableOnHandUnits), 0)
            FROM AmazonInventory ai, max_dates m WHERE ai.ReportDate = m.amz_inv_date) AS amazon_inv,
           (SELECT COALESCE(SUM(BackendInvQty), 0)
@@ -158,23 +158,31 @@ async def get_dashboard_charts(
     else:
         granularity = 'monthly'
 
+    # ---- MySQL adaptation for local testing (docs/MYSQL_MIGRATION_BRIEF.md) ----
+    # MSSQL used CONVERT(varchar(N), date, 120) for the period labels and
+    # DATEADD(dd, -((DATEPART(weekday, x) - 2 + 7) % 7), x) to find each week's
+    # Monday (that offset math exists only because DATEPART(weekday,...) is
+    # Sunday-based in MSSQL). MySQL's DATE_FORMAT covers the first, and its
+    # WEEKDAY() is already Monday-based (0=Monday), so the Monday calc below
+    # needs no offset math at all: DATE_SUB(x, INTERVAL WEEKDAY(x) DAY).
+    # Exact MSSQL originals are in git diff / the archived MSSQL schema script (moved outside the repo, no longer part of this project)-era code.
     try:
         if granularity == 'daily':
             # Daily grouping: YYYY-MM-DD labels
             amz_rows = db.execute(text("""
-                SELECT CONVERT(varchar(10), ReportDate, 120) AS period, SUM(OrderedRevenue) AS revenue
+                SELECT DATE_FORMAT(ReportDate, '%Y-%m-%d') AS period, SUM(OrderedRevenue) AS revenue
                 FROM AmazonSales
                 WHERE ReportDate IS NOT NULL AND ReportDate BETWEEN :start AND :end
-                GROUP BY CONVERT(varchar(10), ReportDate, 120)
+                GROUP BY DATE_FORMAT(ReportDate, '%Y-%m-%d')
                 ORDER BY period
             """), {"start": s_date, "end": e_date}).fetchall()
             amazon_by_period = {row[0]: float(row[1] or 0) for row in amz_rows}
 
             blk_rows = db.execute(text("""
-                SELECT CONVERT(varchar(10), SaleDate, 120) AS period, SUM(MRP) AS revenue
+                SELECT DATE_FORMAT(SaleDate, '%Y-%m-%d') AS period, SUM(MRP) AS revenue
                 FROM BlinkitSales
                 WHERE SaleDate IS NOT NULL AND SaleDate BETWEEN :start AND :end
-                GROUP BY CONVERT(varchar(10), SaleDate, 120)
+                GROUP BY DATE_FORMAT(SaleDate, '%Y-%m-%d')
                 ORDER BY period
             """), {"start": s_date, "end": e_date}).fetchall()
             blinkit_by_period = {row[0]: float(row[1] or 0) for row in blk_rows}
@@ -183,28 +191,24 @@ async def get_dashboard_charts(
             # Weekly grouping: group by Monday of each week, label as YYYY-MM-DD
             amz_rows = db.execute(text("""
                 SELECT
-                    CONVERT(varchar(10),
-                        DATEADD(dd, -((DATEPART(weekday, ReportDate) - 2 + 7) % 7), ReportDate),
-                        120) AS period,
+                    DATE_FORMAT(DATE_SUB(ReportDate, INTERVAL WEEKDAY(ReportDate) DAY), '%Y-%m-%d') AS period,
                     SUM(OrderedRevenue) AS revenue
                 FROM AmazonSales
                 WHERE ReportDate IS NOT NULL
                   AND ReportDate BETWEEN :start AND :end
-                GROUP BY DATEADD(dd, -((DATEPART(weekday, ReportDate) - 2 + 7) % 7), ReportDate)
+                GROUP BY DATE_SUB(ReportDate, INTERVAL WEEKDAY(ReportDate) DAY)
                 ORDER BY period
             """), {"start": s_date, "end": e_date}).fetchall()
             amazon_by_period = {row[0]: float(row[1] or 0) for row in amz_rows}
 
             blk_rows = db.execute(text("""
                 SELECT
-                    CONVERT(varchar(10),
-                        DATEADD(dd, -((DATEPART(weekday, SaleDate) - 2 + 7) % 7), SaleDate),
-                        120) AS period,
+                    DATE_FORMAT(DATE_SUB(SaleDate, INTERVAL WEEKDAY(SaleDate) DAY), '%Y-%m-%d') AS period,
                     SUM(MRP) AS revenue
                 FROM BlinkitSales
                 WHERE SaleDate IS NOT NULL
                   AND SaleDate BETWEEN :start AND :end
-                GROUP BY DATEADD(dd, -((DATEPART(weekday, SaleDate) - 2 + 7) % 7), SaleDate)
+                GROUP BY DATE_SUB(SaleDate, INTERVAL WEEKDAY(SaleDate) DAY)
                 ORDER BY period
             """), {"start": s_date, "end": e_date}).fetchall()
             blinkit_by_period = {row[0]: float(row[1] or 0) for row in blk_rows}
@@ -212,23 +216,23 @@ async def get_dashboard_charts(
         else:
             # Monthly grouping: YYYY-MM labels, optional date range filter
             amz_rows = db.execute(text("""
-                SELECT CONVERT(varchar(7), ReportDate, 120) AS period, SUM(OrderedRevenue) AS revenue
+                SELECT DATE_FORMAT(ReportDate, '%Y-%m') AS period, SUM(OrderedRevenue) AS revenue
                 FROM AmazonSales
                 WHERE ReportDate IS NOT NULL
                   AND (:start IS NULL OR ReportDate >= :start)
                   AND (:end IS NULL OR ReportDate <= :end)
-                GROUP BY CONVERT(varchar(7), ReportDate, 120)
+                GROUP BY DATE_FORMAT(ReportDate, '%Y-%m')
                 ORDER BY period
             """), {"start": s_date, "end": e_date}).fetchall()
             amazon_by_period = {row[0]: float(row[1] or 0) for row in amz_rows}
 
             blk_rows = db.execute(text("""
-                SELECT CONVERT(varchar(7), SaleDate, 120) AS period, SUM(MRP) AS revenue
+                SELECT DATE_FORMAT(SaleDate, '%Y-%m') AS period, SUM(MRP) AS revenue
                 FROM BlinkitSales
                 WHERE SaleDate IS NOT NULL
                   AND (:start IS NULL OR SaleDate >= :start)
                   AND (:end IS NULL OR SaleDate <= :end)
-                GROUP BY CONVERT(varchar(7), SaleDate, 120)
+                GROUP BY DATE_FORMAT(SaleDate, '%Y-%m')
                 ORDER BY period
             """), {"start": s_date, "end": e_date}).fetchall()
             blinkit_by_period = {row[0]: float(row[1] or 0) for row in blk_rows}
@@ -244,12 +248,13 @@ async def get_dashboard_charts(
         ]
 
         # Top 5 Amazon Products — filtered by date range if provided
+        # (was SELECT TOP 5 ... ORDER BY — MySQL has no TOP, LIMIT goes at the end)
         amz_top_rows = db.execute(text("""
-            SELECT TOP 5
+            SELECT
                 s.ASIN,
                 MAX(s.ProductTitle)            AS name,
                 SUM(s.OrderedRevenue)          AS revenue,
-                SUM(ISNULL(s.OrderedUnits, 0)) AS quantity,
+                SUM(IFNULL(s.OrderedUnits, 0)) AS quantity,
                 MAX(p.AsgSku)                  AS sku
             FROM AmazonSales s
             LEFT JOIN Products p ON p.AmazonId = s.ASIN
@@ -258,6 +263,7 @@ async def get_dashboard_charts(
               AND (:end IS NULL OR s.ReportDate <= :end)
             GROUP BY s.ASIN
             ORDER BY SUM(s.OrderedRevenue) DESC
+            LIMIT 5
         """), {"start": s_date, "end": e_date}).fetchall()
         amazon_product_data = [
             {
@@ -270,20 +276,23 @@ async def get_dashboard_charts(
         ]
 
         # Top 5 Blinkit Products — filtered by date range if provided
+        # (was SELECT TOP 5 / CAST(... AS NVARCHAR(50)) — MySQL: LIMIT at the
+        # end, and CAST target type is CHAR, not NVARCHAR)
         blinkit_top_rows = db.execute(text("""
-            SELECT TOP 5
+            SELECT
                 s.ItemId,
                 MAX(s.ItemName) AS name,
                 SUM(s.MRP)      AS revenue,
                 SUM(s.QtySold)  AS quantity,
                 MAX(p.AsgSku)   AS sku
             FROM BlinkitSales s
-            LEFT JOIN Products p ON p.BlinkitId = CAST(s.ItemId AS NVARCHAR(50))
+            LEFT JOIN Products p ON p.BlinkitId = CAST(s.ItemId AS CHAR(50)) COLLATE utf8mb4_general_ci
             WHERE s.SaleDate IS NOT NULL
               AND (:start IS NULL OR s.SaleDate >= :start)
               AND (:end IS NULL OR s.SaleDate <= :end)
             GROUP BY s.ItemId
             ORDER BY SUM(s.MRP) DESC
+            LIMIT 5
         """), {"start": s_date, "end": e_date}).fetchall()
         blinkit_product_data = [
             {

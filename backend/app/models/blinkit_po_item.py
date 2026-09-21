@@ -56,7 +56,7 @@ class BlinkitPOItemData(Base):
     ProductId = Column(Integer, ForeignKey("Products.Id"), nullable=True, index=True)
 
     # Metadata
-    CreatedAt = Column(DateTime, default=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
 
     # Relationships
     po = relationship("BlinkitPOData", back_populates="items")

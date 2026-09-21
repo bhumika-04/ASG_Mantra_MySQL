@@ -7,7 +7,9 @@ Both distributors send weekly stock reports:
   RK    (Id=1) → Amazon channel   — dispatched to Amazon FCs
 
 Table: DistributorStock
-SQL (run once):
+MSSQL original creation SQL (see the archived MSSQL schema script (moved outside the repo, no longer part of this project) for the live schema;
+database/WholeDbMySQL.sql has the MySQL equivalent — VARCHAR instead of NVARCHAR,
+CURRENT_TIMESTAMP instead of GETDATE()):
     CREATE TABLE DistributorStock (
         Id            INT IDENTITY(1,1) PRIMARY KEY,
         ReportDate    DATE NOT NULL,
@@ -49,7 +51,7 @@ class DistributorStockData(Base):
     HR_Qty = Column(Integer, nullable=True)
 
     # Metadata
-    CreatedAt = Column(DateTime, default=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
 
     def to_dict(self):
         return {

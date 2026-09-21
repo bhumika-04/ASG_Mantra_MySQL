@@ -2,7 +2,7 @@
 User Model - SQLAlchemy ORM
 """
 from sqlalchemy import Column, String, Boolean, DateTime, Enum
-from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER
+from ..db_types import GUID
 from sqlalchemy.sql import func
 from ..database import Base
 import uuid
@@ -11,7 +11,7 @@ import uuid
 class User(Base):
     __tablename__ = "Users"
 
-    Id = Column(UNIQUEIDENTIFIER, primary_key=True, default=uuid.uuid4)
+    Id = Column(GUID, primary_key=True, default=uuid.uuid4)
     Name = Column(String(255), nullable=False)
     Email = Column(String(255), unique=True, nullable=False, index=True)
     PasswordHash = Column(String(255), nullable=False)
@@ -22,10 +22,10 @@ class User(Base):
     )
     Avatar = Column(String(500), nullable=True)
     IsActive = Column(Boolean, default=True, index=True)
-    CreatedAt = Column(DateTime, default=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
     LastLogin = Column(DateTime, nullable=True)
-    CreatedBy = Column(UNIQUEIDENTIFIER, nullable=True)
-    UpdatedAt = Column(DateTime, default=func.getdate(), onupdate=func.getdate())
+    CreatedBy = Column(GUID, nullable=True)
+    UpdatedAt = Column(DateTime, default=func.now(), onupdate=func.now())
 
     def to_dict(self):
         """Convert model to dictionary (exclude password)"""

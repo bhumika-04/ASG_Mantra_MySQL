@@ -19,7 +19,7 @@ class Distributor(Base):
     Phone = Column(String(20), nullable=True)
     Email = Column(String(100), nullable=True)
     Active = Column(Boolean, default=True)
-    CreatedAt = Column(DateTime, default=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
 
     def to_dict(self):
         return {

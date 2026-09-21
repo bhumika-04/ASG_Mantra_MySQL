@@ -3,7 +3,7 @@ Purchase Order Model - SQLAlchemy ORM
 Aligned with schema-updated.sql
 """
 from sqlalchemy import Column, Integer, String, Boolean, Date, DateTime, ForeignKey, DECIMAL
-from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER
+from ..db_types import GUID
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from ..database import Base
@@ -42,10 +42,10 @@ class PurchaseOrder(Base):
     IsDelayed = Column(Boolean, default=False)  # Used by VW_DashboardInventoryStats & VW_PlatformComparison
     Remarks = Column(String, nullable=True)
 
-    CreatedAt = Column(DateTime, default=func.getdate())
-    UpdatedAt = Column(DateTime, default=func.getdate(), onupdate=func.getdate())
-    CreatedBy = Column(UNIQUEIDENTIFIER, nullable=True)
-    UpdatedBy = Column(UNIQUEIDENTIFIER, nullable=True)
+    CreatedAt = Column(DateTime, default=func.now())
+    UpdatedAt = Column(DateTime, default=func.now(), onupdate=func.now())
+    CreatedBy = Column(GUID, nullable=True)
+    UpdatedBy = Column(GUID, nullable=True)
 
     # Relationships
     product = relationship("Product", back_populates="purchase_orders")

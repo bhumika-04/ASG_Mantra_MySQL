@@ -2,7 +2,7 @@
 Product Model - SQLAlchemy ORM
 """
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, DECIMAL
-from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER
+from ..db_types import GUID
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from ..database import Base
@@ -23,9 +23,9 @@ class Product(Base):
     UnitWeight = Column(String(50), nullable=True)  # e.g., "1KG", "15ML", "500G"
     PackSize = Column(Integer, nullable=True)  # Number of units per pack
     IsActive = Column(Boolean, default=True, index=True)
-    CreatedAt = Column(DateTime, default=func.getdate())
-    UpdatedAt = Column(DateTime, default=func.getdate(), onupdate=func.getdate())
-    CreatedBy = Column(UNIQUEIDENTIFIER, nullable=True)
+    CreatedAt = Column(DateTime, default=func.now())
+    UpdatedAt = Column(DateTime, default=func.now(), onupdate=func.now())
+    CreatedBy = Column(GUID, nullable=True)
 
     # Relationships
     inventory = relationship("Inventory", back_populates="product")  # Multiple records (one per channel)
