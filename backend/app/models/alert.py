@@ -3,7 +3,7 @@ Alert Model - SQLAlchemy ORM
 Matches SQL table [dbo].[Alerts] in Script.sql
 """
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey
-from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER
+from ..db_types import GUID
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from ..database import Base
@@ -11,7 +11,6 @@ from ..database import Base
 
 class LowStockAlert(Base):
     __tablename__ = "Alerts"
-    __table_args__ = {'implicit_returning': False}
 
     Id = Column(Integer, primary_key=True, autoincrement=True)
     ProductId = Column(Integer, ForeignKey("Products.Id"), nullable=False, index=True)
@@ -20,10 +19,10 @@ class LowStockAlert(Base):
     Severity = Column(String(20), nullable=False, index=True)
     Message = Column(String, nullable=False, default="")
     IsResolved = Column(Boolean, default=False, index=True)
-    ResolvedBy = Column(UNIQUEIDENTIFIER, nullable=True)
+    ResolvedBy = Column(GUID, nullable=True)
     ResolvedAt = Column(DateTime, nullable=True)
     Remarks = Column(String, nullable=True)
-    CreatedAt = Column(DateTime, default=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
 
     # Relationships
     product = relationship("Product")

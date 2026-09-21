@@ -83,6 +83,7 @@ interface SemanticPreview {
   newProducts: NewProduct[];
   detectedDate: string | null; // null = date not found in CSV metadata
   duplicateDataWarning?: string | null; // Warning if similar data already exists
+  mandatoryDataWarning?: string | null; // Core metric column is blank for every row — likely the wrong file
   columnWarnings?: string[]; // Warnings about extra or missing columns
   poSummary?: {
     poNumber: string;
@@ -140,6 +141,7 @@ export default function AmazonUploadPage() {
           newProducts: result.newProducts ?? [],
           detectedDate,
           duplicateDataWarning: result.duplicateDataWarning ?? null,
+          mandatoryDataWarning: result.mandatoryDataWarning ?? null,
           columnWarnings: result.columnWarnings ?? [],
           poSummary: result.poSummary,
           poItems: result.poItems,
@@ -493,6 +495,24 @@ export default function AmazonUploadPage() {
                 </div>
               )}
 
+              {/* Mandatory Data Warning — a core metric column is blank for every row,
+                  usually meaning the wrong file was picked for this section (e.g. an
+                  Inventory report uploaded to Sales, or vice versa). Shown ahead of the
+                  other warnings since it's the most likely to mean "stop and check". */}
+              {semanticPreview.mandatoryDataWarning && (
+                <div className="p-3 bg-red-50 border border-red-300 rounded-lg">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="h-4 w-4 text-red-600 flex-shrink-0" />
+                    <span className="text-sm font-semibold text-red-800">
+                      Wrong file for this section?
+                    </span>
+                  </div>
+                  <p className="text-sm text-red-700 mt-2 ml-6">
+                    {semanticPreview.mandatoryDataWarning}
+                  </p>
+                </div>
+              )}
+
               {/* Column Warnings */}
               {(semanticPreview.columnWarnings?.length ?? 0) > 0 && (
                 <div className="p-3 bg-orange-50 border border-orange-200 rounded-lg">
@@ -770,7 +790,17 @@ export default function AmazonUploadPage() {
                   <Button variant="outline" onClick={handleCancelSemanticPreview} disabled={isUploading}>
                     Cancel
                   </Button>
-                  <Button onClick={handleConfirmSemanticUpload} disabled={isUploading}>
+                  <Button
+                    onClick={handleConfirmSemanticUpload}
+                    disabled={isUploading || !!semanticPreview.duplicateDataWarning || !!semanticPreview.mandatoryDataWarning}
+                    title={
+                      semanticPreview.mandatoryDataWarning
+                        ? 'Blocked: core data is blank for every row — this looks like the wrong file for this section.'
+                        : semanticPreview.duplicateDataWarning
+                        ? 'Blocked: this data already exists — re-uploading would be skipped anyway.'
+                        : undefined
+                    }
+                  >
                     {isUploading ? (
                       <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Uploading...</>
                     ) : (

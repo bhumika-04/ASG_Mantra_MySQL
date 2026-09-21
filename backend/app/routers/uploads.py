@@ -407,9 +407,10 @@ async def preview_inventory_data(
             current_unpacked = None
             if product:
                 cur_row = db.execute(text(
+                    # was: "... ORDER BY LastUpdated DESC OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY"
                     "SELECT PackedQty, UnpackedQty FROM Inventory "
                     "WHERE ProductId = :pid AND InventoryDate = :inv_date "
-                    "ORDER BY LastUpdated DESC OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY"
+                    "ORDER BY LastUpdated DESC LIMIT 1"
                 ), {"pid": product.Id, "inv_date": today}).fetchone()
                 if cur_row:
                     current_packed = int(cur_row[0] or 0)
@@ -587,7 +588,7 @@ async def upload_inventory_data(
                         "UnpackedQty = :unpacked, "
                         "CurrentStock = :stock, "
                         "AsgWarehouseId = :wid, "
-                        "LastInventoryDate = :today, LastUpdated = GETDATE() "
+                        "LastInventoryDate = :today, LastUpdated = NOW() "
                         "WHERE Id = :inv_id"
                     ), {
                         "packed": packed_qty,
@@ -606,7 +607,7 @@ async def upload_inventory_data(
                         "INSERT INTO Inventory "
                         "(ProductId, AsgWarehouseId, CurrentStock, PackedQty, UnpackedQty, "
                         "InventoryDate, LastInventoryDate, LastUpdated) "
-                        "VALUES (:pid, :wid, :stock, :packed, :unpacked, :today, :today, GETDATE())"
+                        "VALUES (:pid, :wid, :stock, :packed, :unpacked, :today, :today, NOW())"
                     ), {
                         "pid": product.Id,
                         "wid": asg_wh_id,
@@ -635,7 +636,7 @@ async def upload_inventory_data(
                         db.execute(text(
                             "UPDATE InventoryHistory SET "
                             "PackedQty = :packed, UnpackedQty = :unpacked, CurrentStock = :stock, "
-                            "UploadedBy = :uid, CreatedAt = GETDATE() "
+                            "UploadedBy = :uid, CreatedAt = NOW() "
                             "WHERE Id = :hid"
                         ), {
                             "packed": packed_qty,
@@ -649,7 +650,7 @@ async def upload_inventory_data(
                             "INSERT INTO InventoryHistory "
                             "(ProductId, AsgWarehouseId, InventoryDate, PackedQty, UnpackedQty, "
                             "CurrentStock, UploadedBy, CreatedAt) "
-                            "VALUES (:pid, :wid, :today, :packed, :unpacked, :stock, :uid, GETDATE())"
+                            "VALUES (:pid, :wid, :today, :packed, :unpacked, :stock, :uid, NOW())"
                         ), {
                             "pid": product.Id,
                             "wid": asg_wh_id,

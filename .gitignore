@@ -17,6 +17,8 @@ backend/.env
 backend/*.egg-info/
 backend/dist/
 backend/.pytest_cache/
+backend/*.log
+backend/**/*.log
 
 # Uploaded files (runtime data, not source)
 backend/uploads/

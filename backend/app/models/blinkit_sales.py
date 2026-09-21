@@ -31,7 +31,7 @@ class BlinkitSalesData(Base):
     MRP = Column(DECIMAL(15, 2), nullable=True)  # Total revenue (qty x unit_price)
 
     # Metadata
-    CreatedAt = Column(DateTime, default=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
 
     def to_dict(self):
         return {

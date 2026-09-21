@@ -4,7 +4,7 @@ Matches SQL table [dbo].[UploadLogs] in Script.sql
 Tracks all file uploads (inventory, sales, POs, etc.)
 """
 from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Text
-from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER
+from ..db_types import GUID
 from sqlalchemy.sql import func
 from ..database import Base
 
@@ -17,14 +17,14 @@ class UploadLog(Base):
     Channel = Column(String(20), nullable=True, index=True)  # 'Amazon', 'Blinkit', null for inventory
     FileName = Column(String(255), nullable=False)
     FileSize = Column(Integer, nullable=True)  # File size in bytes
-    UploadDate = Column(DateTime, default=func.getdate(), index=True)
+    UploadDate = Column(DateTime, default=func.now(), index=True)
     ProcessedAt = Column(DateTime, nullable=True)
     Status = Column(String(20), nullable=False, default='Pending')  # 'Pending', 'Processing', 'Success', 'Failed'
     TotalRows = Column(Integer, nullable=True)
     SuccessRows = Column(Integer, nullable=True)
     ErrorRows = Column(Integer, nullable=True)
     Errors = Column(Text, nullable=True)  # JSON string of error messages
-    UploadedBy = Column(UNIQUEIDENTIFIER, ForeignKey("Users.Id"), nullable=True, index=True)
+    UploadedBy = Column(GUID, ForeignKey("Users.Id"), nullable=True, index=True)
 
     def to_dict(self):
         return {

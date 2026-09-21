@@ -50,7 +50,7 @@ class AmazonPOItemData(Base):
     ProductId = Column(Integer, ForeignKey("Products.Id"), nullable=True, index=True)
 
     # Metadata
-    CreatedAt = Column(DateTime, default=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
 
     # Relationships
     po = relationship("AmazonPOData", back_populates="items")

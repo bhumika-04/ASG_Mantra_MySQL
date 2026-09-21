@@ -4,7 +4,7 @@ ASG internal warehouse stock (Packed/Unpacked quantities).
 Platform-specific inventory lives in AmazonInventory / BlinkitInventory tables.
 """
 from sqlalchemy import Column, Integer, DateTime, Date, ForeignKey, UniqueConstraint
-from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER
+from ..db_types import GUID
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from ..database import Base
@@ -14,7 +14,6 @@ class Inventory(Base):
     __tablename__ = "Inventory"
     __table_args__ = (
         UniqueConstraint('ProductId', 'AsgWarehouseId', 'InventoryDate', name='UX_Inventory_Product_Warehouse_Date'),
-        {'implicit_returning': False},  # MSSQL: avoid OUTPUT clause conflict with triggers
     )
 
     Id = Column(Integer, primary_key=True, autoincrement=True)
@@ -27,12 +26,12 @@ class Inventory(Base):
     UnpackedQty = Column(Integer, nullable=False, default=0)   # Raw/unpackaged inventory
 
     # Date-wise snapshot
-    InventoryDate = Column(Date, nullable=False, default=func.getdate())  # One row per product/warehouse/date
+    InventoryDate = Column(Date, nullable=False, default=func.now())  # One row per product/warehouse/date
 
     # Tracking
     LastInventoryDate = Column(Date, nullable=True)  # Date of last inventory upload
-    LastUpdated = Column(DateTime, default=func.getdate(), onupdate=func.getdate())
-    UpdatedBy = Column(UNIQUEIDENTIFIER, nullable=True)
+    LastUpdated = Column(DateTime, default=func.now(), onupdate=func.now())
+    UpdatedBy = Column(GUID, nullable=True)
 
     # Relationships
     product = relationship("Product", back_populates="inventory")

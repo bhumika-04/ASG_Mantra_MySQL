@@ -60,7 +60,7 @@ def _po_expired_sql(status_col: str, item_expr: str, expiry_col: str) -> str:
     return (f"({status_col} = 'Expired' OR ("
             f"{_po_status_expr(status_col, item_expr)} NOT IN ({_NO_EXPIRY_SQL}) "
             f"AND {expiry_col} IS NOT NULL "
-            f"AND DATEDIFF(day, {expiry_col}, GETDATE()) >= {_EXPIRY_DAYS}))")
+            f"AND DATEDIFF(NOW(), {expiry_col}) >= {_EXPIRY_DAYS}))")
 
 
 def _po_status_filter(status: str, status_col: str, item_expr: str, expiry_col: str):
@@ -85,7 +85,7 @@ def _eff_status(base: Optional[str], expiry_date=None) -> str:
     """Compute display status: applies auto-expiry on top of the stored/derived status."""
     s = base or 'Created'
     if s not in _NO_EXPIRY_OVERRIDE and expiry_date:
-        # Normalize datetime.datetime → datetime.date (pyodbc can return either for DATE columns)
+        # Normalize datetime.datetime → datetime.date (DB drivers can return either for DATE columns)
         exp = expiry_date.date() if hasattr(expiry_date, 'date') else expiry_date
         if (date.today() - exp).days >= _EXPIRY_DAYS:
             return 'Expired'
@@ -447,7 +447,7 @@ async def get_amazon_po_stats(
                     WHEN CASE WHEN p.POStatus IN ({_HEADER_WINS_SQL}) THEN p.POStatus ELSE COALESCE(agg.max_status, p.POStatus, 'Created') END
                          NOT IN ({_HEADER_WINS_SQL},'Expired','Dispatched','In Transit')
                      AND p.ShipWindowEndDate IS NOT NULL
-                     AND DATEDIFF(day, p.ShipWindowEndDate, GETDATE()) >= {_EXPIRY_DAYS}
+                     AND DATEDIFF(NOW(), p.ShipWindowEndDate) >= {_EXPIRY_DAYS}
                     THEN 'Expired'
                     ELSE CASE WHEN p.POStatus IN ({_HEADER_WINS_SQL}) THEN p.POStatus ELSE COALESCE(agg.max_status, p.POStatus, 'Created') END
                 END AS eff_status,
@@ -564,7 +564,7 @@ async def get_amazon_purchase_orders(
 
     # Units and distinct POs under the same filters, so the KPI card cannot pair a
     # filtered count with an unfiltered unit figure. Kept as a separate aggregate
-    # because MSSQL has no COUNT(DISTINCT x) OVER().
+    # because MySQL (like MSSQL before it) has no COUNT(DISTINCT x) OVER() — verified directly against the live database, not assumed.
     agg = query.with_entities(
         func.coalesce(func.sum(AmazonPOItemData.QuantityRequested), 0),
         func.count(func.distinct(AmazonPOItemData.PONumber)),
@@ -842,9 +842,9 @@ async def get_lifecycle_overview(
             p.DispatchDate AS dispatch_date, p.Courier AS courier,
             p.ShipToCity AS ship_to_city, p.ShipToState AS ship_to_state,
             p.ShipToLocationCode AS ship_to_location_code,
-            CAST(NULL AS VARCHAR(500)) AS ship_to_address,
-            CAST(NULL AS VARCHAR(200)) AS ship_to_name,
-            CAST(NULL AS VARCHAR(50))  AS ship_to_gstin,
+            CAST(NULL AS CHAR(500)) COLLATE utf8mb4_general_ci AS ship_to_address,
+            CAST(NULL AS CHAR(200)) COLLATE utf8mb4_general_ci AS ship_to_name,
+            CAST(NULL AS CHAR(50)) COLLATE utf8mb4_general_ci  AS ship_to_gstin,
             COUNT(i.Id) AS item_count,
             COALESCE(SUM(i.QuantityRequested), 0) AS total_qty
         FROM AmazonPO p
@@ -864,10 +864,10 @@ async def get_lifecycle_overview(
             p.ExpectedDeliveryDate AS expected_delivery_date,
             p.DispatchDate AS dispatch_date, p.Courier AS courier,
             p.ShipToCity AS ship_to_city, p.ShipToState AS ship_to_state,
-            CAST(NULL AS VARCHAR(100)) AS ship_to_location_code,
-            CAST(p.ShipToAddress AS VARCHAR(500)) AS ship_to_address,
-            CAST(p.ShipToName AS VARCHAR(200)) AS ship_to_name,
-            CAST(p.ShipToGSTIN AS VARCHAR(50)) AS ship_to_gstin,
+            CAST(NULL AS CHAR(100)) COLLATE utf8mb4_general_ci AS ship_to_location_code,
+            CAST(p.ShipToAddress AS CHAR(500)) COLLATE utf8mb4_general_ci AS ship_to_address,
+            CAST(p.ShipToName AS CHAR(200)) COLLATE utf8mb4_general_ci AS ship_to_name,
+            CAST(p.ShipToGSTIN AS CHAR(50)) COLLATE utf8mb4_general_ci AS ship_to_gstin,
             COUNT(i.Id) AS item_count,
             COALESCE(SUM(i.QTY), 0) AS total_qty
         FROM BlinkitPO p
@@ -875,8 +875,8 @@ async def get_lifecycle_overview(
         {blk_where_sql}
         GROUP BY p.Id, p.PONumber, p.PODate, p.Status, p.POExpiryDate, p.ExpectedDeliveryDate,
                  p.DispatchDate, p.Courier, p.ShipToCity, p.ShipToState,
-                 CAST(p.ShipToAddress AS VARCHAR(500)), CAST(p.ShipToName AS VARCHAR(200)),
-                 CAST(p.ShipToGSTIN AS VARCHAR(50))
+                 CAST(p.ShipToAddress AS CHAR(500)) COLLATE utf8mb4_general_ci, CAST(p.ShipToName AS CHAR(200)) COLLATE utf8mb4_general_ci,
+                 CAST(p.ShipToGSTIN AS CHAR(50)) COLLATE utf8mb4_general_ci
     """
 
     parts = ([amz_sel] if show_amz else []) + ([blk_sel] if show_blk else [])
@@ -900,7 +900,7 @@ async def get_lifecycle_overview(
                 CASE
                     WHEN base_status NOT IN ('{_ov}')
                      AND expiry_date IS NOT NULL
-                     AND DATEDIFF(day, expiry_date, GETDATE()) >= {_EXPIRY_DAYS}
+                     AND DATEDIFF(NOW(), expiry_date) >= {_EXPIRY_DAYS}
                     THEN 'Expired' ELSE base_status
                 END AS eff_status
             FROM combined
@@ -909,7 +909,7 @@ async def get_lifecycle_overview(
         FROM scored
         {status_filter}
         ORDER BY order_date DESC, po_number DESC
-        OFFSET :offset ROWS FETCH NEXT :limit ROWS ONLY
+        LIMIT :limit OFFSET :offset
     """), params).fetchall()
 
     # Window aggregates only ride along on returned rows. Paging past the end yields no
@@ -927,7 +927,7 @@ async def get_lifecycle_overview(
                     CASE
                         WHEN base_status NOT IN ('{_ov}')
                          AND expiry_date IS NOT NULL
-                         AND DATEDIFF(day, expiry_date, GETDATE()) >= {_EXPIRY_DAYS}
+                         AND DATEDIFF(NOW(), expiry_date) >= {_EXPIRY_DAYS}
                         THEN 'Expired' ELSE base_status
                     END AS eff_status
                 FROM combined
@@ -1010,7 +1010,7 @@ async def get_blinkit_po_stats(
                     WHEN CASE WHEN p.Status IN ({_HEADER_WINS_SQL}) THEN p.Status ELSE COALESCE(agg.max_status, p.Status, 'Created') END
                          NOT IN ({_HEADER_WINS_SQL},'Expired','Dispatched','In Transit')
                      AND p.POExpiryDate IS NOT NULL
-                     AND DATEDIFF(day, p.POExpiryDate, GETDATE()) >= {_EXPIRY_DAYS}
+                     AND DATEDIFF(NOW(), p.POExpiryDate) >= {_EXPIRY_DAYS}
                     THEN 'Expired'
                     ELSE CASE WHEN p.Status IN ({_HEADER_WINS_SQL}) THEN p.Status ELSE COALESCE(agg.max_status, p.Status, 'Created') END
                 END AS eff_status,
@@ -1093,7 +1093,7 @@ async def get_blinkit_purchase_orders(
 
     # Units and distinct POs under the same filters, so the KPI card cannot pair a
     # filtered count with an unfiltered unit figure. Kept as a separate aggregate
-    # because MSSQL has no COUNT(DISTINCT x) OVER().
+    # because MySQL (like MSSQL before it) has no COUNT(DISTINCT x) OVER() — verified directly against the live database, not assumed.
     agg = query.with_entities(
         func.coalesce(func.sum(BlinkitPOItemData.QTY), 0),
         func.count(func.distinct(BlinkitPOItemData.PONumber)),

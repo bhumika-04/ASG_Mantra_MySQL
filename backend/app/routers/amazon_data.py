@@ -303,20 +303,36 @@ async def preview_amazon_sales(
         fmt = detect_sales_format(df.columns.tolist())
         is_rk = (fmt == 'RKExcel')
 
-        # Column warnings
+        # Column warnings. `known` must match every row.get(...) call in _upload_vendor_csv
+        # below (or the RK-Excel branch) — otherwise this preview falsely warns "not used"
+        # about columns that are, in fact, read and saved. `mandatory` are the columns this
+        # upload exists to capture; missing or all-null mandatory data gets its own,
+        # separate, louder warning below (see mandatory_data_warning) — that's what should
+        # have caught the Inventory-file-uploaded-to-Sales incident (5/17 Aug 2026).
         actual_cols = set(str(c).strip() for c in df.columns)
         if is_rk:
-            expected = {'ASIN', 'SKU', 'Sellable', 'DRR(D-1)'}
+            mandatory = {'ASIN', 'SKU'}
+            known = mandatory | {'Sellable', 'DRR(D-1)', 'Net Shipped GMS(D-1)', 'Date', 'report_date'}
         else:
-            expected = {'ASIN', 'Product Title', 'Ordered Units', 'Ordered Revenue'}
-        unmapped = actual_cols - expected - {'Model Number', 'ModelNumber', 'Brand', 'Shipped Units',
-                                              'Shipped Revenue', 'Net Shipped GMS(D-1)', 'Date', 'report_date'}
-        missing = expected - actual_cols
+            mandatory = {'Ordered Units', 'Ordered Revenue'}
+            known = mandatory | {
+                'ASIN', 'Product Title', 'Title', 'Model Number', 'ModelNumber', 'Brand',
+                'Brand Code', 'Category', 'Subcategory', 'Parent ASIN', 'UPC', 'EAN', 'ISBN',
+                'Manufacturer Code', 'MSRP', 'Binding', 'Colour', 'Release Date', 'Replenishment Code',
+                'Shipped Revenue', 'Shipped COGS', 'Shipped Units', 'Customer Returns',
+                'Unfilled Customer Ordered Units', 'Confirmed Units', 'Net Ordered GMS',
+                'Net Shipped GMS', 'Net PPM %', 'ASIN Confirmation %',
+            }
+        unmapped = actual_cols - known
+        missing_mandatory = mandatory - actual_cols
         column_warnings = []
         if unmapped:
-            column_warnings.append(f"Unknown columns (not used): {', '.join(sorted(unmapped))}")
-        if missing:
-            column_warnings.append(f"Expected columns not found: {', '.join(sorted(missing))}")
+            column_warnings.append(f"Extra columns in this file that this upload doesn't use: {', '.join(sorted(unmapped))}")
+        if missing_mandatory:
+            column_warnings.append(
+                f"This file is missing the column(s) {', '.join(sorted(missing_mandatory))} — "
+                "those fields will be blank for every row uploaded."
+            )
 
         seen_asins: set = set()
         new_products = []
@@ -387,6 +403,29 @@ async def preview_amazon_sales(
             if existing_count > 0:
                 duplicate_warning = f"Found {existing_count} existing sales records for {detected_date.strftime('%d-%m-%Y')}. This data may already be uploaded."
 
+        # Mandatory-data check: don't just check the column HEADER exists (missing_mandatory
+        # above) — also check its VALUES aren't blank across every row. A file can have an
+        # "Ordered Units" column that parses fine but is empty for every row, which the
+        # header-only check can't catch. All-rows-blank on the core sales metrics is exactly
+        # what an Inventory-shaped file uploaded to this Sales page looks like.
+        mandatory_data_warning = None
+        if valid_rows > 0:
+            all_units_null = all(r.get('orderedUnits') is None for r in preview_rows)
+            all_revenue_null = all(r.get('orderedRevenue') is None for r in preview_rows)
+            if all_units_null and all_revenue_null:
+                mandatory_data_warning = (
+                    f"Ordered Units and Ordered Revenue are blank for all {valid_rows} rows in this file. "
+                    "This usually means the wrong file was selected for this section — e.g. an Inventory "
+                    "report uploaded here instead of a Sales report. Uploading now will create Sales "
+                    "records with no real sales figures."
+                )
+            elif all_units_null or all_revenue_null:
+                blank_field = 'Ordered Units' if all_units_null else 'Ordered Revenue'
+                mandatory_data_warning = (
+                    f"{blank_field} is blank for all {valid_rows} rows in this file. "
+                    "Double-check this is the correct Sales file before uploading."
+                )
+
         return {
             'success': True,
             'validRows': valid_rows,
@@ -395,6 +434,7 @@ async def preview_amazon_sales(
             'newFacilities': [],
             'detectedDate': detected_date.isoformat() if date_found else None,
             'duplicateDataWarning': duplicate_warning,
+            'mandatoryDataWarning': mandatory_data_warning,
             'salesFormat': fmt,  # 'VendorCSV' or 'RKExcel'
             'columnWarnings': column_warnings,
         }
@@ -944,24 +984,41 @@ async def preview_amazon_inventory(
 
         df = read_file(contents, filename, skiprows=1)
 
-        # Column warnings for Amazon inventory
+        # Column warnings for Amazon inventory. `inv_known_extra` must match every
+        # row.get(...) call in upload_amazon_inventory below, or this preview falsely warns
+        # "not used" about columns that are, in fact, read and saved.
         actual_cols = set(str(c).strip() for c in df.columns)
         inv_expected = {'ASIN', 'Product Title'}
         inv_sellable = {'Sellable On Hand Units', 'Sellable On-Hand Units', 'Sellable'}
-        inv_known_extra = {'Model Number', 'ModelNumber', 'Brand', 'In Transit Quantity',
-                           'Sellable In Transit Units', 'Unsellable On-Hand Units',
-                           'Unsellable On Hand Units', 'Unfulfillable', 'Reserved',
-                           'Reserved FC Transfers'}
+        inv_known_extra = {
+            'Model Number', 'ModelNumber', 'Brand', 'Brand Code', 'Category', 'Subcategory',
+            'Parent ASIN', 'UPC', 'EAN', 'ISBN', 'MSRP', 'Binding', 'Colour', 'Release Date',
+            'Replenishment Code', 'Manufacturer Code',
+            'Sourceable Product OOS %', 'Procurable Product OOS %', 'Vendor Confirmation %',
+            'Net Received', 'Net Received Units', 'Open Purchase Order Quantity',
+            'Receive Fill %', 'Overall Vendor Lead Time (days)', 'Unfilled Customer Ordered Units',
+            'Aged 90+ Days Sellable Inventory', 'Aged 90+ Days Sellable Units',
+            'Sellable On-Hand Inventory', 'Sellable On Hand Inventory',
+            'Unsellable On-Hand Inventory', 'Unsellable On Hand Inventory',
+            'Unsellable On-Hand Units', 'Unsellable On Hand Units', 'Unfulfillable',
+            'Confirmed Units', 'Net Ordered GMS', 'Net Shipped GMS',
+            'In Transit Quantity', 'In-Transit Quantity',
+            'Sellable In Transit Units', 'Sellable In-Transit Units',
+            'Reserved FC Transfers', 'Reserved', 'Unsellable In Transit Units',
+        }
         unmapped_inv = actual_cols - inv_expected - inv_sellable - inv_known_extra
         missing_inv = inv_expected - actual_cols
         has_sellable = bool(actual_cols & inv_sellable)
         column_warnings = []
         if unmapped_inv:
-            column_warnings.append(f"Unknown columns (not used): {', '.join(sorted(unmapped_inv))}")
+            column_warnings.append(f"Extra columns in this file that this upload doesn't use: {', '.join(sorted(unmapped_inv))}")
         if missing_inv:
-            column_warnings.append(f"Expected columns not found: {', '.join(sorted(missing_inv))}")
+            column_warnings.append(
+                f"This file is missing the column(s) {', '.join(sorted(missing_inv))} — "
+                "those fields will be blank for every row uploaded."
+            )
         if not has_sellable:
-            column_warnings.append("Sellable On Hand Units column not found — sellable quantity will be 0")
+            column_warnings.append("Sellable On Hand Units column not found — sellable quantity will be 0 for every row.")
 
         seen_asins: set = set()
         new_products = []
@@ -1033,6 +1090,17 @@ async def preview_amazon_inventory(
             if existing_count > 0:
                 duplicate_warning = f"Found {existing_count} existing inventory records for {detected_date.strftime('%d-%m-%Y')}. This data may already be uploaded."
 
+        # Mandatory-data check: the column-header check above (has_sellable) can't catch a
+        # column that's present but empty for every row — check the actual parsed values too.
+        mandatory_data_warning = None
+        if valid_rows > 0 and all(r.get('sellableQuantity') is None for r in preview_rows):
+            mandatory_data_warning = (
+                f"Sellable On Hand Units is blank for all {valid_rows} rows in this file. "
+                "This usually means the wrong file was selected for this section — e.g. a "
+                "Sales report uploaded here instead of an Inventory report. Uploading now "
+                "will create Inventory records with no real stock figures."
+            )
+
         return {
             'success': True,
             'validRows': valid_rows,
@@ -1041,6 +1109,7 @@ async def preview_amazon_inventory(
             'newFacilities': [],
             'detectedDate': detected_date.isoformat() if date_found else None,
             'duplicateDataWarning': duplicate_warning,
+            'mandatoryDataWarning': mandatory_data_warning,
             'columnWarnings': column_warnings,
         }
     except HTTPException:
@@ -1474,13 +1543,18 @@ async def get_amazon_sales_analytics(
     start_dt_s = start_dt.isoformat() if start_dt else '1900-01-01'
     end_dt_s = end_dt.isoformat()
 
-    sku_filter = "AND (ASIN = :asin OR ProductTitle LIKE '%' + :asin + '%')" if asin else ""
+    # was: "... ProductTitle LIKE '%' + :asin + '%')" — MySQL has no `+` string
+    # concat operator (it's numeric addition there); use CONCAT() instead.
+    sku_filter = "AND (ASIN = :asin OR ProductTitle LIKE CONCAT('%', :asin, '%'))" if asin else ""
     sku_params: dict = {"asin": asin} if asin else {}
 
     try:
-        # Use raw T-SQL for all queries to guarantee MSSQL/pyodbc compatibility.
+        # Raw SQL for these queries (not ORM) — originally written for MSSQL/pyodbc,
+        # converted to MySQL syntax when this project moved off MSSQL entirely (no
+        # Microsoft products, per client requirement — see docs/MYSQL_MIGRATION_BRIEF.md).
+        # MSSQL originals are commented inline below where the syntax differed.
         # Only VendorCSV rows have OrderedUnits; RKExcel rows store DRR_D1 (daily run rate).
-        # DRR is NOT ordered units, so we use ISNULL(OrderedUnits, 0) throughout.
+        # DRR is NOT ordered units, so we use IFNULL(OrderedUnits, 0) throughout.
 
         # ----- Summary + growth + all-time count in one CTE query -----
         summary_row = db.execute(text(f"""
@@ -1493,16 +1567,17 @@ async def get_amazon_sales_analytics(
             SELECT
                 COUNT(*)                                AS total_records,
                 COUNT(DISTINCT CASE WHEN b.SourceFile = 'VendorCSV' AND b.OrderedUnits > 0 THEN b.ASIN END) AS active_products,
-                SUM(ISNULL(b.OrderedUnits, 0))          AS total_units,
+                SUM(IFNULL(b.OrderedUnits, 0))          AS total_units,
                 SUM(b.OrderedRevenue)                   AS total_revenue,
                 mx.max_date,
                 (SELECT COUNT(*) FROM AmazonSales WHERE 1=1 {sku_filter}) AS total_records_all_time,
-                SUM(CASE WHEN b.ReportDate > DATEADD(day, -30, mx.max_date)
+                -- was: DATEADD(day, -30, mx.max_date) / DATEADD(day, -60, mx.max_date)
+                SUM(CASE WHEN b.ReportDate > DATE_SUB(mx.max_date, INTERVAL 30 DAY)
                               AND b.ReportDate <= mx.max_date
-                         THEN ISNULL(b.OrderedUnits, 0) END)              AS current_units,
-                SUM(CASE WHEN b.ReportDate > DATEADD(day, -60, mx.max_date)
-                              AND b.ReportDate <= DATEADD(day, -30, mx.max_date)
-                         THEN ISNULL(b.OrderedUnits, 0) END)              AS prev_units
+                         THEN IFNULL(b.OrderedUnits, 0) END)              AS current_units,
+                SUM(CASE WHEN b.ReportDate > DATE_SUB(mx.max_date, INTERVAL 60 DAY)
+                              AND b.ReportDate <= DATE_SUB(mx.max_date, INTERVAL 30 DAY)
+                         THEN IFNULL(b.OrderedUnits, 0) END)              AS prev_units
             FROM base b
             CROSS JOIN mx
             GROUP BY mx.max_date
@@ -1521,7 +1596,7 @@ async def get_amazon_sales_analytics(
 
         if prev_start_date and prev_end_date:
             prev_row = db.execute(text(f"""
-                SELECT COALESCE(SUM(ISNULL(OrderedUnits, 0)), 0)
+                SELECT COALESCE(SUM(IFNULL(OrderedUnits, 0)), 0)
                 FROM AmazonSales
                 WHERE ReportDate >= :p_start AND ReportDate <= :p_end
                   AND SourceFile = 'VendorCSV'
@@ -1541,7 +1616,7 @@ async def get_amazon_sales_analytics(
                 ASIN,
                 MAX(ProductTitle)                               AS product_title,
                 MAX(SKU)                                        AS sku,
-                SUM(ISNULL(OrderedUnits, 0))                    AS total_units,
+                SUM(IFNULL(OrderedUnits, 0))                    AS total_units,
                 SUM(OrderedRevenue)                             AS total_revenue,
                 MIN(ReportDate)                                 AS first_sale,
                 MAX(ReportDate)                                 AS last_sale
@@ -1549,7 +1624,7 @@ async def get_amazon_sales_analytics(
             WHERE ReportDate >= :start_dt AND ReportDate <= :end_dt AND SourceFile = 'VendorCSV'
             {sku_filter}
             GROUP BY ASIN
-            ORDER BY SUM(ISNULL(OrderedUnits, 0)) DESC
+            ORDER BY SUM(IFNULL(OrderedUnits, 0)) DESC
         """), {"start_dt": start_dt_s, "end_dt": end_dt_s, **sku_params}).fetchall()
 
         top_products = [
@@ -1570,7 +1645,7 @@ async def get_amazon_sales_analytics(
         daily_rows = db.execute(text(f"""
             SELECT
                 ReportDate,
-                SUM(ISNULL(OrderedUnits, 0))          AS total_units,
+                SUM(IFNULL(OrderedUnits, 0))          AS total_units,
                 SUM(OrderedRevenue)                   AS total_revenue
             FROM AmazonSales
             WHERE ReportDate >= :start_dt AND ReportDate <= :end_dt AND SourceFile = 'VendorCSV'
@@ -1590,16 +1665,17 @@ async def get_amazon_sales_analytics(
             ]
         else:
             # Fall back to monthly grouping so area chart renders with multiple points
+            # was: CONVERT(varchar(7), ReportDate, 120) — MySQL: DATE_FORMAT
             monthly_rows = db.execute(text(f"""
                 SELECT
-                    CONVERT(varchar(7), ReportDate, 120) AS month,
-                    SUM(ISNULL(OrderedUnits, 0))          AS total_units,
+                    DATE_FORMAT(ReportDate, '%Y-%m') AS month,
+                    SUM(IFNULL(OrderedUnits, 0))          AS total_units,
                     SUM(OrderedRevenue)                   AS total_revenue
                 FROM AmazonSales
                 WHERE ReportDate >= :start_dt AND ReportDate <= :end_dt AND SourceFile = 'VendorCSV'
                 {sku_filter}
-                GROUP BY CONVERT(varchar(7), ReportDate, 120)
-                ORDER BY CONVERT(varchar(7), ReportDate, 120)
+                GROUP BY DATE_FORMAT(ReportDate, '%Y-%m')
+                ORDER BY DATE_FORMAT(ReportDate, '%Y-%m')
             """), {"start_dt": start_dt_s, "end_dt": end_dt_s, **sku_params}).fetchall()
             daily_trend = [
                 {
@@ -1672,15 +1748,15 @@ async def list_amazon_sales_products(
                 ASIN,
                 MAX(ProductTitle)                  AS product_title,
                 MAX(SKU)                           AS sku,
-                SUM(ISNULL(OrderedUnits, 0))       AS total_units,
+                SUM(IFNULL(OrderedUnits, 0))       AS total_units,
                 SUM(OrderedRevenue)                AS total_revenue,
                 MIN(ReportDate)                    AS first_sale,
                 MAX(ReportDate)                    AS last_sale
             FROM AmazonSales
             {where}
             GROUP BY ASIN
-            ORDER BY SUM(ISNULL(OrderedUnits, 0)) DESC
-            OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
+            ORDER BY SUM(IFNULL(OrderedUnits, 0)) DESC
+            LIMIT :page_size OFFSET :offset
         """), params).fetchall()
 
         items = [

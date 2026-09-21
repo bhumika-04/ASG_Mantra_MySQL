@@ -422,6 +422,9 @@ async def preview_blinkit_sales(
             detected_date = date(year, int(mm), int(dd))
             date_found = True
 
+        # Must match upload_blinkit_sales's own col_map exactly, or this preview falsely
+        # warns "not used" about columns that are, in fact, read and saved there
+        # (manufacturer_id/city_id were missing here even though the real upload maps them).
         col_map = {}
         for col in df.columns:
             cl = str(col).strip().lower().replace(' ', '_')
@@ -429,8 +432,12 @@ async def preview_blinkit_sales(
                 col_map[col] = 'item_id'
             elif cl in ('item_name', 'itemname'):
                 col_map[col] = 'item_name'
+            elif cl in ('manufacturer_id', 'manufacturerid'):
+                col_map[col] = 'manufacturer_id'
             elif cl in ('manufacturer_name', 'manufacturername'):
                 col_map[col] = 'manufacturer_name'
+            elif cl in ('city_id', 'cityid'):
+                col_map[col] = 'city_id'
             elif cl in ('city_name', 'cityname', 'city'):
                 col_map[col] = 'city_name'
             elif cl == 'category':
@@ -445,7 +452,7 @@ async def preview_blinkit_sales(
         column_warnings = check_column_warnings(
             list(df.columns), col_map,
             required_targets=['item_id', 'item_name', 'qty_sold'],
-            optional_targets=['city_name', 'mrp'],
+            optional_targets=['city_name', 'mrp', 'manufacturer_id', 'manufacturer_name', 'city_id'],
         )
         df = df.rename(columns=col_map)
 
@@ -498,6 +505,19 @@ async def preview_blinkit_sales(
             if existing_count > 0:
                 duplicate_warning = f"Found {existing_count} existing sales records for {detected_date.strftime('%d-%m-%Y')}. This data may already be uploaded."
 
+        # Mandatory-data check: `check_column_warnings` above only checks the column HEADER
+        # exists — a file can have a "qty_sold" column that's present but blank for every
+        # row, which that check can't catch. All-rows-blank on the core sales metric is
+        # exactly what an Inventory-shaped file uploaded to this Sales page would look like.
+        mandatory_data_warning = None
+        if valid_rows > 0 and preview_rows and all(r.get('qtySold') is None for r in preview_rows):
+            mandatory_data_warning = (
+                f"Qty Sold is blank for all {len(preview_rows)} previewed rows in this file. "
+                "This usually means the wrong file was selected for this section — e.g. an "
+                "Inventory report uploaded here instead of a Sales report. Uploading now will "
+                "create Sales records with no real sales figures."
+            )
+
         return {
             'success': True,
             'uploadType': 'blinkit/sales',
@@ -507,6 +527,7 @@ async def preview_blinkit_sales(
             'detectedDate': detected_date.isoformat() if detected_date else None,
             'previewRows': preview_rows,
             'duplicateDataWarning': duplicate_warning,
+            'mandatoryDataWarning': mandatory_data_warning,
             'columnWarnings': column_warnings,
         }
     except HTTPException:
@@ -796,6 +817,21 @@ async def preview_blinkit_inventory(
             if existing_count > 0:
                 duplicate_warning = f"Found {existing_count} existing inventory records for {detected_date.strftime('%d-%m-%Y')}. This data may already be uploaded."
 
+        # Mandatory-data check: backend_inv_qty and frontend_inv_qty are both individually
+        # optional (a file may legitimately report only one facility type) — but if BOTH are
+        # blank for every row, this file carries no actual stock numbers at all, which is
+        # what a Sales-shaped file uploaded to this Inventory page would look like.
+        mandatory_data_warning = None
+        if valid_rows > 0 and preview_rows and all(
+            r.get('backendQty') is None and r.get('frontendQty') is None for r in preview_rows
+        ):
+            mandatory_data_warning = (
+                f"Backend Qty and Frontend Qty are both blank for all {len(preview_rows)} "
+                "previewed rows in this file. This usually means the wrong file was selected "
+                "for this section — e.g. a Sales report uploaded here instead of an Inventory "
+                "report. Uploading now will create Inventory records with no real stock figures."
+            )
+
         return {
             'success': True,
             'uploadType': 'blinkit/inventory',
@@ -805,6 +841,7 @@ async def preview_blinkit_inventory(
             'detectedDate': detected_date.isoformat() if detected_date else None,
             'previewRows': preview_rows,
             'duplicateDataWarning': duplicate_warning,
+            'mandatoryDataWarning': mandatory_data_warning,
             'columnWarnings': column_warnings,
         }
     except HTTPException:
@@ -1600,7 +1637,13 @@ async def get_blinkit_sales_analytics(
     start_dt_s = start_dt.isoformat() if start_dt else '1900-01-01'
     end_dt_s = end_dt.isoformat()
 
-    item_filter = "AND (CAST(ItemId AS NVARCHAR(50)) = :item_id OR ItemName LIKE '%' + :item_id + '%')" if item_id else ""
+    # was: CAST(... AS NVARCHAR(50)) and '%' + :item_id + '%' — MySQL: CAST target
+    # is CHAR not NVARCHAR, and CONCAT() instead of the `+` string-concat operator.
+    # COLLATE pinned explicitly — MySQL's CAST(... AS CHAR) defaults to the server's
+    # collation (utf8mb4_0900_ai_ci on 8.0), which conflicts with this database's
+    # utf8mb4_general_ci columns ("Illegal mix of collations") the moment it's
+    # compared against one, as it is a few lines below.
+    item_filter = "AND (CAST(ItemId AS CHAR(50)) COLLATE utf8mb4_general_ci = :item_id OR ItemName LIKE CONCAT('%', :item_id, '%'))" if item_id else ""
     item_params: dict = {"item_id": item_id} if item_id else {}
 
     try:
@@ -1619,11 +1662,12 @@ async def get_blinkit_sales_analytics(
                 SUM(b.MRP)              AS total_revenue,
                 mx.max_date,
                 (SELECT COUNT(*) FROM BlinkitSales WHERE 1=1 {item_filter}) AS total_records_all_time,
-                SUM(CASE WHEN b.SaleDate > DATEADD(day, -30, mx.max_date)
+                -- was: DATEADD(day, -30, mx.max_date) / DATEADD(day, -60, mx.max_date)
+                SUM(CASE WHEN b.SaleDate > DATE_SUB(mx.max_date, INTERVAL 30 DAY)
                               AND b.SaleDate <= mx.max_date
                          THEN b.QtySold END)                                AS current_qty,
-                SUM(CASE WHEN b.SaleDate > DATEADD(day, -60, mx.max_date)
-                              AND b.SaleDate <= DATEADD(day, -30, mx.max_date)
+                SUM(CASE WHEN b.SaleDate > DATE_SUB(mx.max_date, INTERVAL 60 DAY)
+                              AND b.SaleDate <= DATE_SUB(mx.max_date, INTERVAL 30 DAY)
                          THEN b.QtySold END)                                AS prev_qty
             FROM base b
             CROSS JOIN mx
@@ -1667,7 +1711,7 @@ async def get_blinkit_sales_analytics(
                 MAX(s.SaleDate)   AS last_sale,
                 MAX(p.AsgSku)     AS asg_sku
             FROM BlinkitSales s
-            LEFT JOIN Products p ON p.BlinkitId = CAST(s.ItemId AS NVARCHAR(50))
+            LEFT JOIN Products p ON p.BlinkitId = CAST(s.ItemId AS CHAR(50)) COLLATE utf8mb4_general_ci  -- was NVARCHAR(50)
             WHERE s.SaleDate >= :start_dt AND s.SaleDate <= :end_dt
             {item_filter.replace('ItemId', 's.ItemId').replace('ItemName', 's.ItemName')}
             GROUP BY s.ItemId
@@ -1711,16 +1755,17 @@ async def get_blinkit_sales_analytics(
                 for row in daily_rows
             ]
         else:
+            # was: CONVERT(varchar(7), SaleDate, 120) — MySQL: DATE_FORMAT
             monthly_rows = db.execute(text(f"""
                 SELECT
-                    CONVERT(varchar(7), SaleDate, 120) AS month,
+                    DATE_FORMAT(SaleDate, '%Y-%m') AS month,
                     SUM(QtySold)    AS total_qty,
                     SUM(MRP)        AS total_revenue
                 FROM BlinkitSales
                 WHERE SaleDate >= :start_dt AND SaleDate <= :end_dt
                 {item_filter}
-                GROUP BY CONVERT(varchar(7), SaleDate, 120)
-                ORDER BY CONVERT(varchar(7), SaleDate, 120)
+                GROUP BY DATE_FORMAT(SaleDate, '%Y-%m')
+                ORDER BY DATE_FORMAT(SaleDate, '%Y-%m')
             """), {"start_dt": start_dt_s, "end_dt": end_dt_s, **item_params}).fetchall()
             daily_trend = [
                 {
@@ -1775,7 +1820,7 @@ async def list_blinkit_sales_products(
         clauses = ["ItemId IS NOT NULL"]
         params: dict = {"offset": (page - 1) * page_size, "page_size": page_size}
         if search:
-            clauses.append("(ItemName LIKE :search OR CAST(ItemId AS NVARCHAR) LIKE :search)")
+            clauses.append("(ItemName LIKE :search OR CAST(ItemId AS CHAR) COLLATE utf8mb4_general_ci LIKE :search)")  # was NVARCHAR
             params["search"] = f"%{search}%"
         if start_date:
             clauses.append("SaleDate >= :start_date")
@@ -1799,7 +1844,7 @@ async def list_blinkit_sales_products(
             {where}
             GROUP BY ItemId
             ORDER BY SUM(QtySold) DESC
-            OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
+            LIMIT :page_size OFFSET :offset
         """), params).fetchall()
 
         items = [
@@ -1949,7 +1994,9 @@ async def preview_distributor_stock(
     filename = file.filename or "unknown.xlsx"
     df = read_file(contents, filename)
 
-    # Same column mapping as upload
+    # Must match upload_distributor_stock's own col_map exactly — it wasn't (opening_qty
+    # and sale_qty were recognized there but missing here entirely), so this preview was
+    # falsely warning "not used" about two columns that are, in fact, read and saved.
     col_map = {}
     assigned_targets: dict[str, str] = {}
     for col in df.columns:
@@ -1960,10 +2007,17 @@ async def preview_distributor_stock(
         elif cl in ('item_name', 'itemname', 'product_name', 'product', 'item',
                     'name', 'description', 'product_description', 'sku_name', 'item_description'):
             target = 'item_name'
+        elif cl in ('opening_qty', 'openingqty', 'opening', 'open_qty', 'opening_stock',
+                    'op_stock', 'open_stock', 'opening_quantity'):
+            target = 'opening_qty'
         elif cl in ('closing_qty', 'closingqty', 'closing', 'close_qty', 'closing_stock',
                     'cl_stock', 'close_stock', 'closing_quantity',
                     'total_stock', 'total_qty', 'total_quantity', 'stock', 'current_stock'):
             target = 'closing_qty'
+        elif cl in ('sale_qty', 'saleqty', 'sales_qty', 'sold_qty', 'dispatched_qty', 'dispatch',
+                    'dispatched', 'dispatch_qty', 'dispatched_quantity', 'sale', 'sales',
+                    'blinkit_dispatch', 'blinkit_sale', 'sold'):
+            target = 'sale_qty'
         elif cl in ('sku', 'sku_code', 'asg_sku', 'product_sku', 'item_sku', 'model_number', 'model_no'):
             target = 'sku'
         elif cl == 'dl':
@@ -1985,7 +2039,7 @@ async def preview_distributor_stock(
     column_warnings = check_column_warnings(
         list(df.columns), col_map,
         required_targets=['item_name', 'closing_qty'],
-        optional_targets=['dl_qty', 'mh_qty', 'kt_qty', 'wb_qty', 'hr_qty'],
+        optional_targets=['dl_qty', 'mh_qty', 'kt_qty', 'wb_qty', 'hr_qty', 'opening_qty', 'sale_qty', 'sku'],
     )
     df = df.rename(columns=col_map)
 
@@ -2010,7 +2064,9 @@ async def preview_distributor_stock(
         rows.append({
             "itemName": item_name,
             "sku": safe_str(row.get('sku'), 100),
+            "openingQty": safe_int(row.get('opening_qty')),
             "closingQty": safe_int(row.get('closing_qty')),
+            "saleQty": safe_int(row.get('sale_qty')),
             "dlQty": safe_int(row.get('dl_qty')),
             "mhQty": safe_int(row.get('mh_qty')),
             "ktQty": safe_int(row.get('kt_qty')),

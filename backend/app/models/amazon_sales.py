@@ -74,7 +74,7 @@ class AmazonSalesData(Base):
     DOH = Column(DECIMAL(10, 2), nullable=True)
 
     # Metadata
-    CreatedAt = Column(DateTime, default=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
 
     def to_dict(self):
         return {

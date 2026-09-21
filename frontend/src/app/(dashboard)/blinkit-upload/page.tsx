@@ -116,6 +116,7 @@ interface SemanticPreview {
   detectedDate?: string | null;
   previewRows?: PreviewRow[];
   duplicateDataWarning?: string | null;
+  mandatoryDataWarning?: string | null; // Core metric column is blank for every row — likely the wrong file
   columnWarnings?: string[];
   duplicatePos?: { poNumber: string; uploadedOn: string }[];
 }
@@ -158,6 +159,7 @@ export default function BlinkitUploadPage() {
         detectedDate: result.detectedDate,
         previewRows: result.previewRows ?? [],
         duplicateDataWarning: result.duplicateDataWarning,
+        mandatoryDataWarning: result.mandatoryDataWarning ?? null,
         columnWarnings: result.columnWarnings ?? [],
         duplicatePos: result.duplicatePos ?? [],
       });
@@ -427,6 +429,23 @@ export default function BlinkitUploadPage() {
                       className="px-2 py-1 text-xs border rounded"
                     />
                   </div>
+                </div>
+              )}
+
+              {/* Mandatory Data Warning — a core metric column is blank for every row,
+                  usually meaning the wrong file was picked for this section. Shown ahead
+                  of the other warnings since it's the most likely to mean "stop and check". */}
+              {semanticPreview.mandatoryDataWarning && (
+                <div className="p-3 bg-red-50 border border-red-300 rounded-lg">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="h-4 w-4 text-red-600 flex-shrink-0" />
+                    <span className="text-sm font-semibold text-red-800">
+                      Wrong file for this section?
+                    </span>
+                  </div>
+                  <p className="text-sm text-red-700 mt-2 ml-6">
+                    {semanticPreview.mandatoryDataWarning}
+                  </p>
                 </div>
               )}
 
@@ -703,7 +722,17 @@ export default function BlinkitUploadPage() {
                 </p>
                 <div className="flex gap-2">
                   <Button variant="outline" onClick={handleCancelSemanticPreview} disabled={isUploading}>Cancel</Button>
-                  <Button onClick={handleConfirmSemanticUpload} disabled={isUploading}>
+                  <Button
+                    onClick={handleConfirmSemanticUpload}
+                    disabled={isUploading || !!semanticPreview.duplicateDataWarning || !!semanticPreview.mandatoryDataWarning}
+                    title={
+                      semanticPreview.mandatoryDataWarning
+                        ? 'Blocked: core data is blank for every row — this looks like the wrong file for this section.'
+                        : semanticPreview.duplicateDataWarning
+                        ? 'Blocked: this data already exists — re-uploading would be skipped anyway.'
+                        : undefined
+                    }
+                  >
                     {isUploading ? (
                       <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Uploading...</>
                     ) : (

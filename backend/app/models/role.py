@@ -15,8 +15,8 @@ class Role(Base):
     Description = Column(String(500), nullable=False)
     Permissions = Column(Text, nullable=False)  # JSON string of permissions array
     IsLocked = Column(Boolean, default=False, index=True)  # System roles cannot be edited/deleted
-    CreatedAt = Column(DateTime, default=func.getdate())
-    UpdatedAt = Column(DateTime, default=func.getdate(), onupdate=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
+    UpdatedAt = Column(DateTime, default=func.now(), onupdate=func.now())
 
     def to_dict(self):
         """Convert model to dictionary"""

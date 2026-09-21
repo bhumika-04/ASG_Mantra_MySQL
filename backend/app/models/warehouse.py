@@ -28,8 +28,8 @@ class Warehouse(Base):
     WarehouseType = Column(String(50), nullable=True)              # Frontend, Backend
 
     IsActive = Column(Boolean, default=True, index=True)
-    CreatedAt = Column(DateTime, default=func.getdate())
-    UpdatedAt = Column(DateTime, default=func.getdate(), onupdate=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
+    UpdatedAt = Column(DateTime, default=func.now(), onupdate=func.now())
 
     # Relationships
     sales = relationship("Sales", back_populates="warehouse")
