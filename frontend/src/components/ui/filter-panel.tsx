@@ -1,5 +1,6 @@
 'use client';
 
+import { todayIST, toISTDateString } from '@/lib/format';
 import { useState, useRef, useEffect } from 'react';
 import { SlidersHorizontal, X, CalendarDays } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -29,16 +30,16 @@ export const DEFAULT_FILTER_VALUES: FilterValues = {
 };
 
 // Quick date preset helpers
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => todayIST();
 const daysAgo = (n: number) => {
   const d = new Date();
   d.setDate(d.getDate() - n);
-  return d.toISOString().slice(0, 10);
+  return toISTDateString(d);
 };
 const monthsAgo = (n: number) => {
   const d = new Date();
   d.setMonth(d.getMonth() - n);
-  return d.toISOString().slice(0, 10);
+  return toISTDateString(d);
 };
 
 const DATE_PRESETS = [

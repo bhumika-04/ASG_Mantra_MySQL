@@ -36,6 +36,19 @@ export function fmtCurrency(n: number, decimals = 0): string {
  */
 
 /**
+ * Today's date in India (IST, the business time) as YYYY-MM-DD, whatever the browser's time zone.
+ * `new Date().toISOString()` is UTC and shows yesterday between 00:00 and 05:30 IST.
+ */
+export function todayIST(): string {
+  return toISTDateString(new Date());
+}
+
+/** Format any Date as YYYY-MM-DD in India time. */
+export function toISTDateString(d: Date): string {
+  return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
+}
+
+/**
  * Convert an ISO/YYYY-MM-DD date string to DD-MM-YYYY display format.
  * Safe for ISO timestamps (takes first 10 chars).
  */
