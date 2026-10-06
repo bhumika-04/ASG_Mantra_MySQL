@@ -22,6 +22,7 @@ from app.schemas.purchase_order import PurchaseOrderCreate, PurchaseOrderUpdate
 from app.schemas.common import PaginatedResponse
 from app.utils.dependencies import get_current_user
 from app.utils.audit import log_audit, notify
+from app.utils.timeutil import now_ist, today_ist
 import time as _time
 
 router = APIRouter()
@@ -87,7 +88,7 @@ def _eff_status(base: Optional[str], expiry_date=None) -> str:
     if s not in _NO_EXPIRY_OVERRIDE and expiry_date:
         # Normalize datetime.datetime → datetime.date (DB drivers can return either for DATE columns)
         exp = expiry_date.date() if hasattr(expiry_date, 'date') else expiry_date
-        if (date.today() - exp).days >= _EXPIRY_DAYS:
+        if (today_ist() - exp).days >= _EXPIRY_DAYS:
             return 'Expired'
     return s
 
@@ -111,6 +112,31 @@ def _stats_set(key: str, data: dict):
 def _stats_invalidate():
     """Call after any mutation that changes PO status so next read is always fresh."""
     _stats_cache.clear()
+
+
+# A PO that has been delivered cannot be moved back to a stage before delivery.
+_DELIVERED_STATUSES = {'Delivered', 'Received'}
+_PRE_DELIVERY_STATUSES = {'Created', 'Packed', 'Dispatched', 'In Transit', 'Delayed'}
+
+
+def _check_status_move(old_status, new_status) -> None:
+    """Refuse Delivered/Received -> Created/Packed/Dispatched/In Transit/Delayed (HTTP 422)."""
+    old = getattr(old_status, 'value', old_status)
+    new = getattr(new_status, 'value', new_status)
+    if old in _DELIVERED_STATUSES and new in _PRE_DELIVERY_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"A {old} PO cannot go back to '{new}'.",
+        )
+
+
+def _check_expected_not_before_order(expected, order_date, what: str = "Expected date") -> None:
+    """Refuse an expected date earlier than the order date (HTTP 422)."""
+    if expected and order_date and expected < order_date:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{what} ({expected.isoformat()}) cannot be before the order date ({order_date.isoformat()}).",
+        )
 
 
 def _require_po_editor(current_user: User):
@@ -591,7 +617,7 @@ async def get_amazon_purchase_orders(
             inv_q = inv_q.filter(Inventory.InventoryDate == latest_inv_date)
         packed_by_product = {row[0]: int(row[1] or 0) for row in inv_q.group_by(Inventory.ProductId).all()}
 
-    today = date.today()
+    today = today_ist()
     items = []
     for item in po_items:
         po = item.po
@@ -1129,7 +1155,7 @@ async def get_blinkit_purchase_orders(
             inv_q = inv_q.filter(Inventory.InventoryDate == latest_inv_date)
         packed_by_product = {row[0]: int(row[1] or 0) for row in inv_q.group_by(Inventory.ProductId).all()}
 
-    today = date.today()
+    today = today_ist()
     items = []
     for item in po_items:
         po = item.po
@@ -1232,7 +1258,7 @@ async def get_all_purchase_orders(
     """
     Get all purchase orders combining Amazon and Blinkit new PO tables.
     """
-    today = date.today()
+    today = today_ist()
     combined = []
 
     # Parse date filters
@@ -1433,7 +1459,7 @@ async def create_purchase_order(
         PoNumber=po_data.poNumber,
         ProductId=po_data.productId,
         Channel=po_data.channel,
-        OrderDate=po_data.orderDate or datetime.utcnow(),
+        OrderDate=po_data.orderDate or today_ist(),
         ExpectedDeliveryDate=po_data.expectedDeliveryDate,
         Quantity=po_data.quantity,
         ReceivedQuantity=0,
@@ -1488,6 +1514,7 @@ async def update_purchase_order_status(
 
     # Capture old status for audit
     old_status = po.Status
+    _check_status_move(old_status, status_data.status)
 
     # Update status
     po.Status = status_data.status
@@ -1499,7 +1526,7 @@ async def update_purchase_order_status(
         else:
             po.ReceivedQuantity = po.Quantity  # Default to full quantity
 
-        po.ActualDeliveryDate = status_data.actualDeliveryDate or datetime.utcnow().date()
+        po.ActualDeliveryDate = status_data.actualDeliveryDate or today_ist()
 
     # Update tracking number if provided
     if status_data.trackingNumber is not None:
@@ -1555,6 +1582,7 @@ async def update_amazon_po_status(
         raise HTTPException(status_code=404, detail="Amazon PO item not found")
 
     old_status = item.ItemStatus
+    _check_status_move(old_status, status_data.status)
     item.ItemStatus = status_data.status
 
     # Auto-fill received/accepted qty when item marked Delivered/Received (only if not already recorded)
@@ -1613,6 +1641,7 @@ async def update_blinkit_po_status(
         raise HTTPException(status_code=404, detail="Blinkit PO item not found")
 
     old_status = item.ItemStatus
+    _check_status_move(old_status, status_data.status)
     item.ItemStatus = status_data.status
 
     # Auto-fill received/accepted qty when item marked Delivered/Received (only if not already recorded)
@@ -1671,6 +1700,7 @@ async def update_amazon_po_header_status(
         raise HTTPException(status_code=404, detail="Amazon PO not found")
 
     old_status = po.POStatus
+    _check_status_move(old_status, status_data.status)
     po.POStatus = status_data.status
 
     # Auto-manage item quantities based on new PO status.
@@ -1717,6 +1747,7 @@ async def update_blinkit_po_header_status(
         raise HTTPException(status_code=404, detail="Blinkit PO not found")
 
     old_status = po.Status
+    _check_status_move(old_status, status_data.status)
     po.Status = status_data.status
 
     # Auto-manage item quantities based on new PO status.
@@ -1811,7 +1842,8 @@ def _adjust_inventory_for_product(db: Session, product_id: int, delta_qty: int) 
     delta_qty > 0 deducts (an accepted quantity went up); delta_qty < 0 restores (an
     accepted quantity was corrected downward). Restoring mirrors deducting so a
     correction cannot leak stock — previously only the deduct direction was handled,
-    so lowering an accepted qty from 100 to 10 kept all 100 units deducted.
+    so lowering an accepted qty from 100 to 10 kept all 100 units deducted. The restore
+    is in turn capped at what was really deducted, so it cannot create stock either.
 
     The snapshot date is resolved per product. A global MAX(InventoryDate) silently
     matches nothing for any product missing from the latest upload, so the adjustment
@@ -1835,11 +1867,34 @@ def _adjust_inventory_for_product(db: Session, product_id: int, delta_qty: int) 
     total_packed = sum(i.PackedQty or 0 for i in inv_rows)
 
     if delta_qty < 0:
-        restore = -delta_qty
-        target = inv_rows[0]
-        target.PackedQty = (target.PackedQty or 0) + restore
-        target.CurrentStock = (target.CurrentStock or 0) + restore
-        return {"deducted": delta_qty, "shortfall": 0, "was_packed": total_packed}
+        # Restore only what was actually taken from this snapshot. A deduction is
+        # capped by the packed stock available (a 504-unit accept against 152 packed
+        # deducts 152), so putting back the full amount on a correction manufactured
+        # the difference as phantom stock. InventoryHistory keeps the quantity as
+        # uploaded and is never touched by deductions, so (uploaded - current packed)
+        # is exactly what has been deducted so far and is the most that can go back.
+        remaining = -delta_qty
+        restored = 0
+        for inv in inv_rows:
+            if remaining <= 0:
+                break
+            baseline = db.execute(text(
+                "SELECT PackedQty FROM InventoryHistory "
+                "WHERE ProductId = :pid AND InventoryDate = :d "
+                "AND COALESCE(AsgWarehouseId, 0) = :wid"
+            ), {"pid": product_id, "d": latest_date, "wid": inv.AsgWarehouseId or 0}).scalar()
+            # No history row (e.g. snapshot predates InventoryHistory): nothing to
+            # cap against, keep the previous behaviour.
+            room = remaining if baseline is None else max(0, int(baseline) - (inv.PackedQty or 0))
+            put_back = min(room, remaining)
+            if put_back > 0:
+                inv.PackedQty = (inv.PackedQty or 0) + put_back
+                inv.CurrentStock = (inv.CurrentStock or 0) + put_back
+                restored += put_back
+                remaining -= put_back
+        # "deducted" is negative for a restore; "shortfall" carries the part that
+        # could not be returned because it was never deducted in the first place.
+        return {"deducted": -restored, "shortfall": remaining, "was_packed": total_packed}
 
     remaining = delta_qty
     for inv in inv_rows:
@@ -2190,9 +2245,12 @@ async def update_amazon_item_expected_date(
     old_val = item.ExpectedDate.isoformat() if item.ExpectedDate else None
     if raw:
         try:
-            item.ExpectedDate = datetime.strptime(raw, "%Y-%m-%d").date()
+            new_expected = datetime.strptime(raw, "%Y-%m-%d").date()
         except ValueError:
             raise HTTPException(status_code=422, detail="expected_date must be YYYY-MM-DD")
+        parent_po = db.query(AmazonPOData).filter(AmazonPOData.Id == item.POId).first()
+        _check_expected_not_before_order(new_expected, parent_po.OrderedOnDate if parent_po else None)
+        item.ExpectedDate = new_expected
     else:
         item.ExpectedDate = None
 
@@ -2227,9 +2285,11 @@ async def update_blinkit_po_expected_delivery_date(
     old_val = po.ExpectedDeliveryDate.isoformat() if po.ExpectedDeliveryDate else None
     if raw:
         try:
-            po.ExpectedDeliveryDate = datetime.strptime(raw, "%Y-%m-%d").date()
+            new_expected = datetime.strptime(raw, "%Y-%m-%d").date()
         except ValueError:
             raise HTTPException(status_code=422, detail="expected_delivery_date must be YYYY-MM-DD")
+        _check_expected_not_before_order(new_expected, po.PODate, "Expected delivery date")
+        po.ExpectedDeliveryDate = new_expected
     else:
         po.ExpectedDeliveryDate = None
 

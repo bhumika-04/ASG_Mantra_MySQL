@@ -196,7 +196,7 @@ async def get_dashboard_charts(
                 FROM AmazonSales
                 WHERE ReportDate IS NOT NULL
                   AND ReportDate BETWEEN :start AND :end
-                GROUP BY DATE_SUB(ReportDate, INTERVAL WEEKDAY(ReportDate) DAY)
+                GROUP BY period
                 ORDER BY period
             """), {"start": s_date, "end": e_date}).fetchall()
             amazon_by_period = {row[0]: float(row[1] or 0) for row in amz_rows}
@@ -208,7 +208,7 @@ async def get_dashboard_charts(
                 FROM BlinkitSales
                 WHERE SaleDate IS NOT NULL
                   AND SaleDate BETWEEN :start AND :end
-                GROUP BY DATE_SUB(SaleDate, INTERVAL WEEKDAY(SaleDate) DAY)
+                GROUP BY period
                 ORDER BY period
             """), {"start": s_date, "end": e_date}).fetchall()
             blinkit_by_period = {row[0]: float(row[1] or 0) for row in blk_rows}

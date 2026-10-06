@@ -17,6 +17,7 @@ from app.models.blinkit_inventory import BlinkitInventoryData
 from app.schemas.inventory import InventoryUpdate
 from app.schemas.common import PaginatedResponse
 from app.utils.dependencies import get_current_user
+from app.utils.timeutil import now_ist
 
 router = APIRouter()
 
@@ -503,7 +504,7 @@ async def update_inventory(
 
     # Note: minStockLevel and maxStockLevel removed (ReorderLevel/MaxStockLevel columns deleted)
 
-    inventory.LastUpdated = datetime.utcnow()
+    inventory.LastUpdated = now_ist()
 
     try:
         db.commit()

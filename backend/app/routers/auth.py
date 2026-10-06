@@ -10,6 +10,7 @@ from ..models.user import User
 from ..models.role import Role
 from ..schemas.user import UserLogin, Token, UserResponse
 from ..utils.security import verify_password
+from ..utils.timeutil import now_ist
 from ..utils.auth import create_access_token, get_current_user, get_current_user_for_refresh
 
 router = APIRouter()
@@ -50,7 +51,7 @@ async def login(user_credentials: UserLogin, db: Session = Depends(get_db)):
         )
 
     # Update last login
-    user.LastLogin = datetime.utcnow()
+    user.LastLogin = now_ist()
     db.commit()
 
     # Get user's role permissions from database

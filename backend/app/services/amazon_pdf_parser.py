@@ -139,6 +139,27 @@ def _parse_date(text: str) -> Optional[str]:
     return None
 
 
+def _parse_date_mdy(text: str) -> Optional[str]:
+    """Parse a month-first date (9/11/2026 is 11 Sep), return ISO string.
+
+    Amazon's PDF is not consistent about date order: the ship window is day-first
+    (see _extract_header) but "Ordered on" and the line "Expected date" are
+    month-first. Reading those two day-first swapped day and month for every date
+    with a day of 12 or less, which put the PO in the wrong month (often a future
+    one). A value whose first part is over 12 cannot be a month, so it fails the
+    month-first formats and falls through to day-first.
+    """
+    if not text or not text.strip():
+        return None
+    first = text.strip().split()[0]
+    for fmt in ('%m/%d/%Y', '%m/%d/%y', '%m-%d-%Y', '%m-%d-%y'):
+        try:
+            return datetime.strptime(first, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return _parse_date(text)
+
+
 def _cell(cell) -> str:
     """Safely get trimmed text from a table cell."""
     if cell is None:
@@ -189,7 +210,7 @@ def _extract_header(tables: list, full_text: str) -> AmazonPOHeaderExtracted:
                 field_name = _HEADER_MAP.get(label)
                 if field_name:
                     if field_name == 'ordered_on_date':
-                        setattr(header, field_name, _parse_date(value))
+                        setattr(header, field_name, _parse_date_mdy(value))
                     else:
                         setattr(header, field_name, value)
 
@@ -340,7 +361,7 @@ def _parse_item_row(row: list, col_map: dict) -> Optional[AmazonPOItemExtracted]
     item.hsn = _get('hsn') or None
     item.title = _get('title') or None
     item.window_type = _get('window_type') or None
-    item.expected_date = _parse_date(_get('expected_date'))
+    item.expected_date = _parse_date_mdy(_get('expected_date'))
     item.quantity_requested = _clean_int(_get('quantity_requested'))
     item.accepted_quantity = _clean_int(_get('accepted_quantity'))
     item.quantity_received = _clean_int(_get('quantity_received'))

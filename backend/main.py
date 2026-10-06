@@ -14,6 +14,7 @@ import asyncio
 from datetime import datetime, timedelta
 
 from app.config import settings
+from app.utils.timeutil import now_ist
 from app.database import test_connection, init_db
 from app.routers import auth, dashboard, inventory, purchase_orders, products, warehouses, users, uploads, notifications, alerts, roles
 from app.routers import amazon_data, blinkit_data, distributors, audit_logs, upload_logs
@@ -130,7 +131,7 @@ async def _audit_log_cleanup_loop():
     while True:
         try:
             db = SessionLocal()
-            cutoff = datetime.now() - timedelta(days=AUDIT_LOG_RETENTION_DAYS)
+            cutoff = now_ist() - timedelta(days=AUDIT_LOG_RETENTION_DAYS)
             deleted = db.query(AuditLog).filter(AuditLog.CreatedAt < cutoff).delete()
             db.commit()
             db.close()

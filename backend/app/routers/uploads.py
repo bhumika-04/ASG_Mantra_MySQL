@@ -20,6 +20,7 @@ from app.models.warehouse import Warehouse
 from app.models.asg_warehouse import AsgWarehouse
 from app.utils.dependencies import get_current_user
 from app.utils.audit import log_audit, log_upload, notify
+from app.utils.timeutil import today_ist
 
 router = APIRouter()
 
@@ -352,9 +353,9 @@ async def preview_inventory_data(
             try:
                 today = datetime.strptime(inventory_date, '%Y-%m-%d').date()
             except ValueError:
-                today = datetime.utcnow().date()
+                raise HTTPException(status_code=400, detail="Invalid inventory_date. Use YYYY-MM-DD and upload again.")
         else:
-            today = datetime.utcnow().date()
+            today = today_ist()
 
         rows = []
         valid_count = 0
@@ -528,9 +529,9 @@ async def upload_inventory_data(
             try:
                 today = datetime.strptime(inventory_date, '%Y-%m-%d').date()
             except ValueError:
-                today = datetime.utcnow().date()
+                raise HTTPException(status_code=400, detail="Invalid inventory_date. Use YYYY-MM-DD and upload again.")
         else:
-            today = datetime.utcnow().date()
+            today = today_ist()
         asg_warehouses_created = []
 
         for idx, row in df.iterrows():

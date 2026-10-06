@@ -11,6 +11,7 @@ from app.database import get_db
 from app.models.user import User
 from app.models.upload_log import UploadLog
 from app.utils.dependencies import get_current_user
+from app.utils.timeutil import now_ist
 
 router = APIRouter()
 
@@ -82,7 +83,7 @@ async def get_upload_stats(
     """
     Get upload statistics for the last N days.
     """
-    start_date = datetime.now() - timedelta(days=days)
+    start_date = now_ist() - timedelta(days=days)
 
     from sqlalchemy import func
 
@@ -174,7 +175,7 @@ async def cleanup_old_upload_logs(
     if current_user.Role != "Admin":
         raise HTTPException(status_code=403, detail="Admin role required")
 
-    cutoff_date = datetime.now() - timedelta(days=days)
+    cutoff_date = now_ist() - timedelta(days=days)
     deleted_count = db.query(UploadLog).filter(UploadLog.UploadDate < cutoff_date).delete()
     db.commit()
 

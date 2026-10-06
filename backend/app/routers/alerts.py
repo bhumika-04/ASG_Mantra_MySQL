@@ -15,6 +15,7 @@ from app.models.alert import LowStockAlert
 from app.models.product import Product
 from app.models.inventory import Inventory
 from app.utils.dependencies import get_current_user
+from app.utils.timeutil import now_ist
 
 LOW_STOCK_THRESHOLD = 50  # Products with total stock below this are "Warning"
 
@@ -111,7 +112,7 @@ async def resolve_alert(
 
     # Mark as resolved
     alert.IsResolved = True
-    alert.ResolvedAt = datetime.utcnow()
+    alert.ResolvedAt = now_ist()
     if body.remarks is not None:
         alert.Remarks = body.remarks
 
@@ -220,7 +221,11 @@ async def sync_alerts(
     - Products with 0 total stock → Critical "Out of Stock" alert
     - Products with total stock < LOW_STOCK_THRESHOLD → Warning "Low Stock" alert
     Skips products that already have an unresolved alert.
+    Admin only.
     """
+    if current_user.Role != "Admin":
+        raise HTTPException(status_code=403, detail="Only an Admin can sync alerts")
+
     # Each product's own latest snapshot. Filtering everything to a single global MAX
     # date drops any product absent from the most recent upload; the outer join below
     # then coalesces it to 0 and raises a false Critical "Out of Stock" alert for a
@@ -323,7 +328,7 @@ async def sync_alerts(
                 )
                 for a in unresolved:
                     a.IsResolved = True
-                    a.ResolvedAt = datetime.utcnow()
+                    a.ResolvedAt = now_ist()
                     a.Remarks = "Auto-resolved: stock restored"
                     resolved_count += 1
 
