@@ -9,6 +9,7 @@ from sqlalchemy.orm import aliased
 from datetime import datetime, date, timedelta
 from typing import Optional
 import pandas as pd
+from app.utils.timeutil import today_ist
 import io
 import re
 import logging
@@ -182,7 +183,7 @@ def extract_date_from_metadata(contents: bytes, filename: str) -> tuple:
     except Exception:
         pass
 
-    return date.today(), False
+    return today_ist(), False
 
 
 def detect_sales_format(columns: list) -> str:
@@ -481,6 +482,13 @@ async def upload_amazon_sales(
     if filename.endswith('.xlsx') or filename.endswith('.xls'):
         logger.info(f"[Upload] Detected Excel file — processing as RK Excel (multi-sheet)")
         return await _upload_rk_excel(contents, filename, db, user_id=current_user.Id)
+
+    # A CSV with no readable date must not be saved under today's date by default.
+    if not report_date_override and not date_found:
+        raise HTTPException(
+            status_code=400,
+            detail="The report date could not be read from this file. Enter the report date and upload again.",
+        )
 
     # For CSV — VendorCSV format
     df = read_file(contents, filename, skiprows=1)
@@ -1135,7 +1143,7 @@ async def upload_amazon_inventory(
     contents = await file.read()
     filename = file.filename or "unknown.csv"
 
-    extracted_date, _ = extract_date_from_metadata(contents, filename)
+    extracted_date, date_found = extract_date_from_metadata(contents, filename)
 
     # Allow caller to override the report date (e.g. when CSV has no metadata date)
     if report_date_override:
@@ -1144,6 +1152,11 @@ async def upload_amazon_inventory(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid report_date_override format. Use YYYY-MM-DD")
     else:
+        if not date_found:
+            raise HTTPException(
+                status_code=400,
+                detail="The report date could not be read from this file. Enter the report date and upload again.",
+            )
         report_date = extracted_date
 
     df = read_file(contents, filename, skiprows=1)
@@ -1360,6 +1373,10 @@ async def preview_amazon_po(
             'poSummary': po_summary,
             'poItems': po_items,
             'duplicatePos': duplicate_pos,
+            'columnWarnings': [
+                f"Ambiguous date ({i}). Day and month cannot be told apart, so this file will be rejected on upload. "
+                "Use YYYY-MM-DD (e.g. 2026-09-01)." for i in _ambiguous_date_issues(df)
+            ],
         }
     except HTTPException:
         raise
@@ -1383,6 +1400,15 @@ async def upload_amazon_po(
     contents = await file.read()
     filename = file.filename or "unknown.csv"
     df = read_file(contents, filename)
+
+    ambiguous = _ambiguous_date_issues(df)
+    if ambiguous:
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing was saved. These dates have day and month that can be read either way: "
+                   + "; ".join(ambiguous[:10]) + (f" (+{len(ambiguous) - 10} more)" if len(ambiguous) > 10 else "")
+                   + ". Write dates as YYYY-MM-DD (e.g. 2026-09-01) and upload again.",
+        )
 
     rows_processed = 0
     rows_skipped = 0
@@ -1533,7 +1559,7 @@ async def get_amazon_sales_analytics(
     RKExcel rows:   OrderedUnits is NULL; DRR_D1 (daily run rate) is a separate metric.
     Only VendorCSV OrderedUnits are used for 'total units' — DRR is not ordered units.
     """
-    end_dt = date.fromisoformat(end_date) if end_date else date.today()
+    end_dt = date.fromisoformat(end_date) if end_date else today_ist()
     if start_date:
         start_dt = date.fromisoformat(start_date)
     elif days is not None:
@@ -1779,6 +1805,38 @@ async def list_amazon_sales_products(
         raise HTTPException(status_code=500, detail=f"Amazon products query failed: {exc}")
 
 
+_PO_DATE_COLUMNS = ('OrderedOnDate', 'OrderDate', 'ExpectedDate', 'Expected date',
+                    'ExpectedDeliveryDate', 'CancellationDate')
+_AMBIGUOUS_DATE_RE = re.compile(r'^\s*(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})(\s.*)?$')
+
+
+def _is_ambiguous_date(val) -> bool:
+    """True for a slash/dot/dash date whose day and month could be either way round
+    (e.g. 09/01/2026: 1 Sep or 9 Jan). ISO dates and real Excel dates are never ambiguous."""
+    if val is None or (not isinstance(val, str) and pd.isna(val)):
+        return False
+    m = _AMBIGUOUS_DATE_RE.match(str(val))
+    if not m:
+        return False
+    a, b = int(m.group(1)), int(m.group(2))
+    return a <= 12 and b <= 12 and a != b
+
+
+def _ambiguous_date_issues(df: pd.DataFrame, limit: int = 15) -> list:
+    """List 'Row N, column C: value' for every ambiguous date in the PO date columns.
+    The upload reads slash dates day-first, but Amazon's PDFs print Ordered On and
+    Expected date month-first, so a hand-built file would be saved with day and month
+    swapped and nothing would show it. Such files must use YYYY-MM-DD instead."""
+    issues = []
+    for col in _PO_DATE_COLUMNS:
+        if col not in df.columns:
+            continue
+        for idx, v in df[col].items():
+            if _is_ambiguous_date(v):
+                issues.append(f"Row {idx + 2}, column {col}: '{str(v).strip()}'")
+    return issues
+
+
 def _parse_date(val) -> date:
     """Parse various date formats, return None on failure."""
     if pd.isna(val) or str(val).strip() in ('', 'nan'):
@@ -1824,6 +1882,8 @@ async def update_amazon_po_status(
         raise HTTPException(status_code=404, detail=f"Amazon PO with id {po_id} not found")
 
     old_status = po.POStatus
+    if old_status in ('Delivered', 'Received') and status in ('Created', 'Packed', 'Dispatched', 'In Transit', 'Delayed'):
+        raise HTTPException(status_code=422, detail=f"A {old_status} PO cannot go back to '{status}'.")
     po.POStatus = status
     log_audit(db, current_user.Id, "STATUS_CHANGE", "AmazonPO", str(po.Id),
               old_values={"status": old_status},

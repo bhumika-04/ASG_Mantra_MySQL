@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.models.audit_log import AuditLog
 from app.models.upload_log import UploadLog
 from app.models.notification import Notification
+from app.utils.timeutil import now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ def log_audit(
             RecordId=str(record_id) if record_id else None,
             OldValues=json.dumps(old_values) if old_values else None,
             NewValues=json.dumps(new_values) if new_values else None,
-            CreatedAt=datetime.now(),
+            CreatedAt=now_ist(),
         )
         db.add(entry)
     except Exception:
@@ -66,7 +67,7 @@ def log_upload(
             ErrorRows=error_rows,
             Errors=json.dumps(errors[:20]) if errors else None,
             Status=status,
-            ProcessedAt=datetime.now(),
+            ProcessedAt=now_ist(),
         )
         db.add(entry)
     except Exception:
@@ -95,7 +96,7 @@ def notify(
             Message=message,
             Type=db_type,
             IsRead=False,
-            CreatedAt=datetime.now(),
+            CreatedAt=now_ist(),
         )
         db.add(entry)
     except Exception:

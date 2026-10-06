@@ -24,7 +24,8 @@ from app.models.distributor import Distributor
 from app.models.inventory import Inventory
 from app.utils.dependencies import get_current_user
 from app.schemas.blinkit_po import POConfirmRequest
-from app.routers.uploads import find_or_create_product, find_or_create_warehouse
+from app.routers.uploads import find_or_create_product, find_or_create_warehouse, find_warehouse
+from app.utils.timeutil import today_ist
 from app.utils.audit import log_audit, log_upload, notify
 from app.services.eagle_pdf_parser import extract_po_from_pdf
 
@@ -312,6 +313,12 @@ def _ensure_product_blinkit(db: Session, item_id: int, item_name: str, category:
     return True
 
 
+def _eagle_distributor_id(db: Session) -> int:
+    """Id of the Blinkit distributor (Eagle Network). Looked up by channel; 2 is the fallback."""
+    d = db.query(Distributor).filter(Distributor.Channel == 'Blinkit', Distributor.Active == True).first()
+    return d.Id if d else 2
+
+
 def _ensure_distributor_facility(
     db: Session, facility_name: str, seen: set,
     ship_to_address: str = None, ship_to_gstin: str = None,
@@ -336,14 +343,15 @@ def _ensure_distributor_facility(
     eff_name = f"Eagle Network - {city}" if city else (facility_name or '').strip()
 
     # Check existence by city (covers both old "EAGLE NETWORK SUPPLY PVT. LTD." rows and new city-named rows)
+    eagle_id = _eagle_distributor_id(db)
     if city:
         exists = db.query(DistributorFacility).filter(
-            DistributorFacility.DistributorId == 2,
+            DistributorFacility.DistributorId == eagle_id,
             DistributorFacility.City == city,
         ).first()
     else:
         exists = db.query(DistributorFacility).filter(
-            DistributorFacility.DistributorId == 2,
+            DistributorFacility.DistributorId == eagle_id,
             DistributorFacility.FacilityName == eff_name,
         ).first()
 
@@ -354,7 +362,7 @@ def _ensure_distributor_facility(
         return False
 
     db.add(DistributorFacility(
-        DistributorId=2,  # Eagle Network (Id=2 in Distributors table)
+        DistributorId=eagle_id,  # Eagle Network (the Blinkit distributor)
         FacilityName=eff_name,
         FacilityType="Backend",
         City=city,
@@ -386,9 +394,9 @@ def _ensure_blinkit_facility(db: Session, facility_id: int, facility_name: str, 
             city = city_match.group(1).strip().title()
 
     # Only write to Warehouses table (Channel=Blinkit, WarehouseType=Backend)
-    find_or_create_warehouse(db, name, channel="Blinkit", city=city, warehouse_type="Backend")
+    _, created = find_or_create_warehouse(db, name, channel="Blinkit", city=city, warehouse_type="Backend")
 
-    return True
+    return bool(created)
 
 
 # ============================================================
@@ -591,6 +599,12 @@ async def upload_blinkit_sales(
             col_map[col] = 'mrp'
     df = df.rename(columns=col_map)
 
+    if not override_date and 'date' not in df.columns:
+        raise HTTPException(
+            status_code=400,
+            detail="This file has no date column. Enter the report date and upload again.",
+        )
+
     rows_processed = 0
     rows_skipped = 0
     errors = []
@@ -617,10 +631,17 @@ async def upload_blinkit_sales(
             if override_date:
                 sale_date = override_date
             else:
+                # A row with no readable date is skipped and reported, never saved as today.
                 try:
-                    sale_date = pd.to_datetime(row.get('date', datetime.utcnow())).date()
+                    raw_date = row.get('date')
+                    if raw_date is None or pd.isna(raw_date):
+                        raise ValueError("blank date")
+                    sale_date = pd.to_datetime(raw_date).date()
                 except Exception:
-                    sale_date = datetime.utcnow().date()
+                    rows_skipped += 1
+                    if len(errors) < 10:
+                        errors.append(f"Row {idx + 2}: date is missing or unreadable, row not saved")
+                    continue
 
             city_id = safe_int(row.get('city_id'))
 
@@ -795,11 +816,10 @@ async def preview_blinkit_inventory(
                 fkey = str(facility_id) if facility_id else (facility_name or '').lower()
                 if fkey not in seen_facility_keys:
                     seen_facility_keys.add(fkey)
-                    exists = False
-                    if facility_name:
-                        exists = db.query(DistributorFacility).filter(
-                            DistributorFacility.FacilityName == facility_name
-                        ).first() is not None
+                    # The upload stores Blinkit hubs/stores in Warehouses, so check that list
+                    # (same matching the upload uses), not DistributorFacilities.
+                    lookup_name = facility_name or (f"Facility-{facility_id}" if facility_id else None)
+                    exists = bool(lookup_name and find_warehouse(db, lookup_name))
                     if not exists:
                         new_facilities.append({
                             'facilityId': facility_id,
@@ -1001,7 +1021,8 @@ async def upload_blinkit_inventory(
 
 def _extract_blinkit_inventory_date(df: pd.DataFrame, filename: str) -> date:
     """Extract report date from Blinkit inventory CSV.
-    Tries: created_at column first, then filename pattern (DD.MM.YY), fallback to today.
+    Tries: created_at column first, then filename pattern (DD.MM.YY). If neither is readable the
+    upload is refused (HTTP 400) so the user enters the date; it is never saved as today.
     """
     # Try from created_at/report_date column
     if 'report_date' in df.columns and not df['report_date'].isna().all():
@@ -1018,7 +1039,10 @@ def _extract_blinkit_inventory_date(df: pd.DataFrame, filename: str) -> date:
         except ValueError:
             pass
 
-    return date.today()
+    raise HTTPException(
+        status_code=400,
+        detail="The report date could not be read from this file. Enter the report date and upload again.",
+    )
 
 
 # ============================================================
@@ -1362,6 +1386,8 @@ async def update_blinkit_po_status(
         raise HTTPException(status_code=404, detail=f"Blinkit PO with id {po_id} not found")
 
     old_status = po.Status
+    if old_status in ('Delivered', 'Received') and status in ('Created', 'Packed', 'Dispatched', 'In Transit', 'Delayed'):
+        raise HTTPException(status_code=422, detail=f"A {old_status} PO cannot go back to '{status}'.")
     po.Status = status
     log_audit(db, current_user.Id, "STATUS_CHANGE", "BlinkitPO", str(po.Id),
               old_values={"status": old_status},
@@ -1627,7 +1653,7 @@ async def get_blinkit_sales_analytics(
     current_user: User = Depends(get_current_user)
 ):
     """Get analytics from the BlinkitSales table (daily CSV uploads)."""
-    end_dt = date.fromisoformat(end_date) if end_date else date.today()
+    end_dt = date.fromisoformat(end_date) if end_date else today_ist()
     if start_date:
         start_dt = date.fromisoformat(start_date)
     elif days is not None:
@@ -2049,16 +2075,20 @@ async def preview_distributor_stock(
         try:
             from datetime import datetime as dt_obj
             override_date = dt_obj.strptime(report_date, '%Y-%m-%d').date()
-        except Exception:
-            pass
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid report_date format. Use YYYY-MM-DD")
 
     rows = []
     detected_date = None
+    missing_date_rows = 0
     for idx, row in df.iterrows():
         item_name = safe_str(row.get('item_name'), 300)
         if not item_name:
             continue
-        rd = override_date or _parse_date(row.get('report_date')) or date.today()
+        rd = override_date or _parse_date(row.get('report_date'))
+        if rd is None:
+            missing_date_rows += 1
+            continue
         if detected_date is None:
             detected_date = rd.isoformat()
         rows.append({
@@ -2084,6 +2114,12 @@ async def preview_distributor_stock(
         ).count()
         if existing_count > 0:
             duplicate_warning = f"Data for {detected_date} already exists ({existing_count} records). Uploading will overwrite existing records for this date."
+
+    if missing_date_rows:
+        column_warnings = list(column_warnings) + [
+            f"{missing_date_rows} row(s) have no readable report date and will be refused. "
+            "Enter the report date before uploading."
+        ]
 
     return {
         "rows": rows,
@@ -2183,8 +2219,20 @@ async def upload_distributor_stock(
         try:
             from datetime import datetime as dt_obj
             override_date = dt_obj.strptime(report_date, '%Y-%m-%d').date()
-        except Exception:
-            pass
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid report_date format. Use YYYY-MM-DD")
+
+    if not override_date:
+        undated = sum(
+            1 for _, r in df.iterrows()
+            if safe_str(r.get('item_name'), 300) and _parse_date(r.get('report_date')) is None
+        )
+        if undated:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{undated} row(s) have no readable report date. Nothing was saved. "
+                       "Enter the report date and upload again.",
+            )
 
     rows_processed = 0
     rows_skipped = 0
@@ -2197,7 +2245,7 @@ async def upload_distributor_stock(
                 rows_skipped += 1
                 continue
 
-            row_date = override_date or _parse_date(row.get('report_date')) or date.today()
+            row_date = override_date or _parse_date(row.get('report_date'))
 
             sku = safe_str(row.get('sku'), 100)
             opening_qty = safe_int(row.get('opening_qty'))

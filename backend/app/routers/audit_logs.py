@@ -11,6 +11,7 @@ from app.database import get_db
 from app.models.user import User
 from app.models.audit_log import AuditLog
 from app.utils.dependencies import get_current_user
+from app.utils.timeutil import now_ist
 
 router = APIRouter()
 
@@ -108,7 +109,7 @@ async def get_audit_stats(
     if current_user.Role not in ["Admin", "Manager"]:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    start_date = datetime.now() - timedelta(days=days)
+    start_date = now_ist() - timedelta(days=days)
 
     # Total logs
     total_logs = db.query(AuditLog).filter(AuditLog.CreatedAt >= start_date).count()
@@ -168,7 +169,7 @@ async def cleanup_old_logs(
     if current_user.Role != "Admin":
         raise HTTPException(status_code=403, detail="Admin role required")
 
-    cutoff_date = datetime.now() - timedelta(days=days)
+    cutoff_date = now_ist() - timedelta(days=days)
     deleted_count = db.query(AuditLog).filter(AuditLog.CreatedAt < cutoff_date).delete()
     db.commit()
 
