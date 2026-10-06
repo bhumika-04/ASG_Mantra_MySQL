@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
-import { fmtDate, fmtCurrency, fmtN } from '@/lib/format';
+import { fmtDate, fmtCurrency, fmtN, todayIST } from '@/lib/format';
 
 interface UploadResult {
   success: boolean;
@@ -488,7 +488,7 @@ export default function AmazonUploadPage() {
                       type="date"
                       value={reportDate}
                       onChange={(e) => setReportDate(e.target.value)}
-                      max={new Date().toISOString().split('T')[0]}
+                      max={todayIST()}
                       className={`text-sm border rounded px-2 py-1 bg-white focus:outline-none focus:ring-2 ${semanticPreview.detectedDate ? 'border-blue-300 focus:ring-blue-400' : 'border-amber-300 focus:ring-amber-400'}`}
                     />
                   </div>

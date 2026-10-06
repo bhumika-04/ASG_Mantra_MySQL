@@ -14,7 +14,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import api, { API_BASE_URL } from '@/lib/api';
-import { fmtN } from '@/lib/format';
+import { fmtN, todayIST } from '@/lib/format';
 
 interface Product {
   id: number;
@@ -105,7 +105,7 @@ export default function InventoryUploadPage() {
     packedQty: 0,
     unpackedQty: 0,
   });
-  const [inventoryDate, setInventoryDate] = useState(new Date().toISOString().split('T')[0]);
+  const [inventoryDate, setInventoryDate] = useState(todayIST());
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
