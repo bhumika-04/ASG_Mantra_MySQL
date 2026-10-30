@@ -4,14 +4,13 @@ FastAPI backend for multi-platform sales and inventory management
 """
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import time
 import logging
 import asyncio
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from app.config import settings
 from app.utils.timeutil import now_ist
@@ -54,10 +53,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Trusted Host Middleware (security)
-# app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
-
 
 # Request timing middleware
 @app.middleware("http")
@@ -154,11 +149,10 @@ async def startup_event():
     else:
         logger.info("Database connection established successfully")
 
-    # Initialize database (create tables if needed)
-    # Note: Comment this out in production and use Alembic migrations instead
+    # In debug mode, create any missing tables (production uses database/schema.sql)
     if settings.DEBUG:
         try:
-            init_db()  # Auto-create tables in debug mode
+            init_db()
         except Exception as e:
             logger.error(f"Database initialization failed: {e}")
 

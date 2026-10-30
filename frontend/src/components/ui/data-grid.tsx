@@ -551,7 +551,7 @@ export function DataGrid<T extends Record<string, any>>({
               return (
               <tr
                 key={rowIndex}
-                className={cn('transition-colors', onRowClick && 'cursor-pointer')}
+                className={cn('transition-colors', getRowClass?.(row), onRowClick && 'cursor-pointer')}
                 onMouseEnter={() => setHoveredRow(rowIndex)}
                 onMouseLeave={() => setHoveredRow(null)}
                 onClick={() => onRowClick?.(row)}

@@ -51,9 +51,8 @@ def _get_packing_alerts_amazon(db: Session, items: list) -> list:
           .scalar_subquery()
     )
 
-    # Single query: join Product + Inventory to get packed qty per ASIN.
-    # The date predicate lives in the ON clause so products with no inventory row
-    # still come back (as NULL -> 0) instead of being dropped by the outer join.
+    # Join Product and Inventory for the packed quantity per ASIN. The date test is in
+    # the ON clause so products without an inventory row still come back (as 0).
     rows = db.query(
         Product.AmazonId,
         func.sum(Inventory.PackedQty).label('packed_qty')
@@ -311,12 +310,9 @@ async def preview_amazon_sales(
         fmt = detect_sales_format(df.columns.tolist())
         is_rk = (fmt == 'RKExcel')
 
-        # Column warnings. `known` must match every row.get(...) call in _upload_vendor_csv
-        # below (or the RK-Excel branch) — otherwise this preview falsely warns "not used"
-        # about columns that are, in fact, read and saved. `mandatory` are the columns this
-        # upload exists to capture; missing or all-null mandatory data gets its own,
-        # separate, louder warning below (see mandatory_data_warning) — that's what should
-        # have caught the Inventory-file-uploaded-to-Sales incident (5/17 Aug 2026).
+        # Column warnings. `known` must list every column read by _upload_vendor_csv (or the
+        # RK-Excel branch). `mandatory` columns are the ones this upload exists to capture;
+        # missing or empty mandatory data raises a separate warning (mandatory_data_warning).
         actual_cols = set(str(c).strip() for c in df.columns)
         if is_rk:
             mandatory = {'ASIN', 'SKU'}
@@ -411,11 +407,8 @@ async def preview_amazon_sales(
             if existing_count > 0:
                 duplicate_warning = f"Found {existing_count} existing sales records for {detected_date.strftime('%d-%m-%Y')}. This data may already be uploaded."
 
-        # Mandatory-data check: don't just check the column HEADER exists (missing_mandatory
-        # above) — also check its VALUES aren't blank across every row. A file can have an
-        # "Ordered Units" column that parses fine but is empty for every row, which the
-        # header-only check can't catch. All-rows-blank on the core sales metrics is exactly
-        # what an Inventory-shaped file uploaded to this Sales page looks like.
+        # Mandatory-data check: besides the header, the values must not be blank in every row.
+        # An Inventory file uploaded to the Sales page has the headers but no sales values.
         mandatory_data_warning = None
         if valid_rows > 0:
             all_units_null = all(r.get('orderedUnits') is None for r in preview_rows)
@@ -487,7 +480,7 @@ async def upload_amazon_sales(
 
     # For RK Excel, handle multi-sheet
     if filename.endswith('.xlsx') or filename.endswith('.xls'):
-        logger.info(f"[Upload] Detected Excel file — processing as RK Excel (multi-sheet)")
+        logger.info("[Upload] Detected Excel file — processing as RK Excel (multi-sheet)")
         return await _upload_rk_excel(contents, filename, db, user_id=current_user.Id)
 
     # A CSV with no readable date must not be saved under today's date by default.
@@ -612,18 +605,9 @@ def _upload_vendor_csv(df: pd.DataFrame, report_date: date, db: Session, filenam
                 NetShippedGMS=clean_numeric(row.get('Net Shipped GMS')) or None,
                 NetPPMPercent=clean_percentage(row.get('Net PPM %')) or None,
                 ASINConfirmationPercent=clean_percentage(row.get('ASIN Confirmation %')) or None,
-                # Derived from OrderedUnits. Each VendorCSV row is ONE DAY for one ASIN
-                # (the file is delivered weekly but contains daily rows), so DRR_D1 is a
-                # genuine daily run rate.
-                #
-                # DRR_7Days/DRR_30Days are straight-line PROJECTIONS of that single day,
-                # not trailing 7/30-day averages — despite the names. The RKExcel path
-                # below reads real vendor-supplied averages into these same columns, so
-                # the two sources are not directly comparable.
-                #
-                # Nothing currently reads these columns: AmazonSalesData.to_dict() has no
-                # endpoint calling it and no query selects them. Before wiring them into
-                # any report, decide which of the two meanings you want.
+                # Each VendorCSV row is one day for one ASIN, so DRR_D1 is a daily run rate.
+                # DRR_7Days / DRR_30Days are straight-line projections of that day, not trailing
+                # averages; the RK Excel path stores vendor-supplied averages in the same columns.
                 DRR_D1=float(ordered_units) if ordered_units else None,
                 DRR_7Days=float(ordered_units * 7) if ordered_units else None,
                 DRR_30Days=float(ordered_units * 30) if ordered_units else None,
@@ -999,9 +983,8 @@ async def preview_amazon_inventory(
 
         df = read_file(contents, filename, skiprows=1)
 
-        # Column warnings for Amazon inventory. `inv_known_extra` must match every
-        # row.get(...) call in upload_amazon_inventory below, or this preview falsely warns
-        # "not used" about columns that are, in fact, read and saved.
+        # Column warnings for Amazon inventory. `inv_known_extra` must list every column read
+        # by upload_amazon_inventory.
         actual_cols = set(str(c).strip() for c in df.columns)
         inv_expected = {'ASIN', 'Product Title'}
         inv_sellable = {'Sellable On Hand Units', 'Sellable On-Hand Units', 'Sellable'}
@@ -1576,17 +1559,11 @@ async def get_amazon_sales_analytics(
     start_dt_s = start_dt.isoformat() if start_dt else '1900-01-01'
     end_dt_s = end_dt.isoformat()
 
-    # was: "... ProductTitle LIKE '%' + :asin + '%')" — MySQL has no `+` string
-    # concat operator (it's numeric addition there); use CONCAT() instead.
     sku_filter = "AND (ASIN = :asin OR ProductTitle LIKE CONCAT('%', :asin, '%'))" if asin else ""
     sku_params: dict = {"asin": asin} if asin else {}
 
     try:
-        # Raw SQL for these queries (not ORM) — originally written for MSSQL/pyodbc,
-        # converted to MySQL syntax when this project moved off MSSQL entirely (no
-        # Microsoft products, per client requirement — see docs/MYSQL_MIGRATION_BRIEF.md).
-        # MSSQL originals are commented inline below where the syntax differed.
-        # Only VendorCSV rows have OrderedUnits; RKExcel rows store DRR_D1 (daily run rate).
+        # Raw SQL. Only VendorCSV rows have OrderedUnits; RKExcel rows store DRR_D1 (daily run rate).
         # DRR is NOT ordered units, so we use IFNULL(OrderedUnits, 0) throughout.
 
         # ----- Summary + growth + all-time count in one CTE query -----
@@ -1604,7 +1581,6 @@ async def get_amazon_sales_analytics(
                 SUM(b.OrderedRevenue)                   AS total_revenue,
                 mx.max_date,
                 (SELECT COUNT(*) FROM AmazonSales WHERE 1=1 {sku_filter}) AS total_records_all_time,
-                -- was: DATEADD(day, -30, mx.max_date) / DATEADD(day, -60, mx.max_date)
                 SUM(CASE WHEN b.ReportDate > DATE_SUB(mx.max_date, INTERVAL 30 DAY)
                               AND b.ReportDate <= mx.max_date
                          THEN IFNULL(b.OrderedUnits, 0) END)              AS current_units,
@@ -1623,7 +1599,6 @@ async def get_amazon_sales_analytics(
         active_products        = int(summary_row[1] or 0)
         total_units            = int(summary_row[2] or 0)
         total_revenue          = float(summary_row[3] or 0)
-        max_date               = summary_row[4]
         total_records_all_time = int(summary_row[5] or 0)
         avg_units_per_product = round(total_units / active_products, 1) if active_products > 0 else 0
 
@@ -1698,7 +1673,6 @@ async def get_amazon_sales_analytics(
             ]
         else:
             # Fall back to monthly grouping so area chart renders with multiple points
-            # was: CONVERT(varchar(7), ReportDate, 120) — MySQL: DATE_FORMAT
             monthly_rows = db.execute(text(f"""
                 SELECT
                     DATE_FORMAT(ReportDate, '%Y-%m') AS month,

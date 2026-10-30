@@ -5,7 +5,7 @@ Handles product CRUD operations and product catalog
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session
 from sqlalchemy import or_, func
-from typing import Optional, List
+from typing import Optional
 import pandas as pd
 import io
 import re
@@ -27,7 +27,7 @@ def _norm_identifier(value: Optional[str]) -> Optional[str]:
     Product resolution matches on equality (Product.AmazonId == asin) across ~25 call
     sites. An empty string sitting in this column is matched by any lookup that
     receives an empty value, silently resolving to the wrong product and moving that
-    product's stock. Clearing the field in the UI previously wrote '' rather than NULL.
+    product's stock. A cleared field must be stored as NULL, never ''.
     """
     if value is None:
         return None

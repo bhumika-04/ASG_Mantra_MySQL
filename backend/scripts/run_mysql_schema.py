@@ -1,6 +1,6 @@
 """Create the TechGenia_Analytics structure on your MySQL server.
 
-Runs database/WholeDbMySQL.sql against the connection in backend/.env
+Runs database/schema.sql against the connection in backend/.env
 (MYSQL_HOST / MYSQL_PORT / MYSQL_DB / MYSQL_USER / MYSQL_PASSWORD). Only needs
 to be run ONCE per database. Safe to re-run on an empty database; running it
 against one that already has these tables fails with "table already exists"
@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.config import settings  # noqa: E402
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-SCHEMA_FILE = os.path.join(ROOT_DIR, "database", "WholeDbMySQL.sql")
+SCHEMA_FILE = os.path.join(ROOT_DIR, "database", "schema.sql")
 
 
 def get_connection():
@@ -47,7 +47,7 @@ def main():
     conn = get_connection()
     try:
         with conn.cursor() as cur:
-            print("Running database/WholeDbMySQL.sql ...")
+            print("Running database/schema.sql ...")
             cur.execute(sql)
             # Drain any extra result sets produced by multi-statement execution
             while cur.nextset():

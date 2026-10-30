@@ -3,7 +3,6 @@ Authentication Router - Login, Logout, Token Management
 """
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from datetime import datetime
 
 from ..database import get_db
 from ..models.user import User

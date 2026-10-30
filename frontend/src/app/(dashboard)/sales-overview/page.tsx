@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
+import { useFilter, computeDateRange } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';

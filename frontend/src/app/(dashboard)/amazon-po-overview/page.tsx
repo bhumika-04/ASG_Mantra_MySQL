@@ -75,8 +75,7 @@ const BADGE_STYLES: Record<string, string> = {
   'Expired':    'bg-red-50 text-red-700 border-red-200',
 };
 
-// Shared by the grid fetch and the export so a CSV can never drift from what is
-// on screen.
+// Shared by the grid fetch and the export so a CSV matches what is on screen.
 const toOverviewItem = (po: any): POOverviewItem => ({
   id: po.po_id,
   po_id: po.po_id,
@@ -106,7 +105,7 @@ export default function AmazonPOOverviewPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
-  const [totalPages, setTotalPages] = useState(1);
+  const [, setTotalPages] = useState(1);
   const PAGE_SIZE = 50;
 
   const [statsKey, setStatsKey] = useState(0);

@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, and_
 from typing import Optional
 from pydantic import BaseModel
-from datetime import datetime
 
 from app.database import get_db
 from app.models.user import User
@@ -226,11 +225,8 @@ async def sync_alerts(
     if current_user.Role != "Admin":
         raise HTTPException(status_code=403, detail="Only an Admin can sync alerts")
 
-    # Each product's own latest snapshot. Filtering everything to a single global MAX
-    # date drops any product absent from the most recent upload; the outer join below
-    # then coalesces it to 0 and raises a false Critical "Out of Stock" alert for a
-    # product that actually holds stock (two products here last appeared on 2026-05-30
-    # holding 88 and 47 units).
+    # Use each product's own latest snapshot. A single global MAX date would drop
+    # products missing from the newest upload and raise a false "Out of Stock" alert.
     latest_per_product = (
         db.query(
             Inventory.ProductId.label("pid"),
@@ -314,9 +310,8 @@ async def sync_alerts(
     if existing_alert_product_ids:
         for product in products:
             total_stock = int(product.total_stock or 0)
-            # Strictly greater — the exact complement of the `<= threshold` create rule
-            # above. Using >= here would both raise and resolve an alert at exactly the
-            # threshold value on every run.
+            # Strictly greater: the exact complement of the `<= threshold` create rule above,
+            # so an alert is never created and resolved at the same value.
             if product.Id in existing_alert_product_ids and total_stock > LOW_STOCK_THRESHOLD:
                 unresolved = (
                     db.query(LowStockAlert)

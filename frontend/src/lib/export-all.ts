@@ -1,12 +1,8 @@
 /**
  * Fetch every page of a filtered list endpoint.
  *
- * Export buttons previously serialised whatever array the grid was holding, which is a
- * single server page — so exporting a 1,082-row filtered result silently produced 50
- * rows with no indication anything was missing.
- *
- * The backends cap page_size at 1000, so a single oversized request is not enough for
- * the larger result sets; this walks the pages instead.
+ * The grid holds one server page only, so exports walk every page of the current
+ * filter. The backends cap page_size at 1000, so one oversized request is not enough.
  */
 export async function fetchAllPages<T>(
   fetchPage: (page: number, pageSize: number) => Promise<{ items?: T[]; total?: number }>,

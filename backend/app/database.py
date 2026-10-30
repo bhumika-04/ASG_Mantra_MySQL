@@ -1,10 +1,4 @@
-"""
-Database connection and session management — MySQL only.
-
-This project has no Microsoft-product dependency (client requirement): no MSSQL,
-no pyodbc, no ODBC Driver. See docs/MYSQL_MIGRATION_BRIEF.md for the migration
-that removed the old SQL Server connection.
-"""
+"""Database connection and session management (MySQL)."""
 import logging
 import time
 
@@ -17,9 +11,8 @@ from .config import settings
 
 logger = logging.getLogger(__name__)
 
-# pymysql error codes that mean "the connection itself is bad" (reset while idle,
-# server restarted mid-connection, etc.) rather than a real query/programming
-# error — safe to retry a fresh connection for these.
+# pymysql error codes meaning the connection itself failed (not a query error);
+# a fresh connection can safely be retried for these.
 _TRANSIENT_MYSQL_ERRORS = {
     2003,  # Can't connect to MySQL server
     2006,  # MySQL server has gone away
@@ -29,17 +22,12 @@ _TRANSIENT_MYSQL_ERRORS = {
 
 
 def _connect_with_retry(max_attempts: int = 3, base_delay: float = 1.0):
-    """Open a fresh physical MySQL connection, retrying on a transient
-    network-level failure instead of letting it surface as a 500.
+    """Open a new MySQL connection, retrying on transient network failures.
 
-    `pool_pre_ping` (below) only protects a connection that's already sitting
-    in the pool — it pings before handing it out, and transparently discards
-    it and tries the next one if the ping fails. It cannot help when the pool
-    is empty and a brand-new connection has to be made (e.g. the first
-    request after the app has been idle overnight): if *that* attempt hits a
-    momentary reset from an intermediate firewall/NAT/load balancer, there's
-    nothing to fall back to without a retry here. (This was a real recurring
-    production issue — "TCP Provider: Error code 0x68 (104)" — before this fix.)
+    `pool_pre_ping` only protects connections already in the pool. When the pool
+    is empty (e.g. the first request after the app was idle overnight) a firewall
+    or load balancer can reset the brand-new connection, so it is retried here
+    instead of surfacing as a 500.
     """
     last_exc = None
     for attempt in range(1, max_attempts + 1):
@@ -99,32 +87,19 @@ def get_db() -> Generator[Session, None, None]:
 
 
 def init_db() -> None:
-    """
-    Initialize database - create tables if they don't exist
-    Note: In production, use Alembic migrations instead
-    """
-    # Import all models here to register them with Base
-    from .models import (
-        user, product, inventory, purchase_order, sales, warehouse,
-        alert, notification, audit_log, role,
-        amazon_inventory, amazon_sales, amazon_po, amazon_po_item,
-        blinkit_inventory, blinkit_sales, blinkit_po, blinkit_po_item,
-    )
+    """Create any missing tables (the production schema is managed with SQL scripts)."""
+    import app.models  # noqa: F401  (importing registers every model with Base)
 
-    # Create all tables
     Base.metadata.create_all(bind=engine)
     print("Database tables created successfully!")
 
 
 def test_connection() -> bool:
-    """
-    Test database connection
-    Returns True if connection is successful
-    """
+    """Return True when a trivial query succeeds."""
     try:
         from sqlalchemy import text
         with engine.connect() as connection:
-            result = connection.execute(text("SELECT 1"))
+            connection.execute(text("SELECT 1"))
             print("[OK] Database connection successful!")
             return True
     except Exception as e:

@@ -2,9 +2,8 @@
 Notifications Router - Notification Management
 Handles user notifications
 """
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from datetime import datetime
 from pydantic import BaseModel
 from typing import Optional
 

@@ -1,25 +1,7 @@
-"""
-DistributorStock Model - SQLAlchemy ORM
-Replaces the Eagle-specific EagleStock table.
+"""DistributorStock model: weekly stock reports sent by the distributors.
 
-Both distributors send weekly stock reports:
-  Eagle (Id=2) → Blinkit channel  — dispatched to Blinkit DCs
-  RK    (Id=1) → Amazon channel   — dispatched to Amazon FCs
-
-Table: DistributorStock
-MSSQL original creation SQL (see the archived MSSQL schema script (moved outside the repo, no longer part of this project) for the live schema;
-database/WholeDbMySQL.sql has the MySQL equivalent — VARCHAR instead of NVARCHAR,
-CURRENT_TIMESTAMP instead of GETDATE()):
-    CREATE TABLE DistributorStock (
-        Id            INT IDENTITY(1,1) PRIMARY KEY,
-        ReportDate    DATE NOT NULL,
-        DistributorId INT NULL REFERENCES Distributors(Id),
-        ItemName      NVARCHAR(300) NOT NULL,
-        OpeningQty    INT NULL,
-        ClosingQty    INT NULL,
-        SaleQty       INT NULL,
-        CreatedAt     DATETIME DEFAULT GETDATE()
-    );
+  Eagle (Id=2) -> Blinkit channel, dispatched to Blinkit DCs
+  RK    (Id=1) -> Amazon channel, dispatched to Amazon FCs
 """
 from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey
 from sqlalchemy.sql import func

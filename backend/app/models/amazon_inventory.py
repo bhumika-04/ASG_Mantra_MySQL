@@ -3,7 +3,7 @@ AmazonInventory Model - SQLAlchemy ORM
 Source: Vendor Central CSV (38 data columns)
 Table managed via SQL script: database/amazon_tables.sql
 """
-from sqlalchemy import Column, Integer, String, Date, DateTime, DECIMAL, ForeignKey
+from sqlalchemy import Column, Integer, String, Date, DateTime, DECIMAL
 from sqlalchemy.sql import func
 from ..database import Base
 

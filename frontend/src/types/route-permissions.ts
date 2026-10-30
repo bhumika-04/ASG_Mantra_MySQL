@@ -73,19 +73,3 @@ export function hasRouteAccess(route: string, userRole: UserRole): boolean {
 
   return allowedRoles.includes(userRole);
 }
-
-/**
- * Get all routes accessible by a specific role
- */
-export function getAccessibleRoutes(userRole: UserRole): string[] {
-  return Object.entries(ROUTE_PERMISSIONS)
-    .filter(([_, roles]) => roles.includes(userRole))
-    .map(([route]) => route);
-}
-
-/**
- * Get allowed roles for a specific route
- */
-export function getAllowedRoles(route: string): UserRole[] {
-  return ROUTE_PERMISSIONS[route] || [];
-}

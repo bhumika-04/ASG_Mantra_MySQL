@@ -1,4 +1,4 @@
--- Adds Address and Pincode to Warehouses (client answer, Oct 2026).
+-- Adds Address and Pincode to Warehouses.
 -- Run ONCE on the MySQL database BEFORE deploying the new backend. Existing rows are not changed.
 -- Safe to check first:  SHOW COLUMNS FROM Warehouses LIKE 'Address';  SHOW COLUMNS FROM Warehouses LIKE 'Pincode';
 

@@ -96,7 +96,7 @@ export default function POLifecyclePage() {
   const [isLoading, setIsLoading] = useState(true);
   const [isGridLoading, setIsGridLoading] = useState(false);
   const [total, setTotal] = useState(0);
-  const [totalUnits, setTotalUnits] = useState(0);
+  const [, setTotalUnits] = useState(0);
   const [stats, setStats] = useState({
     amazon: { status_counts: {} as Record<string, number>, total_pos: 0, total_units: 0 },
     blinkit: { status_counts: {} as Record<string, number>, total_pos: 0, total_units: 0 },
@@ -670,9 +670,7 @@ export default function POLifecyclePage() {
               <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-6 md:gap-4 relative">
                 {[
                   // Created → Dispatched → In Transit → Delivered is the progression;
-                  // Cancelled and Expired are terminal off-ramps. All six are shown so
-                  // the stages account for every PO in the grid — Cancelled was absent,
-                  // so 4 of the 31 POs in this range appeared in no stage at all.
+                  // Cancelled and Expired are terminal. All are shown so every PO falls in a stage.
                   { label: 'Created', count: createdCount, bg: 'bg-chart-1', Icon: FileCheck },
                   { label: 'Dispatched', count: dispatchedCount, bg: 'bg-chart-2', Icon: Send },
                   { label: 'In Transit', count: inTransitCount, bg: 'bg-chart-3', Icon: Truck },

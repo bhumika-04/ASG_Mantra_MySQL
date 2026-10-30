@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
-import { fmtDate, fmtN } from '@/lib/format';
+import { fmtDate } from '@/lib/format';
 
 interface DistributorStockItem {
   id: number;
@@ -105,9 +105,7 @@ export default function DistributorPage() {
       accessorKey: 'reportDate',
       sortable: true,
       width: 120,
-      // The API returns this as ISO (2026-05-04). Without a cell renderer the grid
-      // printed it raw, so this was the one column still showing year-month-day.
-      // Sorting still uses the underlying ISO value, which sorts correctly.
+      // The API returns ISO dates (2026-05-04); display day-month-year, sort on the ISO value.
       cell: (row) => <span className="text-muted-foreground">{fmtDate(row.reportDate)}</span>,
     },
     {

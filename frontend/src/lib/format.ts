@@ -28,11 +28,8 @@ export function fmtCurrency(n: number, decimals = 0): string {
 /**
  * Date display helpers.
  *
- * Every date shown in the UI is day-month-year. These live here rather than in the
- * pages so the format cannot drift: several pages previously formatted dates inline,
- * and one shadowed fmtDate with a local copy that rendered "31 Jul 26".
- *
- * The backend already emits %d-%m-%Y for its pre-formatted date strings.
+ * Every date shown in the UI is day-month-year; pages use these helpers instead of
+ * formatting inline. The backend emits %d-%m-%Y for its pre-formatted date strings.
  */
 
 /**

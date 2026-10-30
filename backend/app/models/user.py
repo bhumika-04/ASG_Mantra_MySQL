@@ -1,7 +1,7 @@
 """
 User Model - SQLAlchemy ORM
 """
-from sqlalchemy import Column, String, Boolean, DateTime, Enum
+from sqlalchemy import Column, String, Boolean, DateTime
 from ..db_types import GUID
 from sqlalchemy.sql import func
 from ..database import Base

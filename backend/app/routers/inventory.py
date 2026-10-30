@@ -4,7 +4,7 @@ Handles inventory queries, updates, and low stock alerts
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_
 from typing import Optional, List
 from datetime import datetime
 

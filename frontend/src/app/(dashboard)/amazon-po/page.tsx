@@ -100,8 +100,7 @@ interface POItem {
   state: string;
 }
 
-// Shared by the grid fetch and the export so a CSV can never drift from what is
-// on screen.
+// Shared by the grid fetch and the export so a CSV matches what is on screen.
 const toPOItem = (po: any): POItem => ({
 id: po.id,
   po_id: po.po_id,

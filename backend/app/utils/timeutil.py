@@ -1,7 +1,7 @@
 """Business time is Indian Standard Time (IST, UTC+05:30, no daylight saving).
 
 Every date or timestamp the application creates uses these helpers, so it does not depend on
-the time zone of the server it runs on (a UTC server previously made 'today' wrong between
+the time zone of the server it runs on (on a UTC server 'today' would be wrong between
 00:00 and 05:30 IST). Values are naive IST datetimes, matching the DATETIME columns.
 
 JWT expiry is the one exception: tokens stay in UTC, as the JWT standard requires.

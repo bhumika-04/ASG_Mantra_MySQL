@@ -9,7 +9,7 @@ import pdfplumber
 import re
 import io
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, Dict
 from dataclasses import dataclass, field, asdict
 
 
@@ -330,11 +330,9 @@ def _extract_header_from_text(text: str, header: POHeaderExtracted) -> POHeaderE
     if m:
         header.issuer_name = m.group(1).strip()
 
-    # Bill To / Ship To — flexible: capture name on first line after the label,
-    # address on second line, GST on third line.
-    # Note: in pdfplumber text, Bill To and Ship To may be on the same line
-    # (side-by-side in the PDF), causing their content lines to be merged.
-    # We de-duplicate by taking only the first half if the name repeats.
+    # Bill To / Ship To: name on the first line after the label, address on the second,
+    # GST on the third. pdfplumber can merge the two side-by-side blocks onto one line, so
+    # when the name repeats only the first half is kept.
     _GSTIN_PAT = r'(\d{2}[A-Z]{5}\d{4}[A-Z]\d[A-Z\d][A-Z][\dA-Z]?)'
 
     for label, name_field, addr_field, gstin_field in [
@@ -490,9 +488,8 @@ def _build_col_map(table: list, header_idx: int) -> Dict[str, int]:
                 col_map[field_name] = col_i
                 break
 
-    # Infer Amt columns from Rate columns.
-    # CGST spans 2 cols (Rate, Amt), but SGST/UGST may span 3 cols (Rate, empty, Amt).
-    # So use +1 doesn't always work — scan ahead for the nearest col that has 'amt'.
+    # Infer the Amt columns from the Rate columns. CGST spans two columns (Rate, Amt) but
+    # SGST/UGST may span three (Rate, empty, Amt), so scan ahead for the nearest 'amt'.
     assigned_cols = set(col_map.values())
     for rate_f, amt_f in [
         ('cgst_rate', 'cgst_amt'),

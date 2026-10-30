@@ -1,18 +1,14 @@
 """
 Dashboard Router - Analytics and KPIs
-UPDATED: Dashboard is now INVENTORY-focused, not sales-focused
-Sales metrics belong in Sales Overview, not Dashboard
+The dashboard is inventory-focused; sales metrics live in the Sales Overview pages.
 """
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_, literal_column, text
-from datetime import date, timedelta
 from typing import Optional
 
 from ..database import get_db
-from ..models.inventory import Inventory
 from ..models.product import Product
-from ..models.alert import LowStockAlert
 from ..models.amazon_inventory import AmazonInventoryData
 from ..models.blinkit_inventory import BlinkitInventoryData
 from ..utils.dependencies import get_current_active_user
@@ -172,14 +168,7 @@ async def get_dashboard_charts(
     else:
         granularity = 'monthly'
 
-    # ---- MySQL adaptation for local testing (docs/MYSQL_MIGRATION_BRIEF.md) ----
-    # MSSQL used CONVERT(varchar(N), date, 120) for the period labels and
-    # DATEADD(dd, -((DATEPART(weekday, x) - 2 + 7) % 7), x) to find each week's
-    # Monday (that offset math exists only because DATEPART(weekday,...) is
-    # Sunday-based in MSSQL). MySQL's DATE_FORMAT covers the first, and its
-    # WEEKDAY() is already Monday-based (0=Monday), so the Monday calc below
-    # needs no offset math at all: DATE_SUB(x, INTERVAL WEEKDAY(x) DAY).
-    # Exact MSSQL originals are in git diff / the archived MSSQL schema script (moved outside the repo, no longer part of this project)-era code.
+    # Weekly buckets start on Monday: DATE_SUB(x, INTERVAL WEEKDAY(x) DAY).
     try:
         if granularity == 'daily':
             # Daily grouping: YYYY-MM-DD labels
@@ -262,7 +251,6 @@ async def get_dashboard_charts(
         ]
 
         # Top 5 Amazon Products — filtered by date range if provided
-        # (was SELECT TOP 5 ... ORDER BY — MySQL has no TOP, LIMIT goes at the end)
         amz_top_rows = db.execute(text("""
             SELECT
                 s.ASIN,
@@ -289,9 +277,7 @@ async def get_dashboard_charts(
             for row in amz_top_rows
         ]
 
-        # Top 5 Blinkit Products — filtered by date range if provided
-        # (was SELECT TOP 5 / CAST(... AS NVARCHAR(50)) — MySQL: LIMIT at the
-        # end, and CAST target type is CHAR, not NVARCHAR)
+        # Top 5 Blinkit products, filtered by date range if provided
         blinkit_top_rows = db.execute(text("""
             SELECT
                 s.ItemId,
@@ -363,7 +349,6 @@ async def get_product_overview(
     """)).fetchone()
     latest_amz = dates_row.amz_date if dates_row else None
     latest_blk = dates_row.blk_date if dates_row else None
-    latest_inv = dates_row.inv_date if dates_row else None
 
     # Amazon stock from AmazonInventory table (latest report date)
     if latest_amz:

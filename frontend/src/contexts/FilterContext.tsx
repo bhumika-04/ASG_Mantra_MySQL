@@ -156,9 +156,7 @@ interface FilterContextType {
   globalSearch: string;
   setGlobalSearchRaw: (value: string) => void;
   clearSearch: () => void;
-  // Legacy fields kept for backward compatibility
-  timePeriod: string;
-  setTimePeriod: (value: string) => void;
+  // Channel filter (header)
   channel: string;
   setChannel: (value: string) => void;
 }
@@ -170,7 +168,6 @@ export function FilterProvider({ children }: { children: ReactNode }) {
   const [filterMode, setFilterMode] = useState<FilterMode>('this_month');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
-  const [timePeriod, setTimePeriod] = useState('6months');
   const [channel, setChannel] = useState('all');
   const [globalSearchRaw, setGlobalSearchRaw] = useState('');
   const [globalSearch, setGlobalSearch] = useState('');
@@ -211,7 +208,6 @@ export function FilterProvider({ children }: { children: ReactNode }) {
       customStart, setCustomStart,
       customEnd, setCustomEnd,
       globalSearchRaw, globalSearch, setGlobalSearchRaw, clearSearch,
-      timePeriod, setTimePeriod,
       channel, setChannel,
     }}>
       {children}

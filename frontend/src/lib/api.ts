@@ -80,14 +80,6 @@ async function apiFetch<T>(
 export const api = {
   // Auth endpoints
   auth: {
-    login: (email: string, password: string) =>
-      apiFetch('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email, password }),
-        requireAuth: false,
-      }),
-    logout: () => apiFetch('/api/auth/logout', { method: 'POST' }),
-    me: () => apiFetch('/api/auth/me'),
     refresh: () => apiFetch('/api/auth/refresh', { method: 'POST' }),
   },
 
@@ -111,10 +103,6 @@ export const api = {
       const q = params ? Object.entries(params).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join('&') : '';
       return apiFetch(`/api/dashboard/charts${q ? `?${q}` : ''}`);
     },
-    getProductOverview: (params?: { search?: string; page?: number; page_size?: number }) => {
-      const query = new URLSearchParams(params as any).toString();
-      return apiFetch(`/api/dashboard/product-overview${query ? `?${query}` : ''}`);
-    },
   },
 
   // Inventory endpoints
@@ -127,7 +115,6 @@ export const api = {
       const query = new URLSearchParams(params as any).toString();
       return apiFetch(`/api/inventory/dispatch-overview${query ? `?${query}` : ''}`);
     },
-    getById: (id: number) => apiFetch(`/api/inventory/${id}`),
     getLowStock: (params?: { limit?: number; channel?: string }) => {
       const query = new URLSearchParams(params as any).toString();
       return apiFetch(`/api/inventory/low-stock${query ? `?${query}` : ''}`);
@@ -169,31 +156,6 @@ export const api = {
 
   // Purchase Order endpoints
   purchaseOrders: {
-    getAll: (params?: any) => {
-      const query = new URLSearchParams(params).toString();
-      return apiFetch(`/api/purchase-orders${query ? `?${query}` : ''}`);
-    },
-    getById: (id: number) => apiFetch(`/api/purchase-orders/${id}`),
-    create: (data: any) =>
-      apiFetch('/api/purchase-orders', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      }),
-    updateStatus: (id: number, data: any) =>
-      apiFetch(`/api/purchase-orders/${id}/status`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-    updateAmazonItemStatus: (itemId: number, data: any) =>
-      apiFetch(`/api/purchase-orders/amazon-item/${itemId}/status`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
-    updateBlinkitItemStatus: (itemId: number, data: any) =>
-      apiFetch(`/api/purchase-orders/blinkit-item/${itemId}/status`, {
-        method: 'PUT',
-        body: JSON.stringify(data),
-      }),
     updateAmazonItemAcceptedQty: (itemId: number, accepted_qty: number) =>
       apiFetch(`/api/purchase-orders/amazon-item/${itemId}/accepted-qty`, {
         method: 'PUT',
@@ -318,7 +280,6 @@ export const api = {
       const query = new URLSearchParams(params).toString();
       return apiFetch(`/api/products${query ? `?${query}` : ''}`);
     },
-    getById: (id: number) => apiFetch(`/api/products/${id}`),
     /** Resolve an ASIN / Blinkit item id / ASG SKU to that product's per-channel identifiers. */
     resolve: (q: string) => apiFetch(`/api/products/resolve?q=${encodeURIComponent(q)}`),
     create: (data: any) =>
@@ -396,7 +357,6 @@ export const api = {
   // User endpoints
   users: {
     getAll: () => apiFetch('/api/users'),
-    getById: (id: string) => apiFetch(`/api/users/${id}`),
     create: (data: any) =>
       apiFetch('/api/users', {
         method: 'POST',
@@ -414,7 +374,6 @@ export const api = {
   // Role endpoints
   roles: {
     getAll: () => apiFetch('/api/roles'),
-    getById: (id: string) => apiFetch(`/api/roles/${id}`),
     create: (data: any) =>
       apiFetch('/api/roles', {
         method: 'POST',

@@ -5,12 +5,6 @@
  * purchase_orders.py) and returned on every PO payload as `status`. The frontend must
  * NOT re-derive it.
  *
- * Five pages previously carried their own `effStatus` that flipped a PO to Expired one
- * day past its expiry date, while the backend required `_EXPIRY_DAYS` (15). A PO in that
- * window showed an "Expired" badge in the grid while the KPI above it counted the PO
- * under its stored status. Trusting the backend value removes the disagreement by
- * construction rather than by keeping two thresholds in step.
- *
  * Colour follows from that same status:
  *   red    — the backend says Expired
  *   yellow — needs attention: within EXPIRY_WARNING_DAYS of expiry, or past the date but

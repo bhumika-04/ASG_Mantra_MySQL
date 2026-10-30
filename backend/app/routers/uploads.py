@@ -14,7 +14,6 @@ import re
 
 from app.database import get_db
 from app.models.user import User
-from app.models.inventory import Inventory
 from app.models.product import Product
 from app.models.warehouse import Warehouse
 from app.models.asg_warehouse import AsgWarehouse
@@ -401,14 +400,12 @@ async def preview_inventory_data(
                     else:
                         warehouse_status = 'new'
 
-            # Fetch inventory quantities for this product on the SPECIFIC upload date
-            # (shows what will be overwritten if re-uploading same date,
-            #  or None if this is a new date entry)
+            # Existing quantities for this product on the upload date (shown as what will be
+            # overwritten; None for a new date).
             current_packed = None
             current_unpacked = None
             if product:
                 cur_row = db.execute(text(
-                    # was: "... ORDER BY LastUpdated DESC OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY"
                     "SELECT PackedQty, UnpackedQty FROM Inventory "
                     "WHERE ProductId = :pid AND InventoryDate = :inv_date "
                     "ORDER BY LastUpdated DESC LIMIT 1"
@@ -565,23 +562,20 @@ async def upload_inventory_data(
                     if asg_wh_created:
                         asg_warehouses_created.append({"name": wh_name, "id": asg_wh_id})
 
-                # Inventory = date-wise snapshots (one row per product+warehouse+date).
-                # Same date → OVERWRITE that row.
-                # Different/past date → INSERT a new row (history preserved).
+                # Inventory holds one snapshot row per product, warehouse and date: the same date is
+                # overwritten, any other date inserts a new row (history is kept).
                 if asg_wh_id is not None:
                     existing = db.execute(text(
-                        "SELECT Id, PackedQty, UnpackedQty FROM Inventory "
+                        "SELECT Id FROM Inventory "
                         "WHERE ProductId = :pid AND AsgWarehouseId = :wid AND InventoryDate = :today"
                     ), {"pid": product.Id, "wid": asg_wh_id, "today": today}).fetchone()
                 else:
                     existing = db.execute(text(
-                        "SELECT Id, PackedQty, UnpackedQty FROM Inventory "
+                        "SELECT Id FROM Inventory "
                         "WHERE ProductId = :pid AND AsgWarehouseId IS NULL AND InventoryDate = :today"
                     ), {"pid": product.Id, "today": today}).fetchone()
 
                 if existing:
-                    prev_packed = int(existing[1] or 0)
-                    prev_unpacked = int(existing[2] or 0)
                     # Same date already uploaded — overwrite quantities
                     db.execute(text(
                         "UPDATE Inventory SET "
@@ -601,8 +595,6 @@ async def upload_inventory_data(
                     })
                     rows_updated += 1
                 else:
-                    prev_packed = None
-                    prev_unpacked = None
                     # New date (today, past, or future) — insert a new date-wise row
                     db.execute(text(
                         "INSERT INTO Inventory "

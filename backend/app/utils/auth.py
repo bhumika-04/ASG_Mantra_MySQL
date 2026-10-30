@@ -15,24 +15,16 @@ from ..database import get_db
 from ..models.user import User
 from ..schemas.user import TokenData
 
-# Per-process user cache: avoids a DB round-trip on every API call.
-# Key = raw JWT string; value = (User ORM object, expiry timestamp).
-# TTL = 5 min (well below the 8-hour token expiry).
+# Per-process user cache (saves a DB round-trip per API call).
+# Key: raw JWT string; value: (User, expiry timestamp). TTL 5 minutes.
 _user_cache: dict = {}
 _USER_CACHE_TTL = 300  # seconds
 
 logger = logging.getLogger(__name__)
 
-# Security scheme.
-#
-# auto_error=False so a missing or malformed Authorization header returns None here and
-# we can raise 401 ourselves. FastAPI's default raises 403, which meant an expired
-# session produced 401 from /api/auth/me but 403 from every data endpoint. The frontend
-# only clears the session and redirects on 401 (see api.ts), so a 403 surfaced as a raw
-# "HTTP 403" error instead of sending the user to log in.
-#
-# 401 = not authenticated, 403 = authenticated but not permitted. The role checks across
-# the routers keep raising 403 and are unaffected.
+# Bearer scheme with auto_error=False: a missing or malformed header yields None so
+# 401 (not authenticated) is raised here instead of FastAPI's default 403. Role checks
+# in the routers keep raising 403 (authenticated but not permitted).
 security = HTTPBearer(auto_error=False)
 
 

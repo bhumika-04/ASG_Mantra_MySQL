@@ -6,7 +6,6 @@ Wrapped in try/except so logging never breaks the main operation.
 """
 import json
 import logging
-from datetime import datetime
 from sqlalchemy.orm import Session
 from app.models.audit_log import AuditLog
 from app.models.upload_log import UploadLog

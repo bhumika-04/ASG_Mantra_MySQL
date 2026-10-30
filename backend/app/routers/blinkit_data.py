@@ -433,9 +433,7 @@ async def preview_blinkit_sales(
             detected_date = date(year, int(mm), int(dd))
             date_found = True
 
-        # Must match upload_blinkit_sales's own col_map exactly, or this preview falsely
-        # warns "not used" about columns that are, in fact, read and saved there
-        # (manufacturer_id/city_id were missing here even though the real upload maps them).
+        # Must list every column in upload_blinkit_sales' col_map.
         col_map = {}
         for col in df.columns:
             cl = str(col).strip().lower().replace(' ', '_')
@@ -516,10 +514,8 @@ async def preview_blinkit_sales(
             if existing_count > 0:
                 duplicate_warning = f"Found {existing_count} existing sales records for {detected_date.strftime('%d-%m-%Y')}. This data may already be uploaded."
 
-        # Mandatory-data check: `check_column_warnings` above only checks the column HEADER
-        # exists — a file can have a "qty_sold" column that's present but blank for every
-        # row, which that check can't catch. All-rows-blank on the core sales metric is
-        # exactly what an Inventory-shaped file uploaded to this Sales page would look like.
+        # Mandatory-data check: besides the header, `qty_sold` must not be blank in every row.
+        # An Inventory file uploaded to the Sales page has the headers but no sales values.
         mandatory_data_warning = None
         if valid_rows > 0 and preview_rows and all(r.get('qtySold') is None for r in preview_rows):
             mandatory_data_warning = (
@@ -840,10 +836,8 @@ async def preview_blinkit_inventory(
             if existing_count > 0:
                 duplicate_warning = f"Found {existing_count} existing inventory records for {detected_date.strftime('%d-%m-%Y')}. This data may already be uploaded."
 
-        # Mandatory-data check: backend_inv_qty and frontend_inv_qty are both individually
-        # optional (a file may legitimately report only one facility type) — but if BOTH are
-        # blank for every row, this file carries no actual stock numbers at all, which is
-        # what a Sales-shaped file uploaded to this Inventory page would look like.
+        # Mandatory-data check: either inventory quantity may be absent, but not both in
+        # every row. A Sales file uploaded to the Inventory page carries no stock numbers.
         mandatory_data_warning = None
         if valid_rows > 0 and preview_rows and all(
             r.get('backendQty') is None and r.get('frontendQty') is None for r in preview_rows
@@ -1199,11 +1193,9 @@ async def upload_blinkit_po(
             # Find or create PO header
             po = db.query(BlinkitPOData).filter(BlinkitPOData.PONumber == po_number).first()
 
-            # A PO spans several rows of the file, so finding the header is normal once
-            # we have created it from an earlier row. Finding one we did NOT create in
-            # this run means the PO was uploaded previously: the header dedupes but the
-            # line items below do not, so continuing would append a second full set of
-            # items and double every quantity on that PO. Skip those rows instead.
+            # A PO spans several rows, so finding a header created earlier in this run is
+            # normal. A header that already existed means the PO was uploaded before; its line
+            # items would be appended again and double the quantities, so those rows are skipped.
             if po is not None and po_number not in po_numbers_created_this_run:
                 duplicate_pos_skipped.add(po_number)
                 rows_skipped += 1
@@ -1666,12 +1658,8 @@ async def get_blinkit_sales_analytics(
     start_dt_s = start_dt.isoformat() if start_dt else '1900-01-01'
     end_dt_s = end_dt.isoformat()
 
-    # was: CAST(... AS NVARCHAR(50)) and '%' + :item_id + '%' — MySQL: CAST target
-    # is CHAR not NVARCHAR, and CONCAT() instead of the `+` string-concat operator.
-    # COLLATE pinned explicitly — MySQL's CAST(... AS CHAR) defaults to the server's
-    # collation (utf8mb4_0900_ai_ci on 8.0), which conflicts with this database's
-    # utf8mb4_general_ci columns ("Illegal mix of collations") the moment it's
-    # compared against one, as it is a few lines below.
+    # COLLATE is explicit: CAST(... AS CHAR) otherwise uses the server default
+    # (utf8mb4_0900_ai_ci), which clashes with the utf8mb4_general_ci columns.
     item_filter = "AND (CAST(ItemId AS CHAR(50)) COLLATE utf8mb4_general_ci = :item_id OR ItemName LIKE CONCAT('%', :item_id, '%'))" if item_id else ""
     item_params: dict = {"item_id": item_id} if item_id else {}
 
@@ -1691,7 +1679,6 @@ async def get_blinkit_sales_analytics(
                 SUM(b.MRP)              AS total_revenue,
                 mx.max_date,
                 (SELECT COUNT(*) FROM BlinkitSales WHERE 1=1 {item_filter}) AS total_records_all_time,
-                -- was: DATEADD(day, -30, mx.max_date) / DATEADD(day, -60, mx.max_date)
                 SUM(CASE WHEN b.SaleDate > DATE_SUB(mx.max_date, INTERVAL 30 DAY)
                               AND b.SaleDate <= mx.max_date
                          THEN b.QtySold END)                                AS current_qty,
@@ -1710,7 +1697,6 @@ async def get_blinkit_sales_analytics(
         active_items           = int(summary_row[1] or 0)
         total_qty              = float(summary_row[2] or 0)
         total_revenue          = float(summary_row[3] or 0)
-        max_date               = summary_row[4]
         total_records_all_time = int(summary_row[5] or 0)
         if prev_start_date and prev_end_date:
             prev_row = db.execute(text(f"""
@@ -1784,7 +1770,6 @@ async def get_blinkit_sales_analytics(
                 for row in daily_rows
             ]
         else:
-            # was: CONVERT(varchar(7), SaleDate, 120) — MySQL: DATE_FORMAT
             monthly_rows = db.execute(text(f"""
                 SELECT
                     DATE_FORMAT(SaleDate, '%Y-%m') AS month,
@@ -2023,9 +2008,7 @@ async def preview_distributor_stock(
     filename = file.filename or "unknown.xlsx"
     df = read_file(contents, filename)
 
-    # Must match upload_distributor_stock's own col_map exactly — it wasn't (opening_qty
-    # and sale_qty were recognized there but missing here entirely), so this preview was
-    # falsely warning "not used" about two columns that are, in fact, read and saved.
+    # Must list every column in upload_distributor_stock's col_map.
     col_map = {}
     assigned_targets: dict[str, str] = {}
     for col in df.columns:

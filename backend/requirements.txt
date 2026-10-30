@@ -5,7 +5,6 @@ python-multipart==0.0.6
 
 # Database — MySQL only, no Microsoft products (client requirement)
 sqlalchemy==2.0.25
-alembic==1.13.1
 pymysql==1.2.0
 
 # Authentication
@@ -24,12 +23,8 @@ pydantic==2.5.3
 pydantic-settings==2.1.0
 email-validator==2.1.0
 
-# CORS and Security
+# Environment
 python-dotenv==1.0.0
-aiofiles==23.2.1
-
-# Date/Time
-python-dateutil==2.8.2
 
 # Testing (optional)
 pytest==7.4.3

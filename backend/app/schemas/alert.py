@@ -1,7 +1,7 @@
 """
 Alert Pydantic Schemas
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 

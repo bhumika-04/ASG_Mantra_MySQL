@@ -16,7 +16,7 @@ import pdfplumber
 import re
 import io
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional
 from dataclasses import dataclass, field, asdict
 
 
