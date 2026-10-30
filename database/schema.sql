@@ -1,5 +1,5 @@
 -- =====================================================================
--- TechGenia_Analytics - MySQL 8.0.16+ schema (23 tables)
+-- TechGenia_Analytics - MySQL 8.0.16+ schema (24 tables)
 --
 -- Design notes
 -- * Charset utf8mb4 with utf8mb4_general_ci: string comparison is
