@@ -233,20 +233,9 @@ function BlinkitPOPageContent() {
     }
     setIsSaving(true);
     try {
-      const result = await api.purchaseOrders.updateBlinkitItemAcceptedQty(actionRow.id, qty) as any;
+      await api.purchaseOrders.updateBlinkitItemAcceptedQty(actionRow.id, qty);
       setPoData(prev => prev.map(p => p.id === actionRow.id ? { ...p, accepted_qty: qty } : p));
-      const moved = result?.inventory_deducted ?? 0;
-      if (moved > 0) {
-        if (result.inventory_shortfall > 0) {
-          toast.warning(`Accepted qty set to ${qty}. Deducted ${moved} from inventory. Shortfall: ${result.inventory_shortfall} units.`);
-        } else {
-          toast.success(`Accepted qty set to ${qty}. Deducted ${moved} units from packed inventory.`);
-        }
-      } else if (moved < 0) {
-        toast.success(`Accepted qty set to ${qty}. Returned ${-moved} units to packed inventory.`);
-      } else {
-        toast.success(`Accepted qty updated to ${qty}`);
-      }
+      toast.success(`Accepted qty updated to ${qty}. Inventory is not changed by PO edits.`);
       closeDialog();
     } catch {
       toast.error('Failed to update accepted qty');

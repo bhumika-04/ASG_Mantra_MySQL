@@ -36,6 +36,9 @@ export default function BlinkitWarehousePage() {
   const [feFormData, setFeFormData] = useState({
     warehouseCode: '',
     warehouseName: '',
+    location: '',
+    address: '',
+    pincode: '',
     city: '',
     state: '',
     region: '',
@@ -46,6 +49,9 @@ export default function BlinkitWarehousePage() {
   const [beFormData, setBeFormData] = useState({
     warehouseCode: '',
     warehouseName: '',
+    location: '',
+    address: '',
+    pincode: '',
     city: '',
     state: '',
     region: '',
@@ -93,6 +99,9 @@ export default function BlinkitWarehousePage() {
         warehouseType: 'Frontend',
         city: feFormData.city || undefined,
         state: feFormData.state,
+        location: feFormData.location || undefined,
+        address: feFormData.address || undefined,
+        pincode: feFormData.pincode || undefined,
         region: feFormData.region || undefined,
         isActive: feFormData.isActive,
       };
@@ -107,6 +116,9 @@ export default function BlinkitWarehousePage() {
       setFeFormData({
         warehouseCode: '',
         warehouseName: '',
+        location: '',
+        address: '',
+        pincode: '',
         city: '',
         state: '',
         region: '',
@@ -139,6 +151,9 @@ export default function BlinkitWarehousePage() {
         warehouseType: 'Backend',
         city: beFormData.city || undefined,
         state: beFormData.state,
+        location: beFormData.location || undefined,
+        address: beFormData.address || undefined,
+        pincode: beFormData.pincode || undefined,
         region: beFormData.region || undefined,
         isActive: beFormData.isActive,
       };
@@ -153,6 +168,9 @@ export default function BlinkitWarehousePage() {
       setBeFormData({
         warehouseCode: '',
         warehouseName: '',
+        location: '',
+        address: '',
+        pincode: '',
         city: '',
         state: '',
         region: '',
@@ -589,6 +607,38 @@ export default function BlinkitWarehousePage() {
                             </div>
                           </div>
 
+                          {/* Location, Pincode and Address (kept for warehouse management) */}
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                              <label className="text-sm font-medium">Location</label>
+                              <Input
+                                type="text"
+                                placeholder="e.g., Dhateer"
+                                value={feFormData.location}
+                                onChange={(e) => handleFeInputChange('location', e.target.value)}
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <label className="text-sm font-medium">Pincode</label>
+                              <Input
+                                type="text"
+                                inputMode="numeric"
+                                placeholder="e.g., 121102"
+                                value={feFormData.pincode}
+                                onChange={(e) => handleFeInputChange('pincode', e.target.value)}
+                              />
+                            </div>
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium">Address</label>
+                            <Input
+                              type="text"
+                              placeholder="Full address"
+                              value={feFormData.address}
+                              onChange={(e) => handleFeInputChange('address', e.target.value)}
+                            />
+                          </div>
+
                           <div className="grid grid-cols-2 gap-4">
                             <div className="space-y-2">
                               <label className="text-sm font-medium">Region</label>
@@ -672,6 +722,8 @@ export default function BlinkitWarehousePage() {
                                       <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
                                         {warehouse.city && <span>📍 {warehouse.city}</span>}
                                         {warehouse.state && <span>{warehouse.state}</span>}
+                                    {warehouse.pincode && <span>PIN {warehouse.pincode}</span>}
+                                    {warehouse.address && <span className="basis-full">{warehouse.address}</span>}
                                       </div>
                                     </div>
                                   </div>
@@ -1004,6 +1056,38 @@ export default function BlinkitWarehousePage() {
                             </div>
                           </div>
 
+                          {/* Location, Pincode and Address (kept for warehouse management) */}
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                              <label className="text-sm font-medium">Location</label>
+                              <Input
+                                type="text"
+                                placeholder="e.g., Dhateer"
+                                value={beFormData.location}
+                                onChange={(e) => handleBeInputChange('location', e.target.value)}
+                              />
+                            </div>
+                            <div className="space-y-2">
+                              <label className="text-sm font-medium">Pincode</label>
+                              <Input
+                                type="text"
+                                inputMode="numeric"
+                                placeholder="e.g., 121102"
+                                value={beFormData.pincode}
+                                onChange={(e) => handleBeInputChange('pincode', e.target.value)}
+                              />
+                            </div>
+                          </div>
+                          <div className="space-y-2">
+                            <label className="text-sm font-medium">Address</label>
+                            <Input
+                              type="text"
+                              placeholder="Full address"
+                              value={beFormData.address}
+                              onChange={(e) => handleBeInputChange('address', e.target.value)}
+                            />
+                          </div>
+
                           <div className="grid grid-cols-2 gap-4">
                             <div className="space-y-2">
                               <label className="text-sm font-medium">Region</label>
@@ -1087,6 +1171,8 @@ export default function BlinkitWarehousePage() {
                                       <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
                                         {warehouse.city && <span>📍 {warehouse.city}</span>}
                                         {warehouse.state && <span>{warehouse.state}</span>}
+                                    {warehouse.pincode && <span>PIN {warehouse.pincode}</span>}
+                                    {warehouse.address && <span className="basis-full">{warehouse.address}</span>}
                                       </div>
                                     </div>
                                   </div>

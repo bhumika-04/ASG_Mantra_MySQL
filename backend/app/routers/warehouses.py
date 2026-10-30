@@ -17,6 +17,16 @@ from app.utils.dependencies import get_current_user
 router = APIRouter()
 
 
+def _cell(row, *names):
+    """First non-blank value among the column names, as text; None when blank."""
+    for n in names:
+        v = row.get(n)
+        if v is not None and pd.notna(v) and str(v).strip() and str(v).strip().lower() != 'nan':
+            return str(v).strip()
+    return None
+
+
+
 @router.get("", response_model=List[WarehouseResponse])
 async def get_all_warehouses(
     db: Session = Depends(get_db),
@@ -112,10 +122,6 @@ async def create_warehouse(
         Pincode=warehouse_data.pincode,
         FCType=warehouse_data.fcType.value if warehouse_data.fcType else None,
         WarehouseType=warehouse_data.warehouseType.value if warehouse_data.warehouseType else None,
-        ContactPerson=warehouse_data.contactPerson,
-        ContactPhone=warehouse_data.contactPhone,
-        ContactEmail=warehouse_data.contactEmail,
-        Capacity=warehouse_data.capacity,
         IsActive=warehouse_data.isActive,
     )
 
@@ -171,14 +177,6 @@ async def update_warehouse(
         warehouse.FCType = warehouse_data.fcType.value
     if warehouse_data.warehouseType is not None:
         warehouse.WarehouseType = warehouse_data.warehouseType.value
-    if warehouse_data.contactPerson is not None:
-        warehouse.ContactPerson = warehouse_data.contactPerson
-    if warehouse_data.contactPhone is not None:
-        warehouse.ContactPhone = warehouse_data.contactPhone
-    if warehouse_data.contactEmail is not None:
-        warehouse.ContactEmail = warehouse_data.contactEmail
-    if warehouse_data.capacity is not None:
-        warehouse.Capacity = warehouse_data.capacity
     if warehouse_data.isActive is not None:
         warehouse.IsActive = warehouse_data.isActive
 
@@ -229,7 +227,7 @@ async def upload_amazon_warehouses(
 ):
     """
     Batch upload Amazon Fulfillment Centers from Excel/CSV
-    Expected columns: FC Code, FC Name, City, State, Region, FC Type, Status
+    Expected columns: FC Code, FC Name, City, State, Region, FC Type, Status (optional: Location, Address, Pincode)
     Admin only
     """
     if current_user.Role != "Admin":
@@ -241,9 +239,9 @@ async def upload_amazon_warehouses(
     try:
         contents = await file.read()
         if file.filename.endswith('.csv'):
-            df = pd.read_csv(io.BytesIO(contents))
+            df = pd.read_csv(io.BytesIO(contents), dtype=str)
         else:
-            df = pd.read_excel(io.BytesIO(contents))
+            df = pd.read_excel(io.BytesIO(contents), dtype=str)
 
         # Normalize column names
         df.columns = df.columns.str.strip()
@@ -283,17 +281,20 @@ async def upload_amazon_warehouses(
                     continue
 
                 # Map Status
-                status_value = str(row.get('Status', 'Active')).strip().lower()
+                status_value = (_cell(row, 'Status') or 'Active').lower()
                 is_active = status_value in ['active', 'yes', '1', 'true']
 
                 new_warehouse = Warehouse(
                     WarehouseCode=fc_code,
                     WarehouseName=fc_name,
                     Channel="Amazon",
-                    City=str(row.get('City', '')).strip() if pd.notna(row.get('City')) else None,
+                    City=_cell(row, 'City'),
                     State=state,
-                    Region=str(row.get('Region', '')).strip() if pd.notna(row.get('Region')) else None,
-                    FCType=str(row.get('FC Type', 'Standard')).strip() if pd.notna(row.get('FC Type')) else 'Standard',
+                    Region=_cell(row, 'Region'),
+                    Location=_cell(row, 'Location'),
+                    Address=_cell(row, 'Address'),
+                    Pincode=_cell(row, 'Pincode', 'PIN Code', 'Pin Code'),
+                    FCType=_cell(row, 'FC Type') or 'Standard',
                     IsActive=is_active,
                 )
 
@@ -341,8 +342,8 @@ async def upload_blinkit_warehouses(
 ):
     """
     Batch upload Blinkit warehouses from Excel/CSV
-    Expected columns for FE: FE Code, FE Name, City, State, Region, Status
-    Expected columns for BE: BE Code, BE Name, City, State, Region, Status
+    Expected columns for FE: FE Code, FE Name, City, State, Region, Status (optional: Location, Address, Pincode)
+    Expected columns for BE: BE Code, BE Name, City, State, Region, Status (optional: Location, Address, Pincode)
     Admin only
     """
     if current_user.Role != "Admin":
@@ -357,9 +358,9 @@ async def upload_blinkit_warehouses(
     try:
         contents = await file.read()
         if file.filename.endswith('.csv'):
-            df = pd.read_csv(io.BytesIO(contents))
+            df = pd.read_csv(io.BytesIO(contents), dtype=str)
         else:
-            df = pd.read_excel(io.BytesIO(contents))
+            df = pd.read_excel(io.BytesIO(contents), dtype=str)
 
         # Normalize column names
         df.columns = df.columns.str.strip()
@@ -403,7 +404,7 @@ async def upload_blinkit_warehouses(
                     continue
 
                 # Map Status
-                status_value = str(row.get('Status', 'Active')).strip().lower()
+                status_value = (_cell(row, 'Status') or 'Active').lower()
                 is_active = status_value in ['active', 'yes', '1', 'true']
 
                 new_warehouse = Warehouse(
@@ -411,9 +412,12 @@ async def upload_blinkit_warehouses(
                     WarehouseName=wh_name,
                     Channel="Blinkit",
                     WarehouseType=warehouse_type,
-                    City=str(row.get('City', '')).strip() if pd.notna(row.get('City')) else None,
+                    City=_cell(row, 'City'),
                     State=state,
-                    Region=str(row.get('Region', '')).strip() if pd.notna(row.get('Region')) else None,
+                    Region=_cell(row, 'Region'),
+                    Location=_cell(row, 'Location'),
+                    Address=_cell(row, 'Address'),
+                    Pincode=_cell(row, 'Pincode', 'PIN Code', 'Pin Code'),
                     IsActive=is_active,
                 )
 

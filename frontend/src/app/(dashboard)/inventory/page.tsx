@@ -17,7 +17,7 @@ import {
 import { api } from '@/lib/api';
 import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
 import { exportToCSV } from '@/lib/export';
-import { toTitleCase } from '@/lib/format';
+import { toTitleCase, fmtDate } from '@/lib/format';
 import { LOW_STOCK_THRESHOLD } from '@/lib/constants';
 import { SnapshotDatePicker } from '@/components/ui/snapshot-date-picker';
 
@@ -32,6 +32,8 @@ interface InventoryItem {
   unpackedQty: number;
   totalStock: number;
   status: string;
+  stockDate: string | null;
+  needsVerification: boolean;
 }
 
 export default function InHouseInventoryPage() {
@@ -72,6 +74,8 @@ export default function InHouseInventoryPage() {
           unpackedQty: row.unpackedQty || 0,
           totalStock: (row.packedQty || 0) + (row.unpackedQty || 0),
           status: row.status || 'Healthy',
+          stockDate: row.stockDate || null,
+          needsVerification: !!row.needsVerification,
         })));
       } catch (error) {
         console.error('Error fetching inventory:', error);
@@ -267,6 +271,28 @@ export default function InHouseInventoryPage() {
         );
       },
     },
+    {
+      id: 'stockDate',
+      header: 'Stock As Of',
+      accessorKey: 'stockDate',
+      sortable: true,
+      width: 170,
+      minWidth: 140,
+      align: 'center',
+      cell: (row) => (
+        <span className="text-xs whitespace-nowrap">
+          {row.stockDate ? fmtDate(row.stockDate) : 'No stock record'}
+          {row.needsVerification && (
+            <span
+              className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 font-medium text-amber-800"
+              title="Stock not updated for more than 15 days. Please verify."
+            >
+              Verify
+            </span>
+          )}
+        </span>
+      ),
+    },
   ];
 
   const gridState = useDataGrid(gridColumns, 'asg-inhouse-inventory');
@@ -374,6 +400,8 @@ export default function InHouseInventoryPage() {
                   'Packed Qty': i.packedQty,
                   'Unpacked Qty': i.unpackedQty,
                   'Total In-House Stock': i.totalStock,
+                  'Stock As Of': i.stockDate || '',
+                  'Needs Verification': i.needsVerification ? 'Yes' : '',
                   'Status': i.status,
                 })),
                 'inhouse-inventory'

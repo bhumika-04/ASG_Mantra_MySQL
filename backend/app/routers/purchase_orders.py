@@ -1836,85 +1836,6 @@ async def update_blinkit_po_header(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _adjust_inventory_for_product(db: Session, product_id: int, delta_qty: int) -> dict:
-    """Apply a stock movement against a product's most recent inventory snapshot.
-
-    delta_qty > 0 deducts (an accepted quantity went up); delta_qty < 0 restores (an
-    accepted quantity was corrected downward). Restoring mirrors deducting so a
-    correction cannot leak stock — previously only the deduct direction was handled,
-    so lowering an accepted qty from 100 to 10 kept all 100 units deducted. The restore
-    is in turn capped at what was really deducted, so it cannot create stock either.
-
-    The snapshot date is resolved per product. A global MAX(InventoryDate) silently
-    matches nothing for any product missing from the latest upload, so the adjustment
-    became a no-op that still reported success.
-    """
-    latest_date = db.query(func.max(Inventory.InventoryDate)).filter(
-        Inventory.ProductId == product_id
-    ).scalar()
-    if latest_date is None:
-        return {"deducted": 0, "shortfall": max(0, delta_qty), "was_packed": 0}
-
-    # No PackedQty > 0 filter: on the restore path the rows drained to zero are
-    # precisely the ones the stock has to go back into.
-    inv_rows = db.query(Inventory).filter(
-        Inventory.ProductId == product_id,
-        Inventory.InventoryDate == latest_date,
-    ).order_by(Inventory.Id).all()
-    if not inv_rows:
-        return {"deducted": 0, "shortfall": max(0, delta_qty), "was_packed": 0}
-
-    total_packed = sum(i.PackedQty or 0 for i in inv_rows)
-
-    if delta_qty < 0:
-        # Restore only what was actually taken from this snapshot. A deduction is
-        # capped by the packed stock available (a 504-unit accept against 152 packed
-        # deducts 152), so putting back the full amount on a correction manufactured
-        # the difference as phantom stock. InventoryHistory keeps the quantity as
-        # uploaded and is never touched by deductions, so (uploaded - current packed)
-        # is exactly what has been deducted so far and is the most that can go back.
-        remaining = -delta_qty
-        restored = 0
-        for inv in inv_rows:
-            if remaining <= 0:
-                break
-            baseline = db.execute(text(
-                "SELECT PackedQty FROM InventoryHistory "
-                "WHERE ProductId = :pid AND InventoryDate = :d "
-                "AND COALESCE(AsgWarehouseId, 0) = :wid"
-            ), {"pid": product_id, "d": latest_date, "wid": inv.AsgWarehouseId or 0}).scalar()
-            # No history row (e.g. snapshot predates InventoryHistory): nothing to
-            # cap against, keep the previous behaviour.
-            room = remaining if baseline is None else max(0, int(baseline) - (inv.PackedQty or 0))
-            put_back = min(room, remaining)
-            if put_back > 0:
-                inv.PackedQty = (inv.PackedQty or 0) + put_back
-                inv.CurrentStock = (inv.CurrentStock or 0) + put_back
-                restored += put_back
-                remaining -= put_back
-        # "deducted" is negative for a restore; "shortfall" carries the part that
-        # could not be returned because it was never deducted in the first place.
-        return {"deducted": -restored, "shortfall": remaining, "was_packed": total_packed}
-
-    remaining = delta_qty
-    for inv in inv_rows:
-        if remaining <= 0:
-            break
-        available = inv.PackedQty or 0
-        if available <= 0:
-            continue
-        deduct = min(available, remaining)
-        inv.PackedQty = available - deduct
-        inv.CurrentStock = max(0, (inv.CurrentStock or 0) - deduct)
-        remaining -= deduct
-
-    return {
-        "deducted": delta_qty - remaining,
-        "shortfall": max(0, remaining),
-        "was_packed": total_packed,
-    }
-
-
 @router.put("/amazon-item/{item_id}/accepted-qty")
 async def update_amazon_item_accepted_qty(
     item_id: int,
@@ -1922,7 +1843,7 @@ async def update_amazon_item_accepted_qty(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Set AcceptedQuantity on an Amazon PO line item and deduct from packed inventory."""
+    """Set AcceptedQuantity on an Amazon PO line item. Does not change inventory."""
     _require_po_editor(current_user)
 
     item = db.query(AmazonPOItemData).filter(AmazonPOItemData.Id == item_id).first()
@@ -1937,31 +1858,15 @@ async def update_amazon_item_accepted_qty(
     new_val = _validate_qty(accepted_qty, item.QuantityRequested, "accepted_qty")
     item.AcceptedQuantity = new_val
 
-    # Apply the DIFFERENCE to packed inventory — negative deltas restore stock
-    delta_qty = new_val - old_val
-    inventory_result = {}
-    if delta_qty != 0:
-        # Resolve product: from ProductId link or by ASIN lookup.
-        # Guard the ASIN lookup — some products carry AmazonId = '' and an empty
-        # lookup value would match one of them arbitrarily.
-        product_id = item.ProductId
-        if not product_id and (item.ASIN or '').strip():
-            product = db.query(Product).filter(Product.AmazonId == item.ASIN).first()
-            if product:
-                product_id = product.Id
-        if product_id:
-            inventory_result = _adjust_inventory_for_product(db, product_id, delta_qty)
-
+    # Accepted Quantity is a PO record only. Inventory comes from the daily uploaded stock sheet.
     log_audit(db, current_user.Id, "UPDATE", "AmazonPOItem", str(item_id),
               old_values={"acceptedQuantity": old_val},
-              new_values={"acceptedQuantity": new_val, "inventoryDeducted": inventory_result.get("deducted", 0)})
+              new_values={"acceptedQuantity": new_val})
     try:
         db.commit()
         return {
             "success": True,
             "accepted_quantity": item.AcceptedQuantity,
-            "inventory_deducted": inventory_result.get("deducted", 0),
-            "inventory_shortfall": inventory_result.get("shortfall", 0),
         }
     except Exception as e:
         db.rollback()
@@ -2023,41 +1928,15 @@ async def update_blinkit_item_accepted_qty(
     new_val = _validate_qty(accepted_qty, item.QTY, "accepted_qty")
     item.AcceptedQty = new_val
 
-    # Apply the DIFFERENCE to packed inventory — negative deltas restore stock
-    delta_qty = new_val - old_val
-    inventory_result = {}
-    if delta_qty != 0:
-        product_id = item.ProductId
-        if not product_id:
-            # Lookup by EagleCode → BlinkitId, then ItemCode → BlinkitId, then ItemCode → AsgSku.
-            # Each lookup value is checked for emptiness first — some products carry
-            # BlinkitId = '' and an empty lookup would match one of them arbitrarily.
-            item_code = (item.ItemCode or '').strip()
-            if item.EagleCode and str(item.EagleCode).strip():
-                p = db.query(Product).filter(Product.BlinkitId == str(item.EagleCode)).first()
-                if p:
-                    product_id = p.Id
-            if not product_id and item_code:
-                p = db.query(Product).filter(Product.BlinkitId == item_code).first()
-                if p:
-                    product_id = p.Id
-            if not product_id and item_code:
-                p = db.query(Product).filter(Product.AsgSku == item_code).first()
-                if p:
-                    product_id = p.Id
-        if product_id:
-            inventory_result = _adjust_inventory_for_product(db, product_id, delta_qty)
-
+    # Accepted Quantity is a PO record only. Inventory comes from the daily uploaded stock sheet.
     log_audit(db, current_user.Id, "UPDATE", "BlinkitPOItem", str(item_id),
               old_values={"acceptedQty": old_val},
-              new_values={"acceptedQty": new_val, "inventoryDeducted": inventory_result.get("deducted", 0)})
+              new_values={"acceptedQty": new_val})
     try:
         db.commit()
         return {
             "success": True,
             "accepted_qty": item.AcceptedQty,
-            "inventory_deducted": inventory_result.get("deducted", 0),
-            "inventory_shortfall": inventory_result.get("shortfall", 0),
         }
     except Exception as e:
         db.rollback()

@@ -16,6 +16,8 @@ from ..models.alert import LowStockAlert
 from ..models.amazon_inventory import AmazonInventoryData
 from ..models.blinkit_inventory import BlinkitInventoryData
 from ..utils.dependencies import get_current_active_user
+from ..utils.stock import VERIFY_AFTER_DAYS, latest_stock_subquery, needs_verification
+from ..utils.timeutil import today_ist
 import time as _time
 
 router = APIRouter()
@@ -56,14 +58,20 @@ async def get_inventory_stats(
                 (SELECT MAX(ReportDate)    FROM AmazonInventory) AS amz_inv_date,
                 (SELECT MAX(ReportDate)    FROM BlinkitInventory) AS blk_inv_date
         ),
+        latest_inv AS (
+            SELECT ProductId, MAX(InventoryDate) AS d FROM Inventory GROUP BY ProductId
+        ),
         inv_agg AS (
+            -- each active product's last available stock (not only the newest sheet)
             SELECT
-                COALESCE(SUM(CurrentStock), 0) AS total_inventory,
-                COALESCE(SUM(PackedQty),    0) AS packed,
-                COALESCE(SUM(UnpackedQty),  0) AS unpacked,
-                COUNT(CASE WHEN CurrentStock = 0 THEN 1 END) AS out_of_stock
-            FROM Inventory i, max_dates m
-            WHERE i.InventoryDate = m.inv_date
+                COALESCE(SUM(i.CurrentStock), 0) AS total_inventory,
+                COALESCE(SUM(i.PackedQty),    0) AS packed,
+                COALESCE(SUM(i.UnpackedQty),  0) AS unpacked,
+                COUNT(CASE WHEN i.CurrentStock = 0 THEN 1 END) AS out_of_stock,
+                COUNT(DISTINCT CASE WHEN DATEDIFF(:today, l.d) > :verify_days THEN i.ProductId END) AS needs_verification
+            FROM Inventory i
+            JOIN latest_inv l ON l.ProductId = i.ProductId AND i.InventoryDate = l.d
+            JOIN Products p ON p.Id = i.ProductId AND p.IsActive = 1
         ),
         amz_cancel AS (
             SELECT POId, MIN(CancellationDate) AS min_cancel
@@ -75,6 +83,7 @@ async def get_inventory_stats(
           inv_agg.packed,
           inv_agg.unpacked,
           inv_agg.out_of_stock,
+          inv_agg.needs_verification,
           (SELECT COUNT(*) FROM Alerts WHERE IsResolved = 0)                         AS low_stock,
           (SELECT COUNT(DISTINCT p.PONumber) FROM AmazonPO p
            LEFT JOIN amz_cancel ac ON ac.POId = p.Id
@@ -95,9 +104,11 @@ async def get_inventory_stats(
           (SELECT COALESCE(SUM(SellableOnHandUnits), 0)
            FROM AmazonInventory ai, max_dates m WHERE ai.ReportDate = m.amz_inv_date) AS amazon_inv,
           (SELECT COALESCE(SUM(BackendInvQty), 0)
-           FROM BlinkitInventory bi, max_dates m WHERE bi.ReportDate = m.blk_inv_date) AS blinkit_inv
+           FROM BlinkitInventory bi, max_dates m WHERE bi.ReportDate = m.blk_inv_date) AS blinkit_hub,
+          (SELECT COALESCE(SUM(FrontendInvQty), 0)
+           FROM BlinkitInventory bi, max_dates m WHERE bi.ReportDate = m.blk_inv_date) AS blinkit_store
         FROM inv_agg, max_dates
-    """)).fetchone()
+    """), {"today": today_ist(), "verify_days": VERIFY_AFTER_DAYS}).fetchone()
 
     result = {
         "totalSKUs":        int(row.total_skus    or 0),
@@ -112,7 +123,10 @@ async def get_inventory_stats(
         "amazonPacked": 0,
         "amazonUnpacked": 0,
         "amazonPendingPOs": int(row.amazon_pending  or 0),
-        "blinkitInventory": int(row.blinkit_inv     or 0),
+        "blinkitInventory": int(row.blinkit_hub or 0) + int(row.blinkit_store or 0),
+        "blinkitHub":       int(row.blinkit_hub   or 0),
+        "blinkitStore":     int(row.blinkit_store or 0),
+        "needsVerificationCount": int(row.needs_verification or 0),
         "blinkitPacked": 0,
         "blinkitUnpacked": 0,
         "blinkitPendingPOs":int(row.blinkit_pending or 0),
@@ -378,7 +392,8 @@ async def get_product_overview(
         blinkit_inv = (
             db.query(
                 Product.Id.label("ProductId"),
-                func.sum(BlinkitInventoryData.BackendInvQty).label("blinkit_stock"),
+                func.sum(BlinkitInventoryData.BackendInvQty).label("blinkit_hub"),
+                func.sum(BlinkitInventoryData.FrontendInvQty).label("blinkit_store"),
             )
             .join(Product, Product.BlinkitId == BlinkitInventoryData.ItemId)
             .filter(BlinkitInventoryData.ReportDate == latest_blk)
@@ -389,21 +404,15 @@ async def get_product_overview(
         blinkit_inv = (
             db.query(
                 Product.Id.label("ProductId"),
-                literal_column("0").label("blinkit_stock"),
+                literal_column("0").label("blinkit_hub"),
+                literal_column("0").label("blinkit_store"),
             )
             .filter(False)
             .subquery()
         )
 
-    # Packed / Unpacked totals from Inventory table (ASG stock only, latest date)
-    packed_sub_q = db.query(
-        Inventory.ProductId,
-        func.sum(Inventory.PackedQty).label("total_packed"),
-        func.sum(Inventory.UnpackedQty).label("total_unpacked"),
-    ).group_by(Inventory.ProductId)
-    if latest_inv:
-        packed_sub_q = packed_sub_q.filter(Inventory.InventoryDate == latest_inv)
-    packed_sub = packed_sub_q.subquery()
+    # Packed / Unpacked from the ASG sheet: each product's last available stock and its date
+    inv_sub = latest_stock_subquery(db)
 
     # Main query: active products LEFT JOIN each channel
     query = (
@@ -417,17 +426,20 @@ async def get_product_overview(
             Product.Category,
             Product.Brand,
             func.coalesce(amazon_inv.c.amazon_stock, 0).label("amazonStock"),
-            func.coalesce(blinkit_inv.c.blinkit_stock, 0).label("blinkitStock"),
+            func.coalesce(blinkit_inv.c.blinkit_hub, 0).label("blinkitHub"),
+            func.coalesce(blinkit_inv.c.blinkit_store, 0).label("blinkitStoreQty"),
             (
                 func.coalesce(amazon_inv.c.amazon_stock, 0)
-                + func.coalesce(blinkit_inv.c.blinkit_stock, 0)
+                + func.coalesce(blinkit_inv.c.blinkit_hub, 0)
+                + func.coalesce(blinkit_inv.c.blinkit_store, 0)
             ).label("totalStock"),
-            func.coalesce(packed_sub.c.total_packed, 0).label("packedQty"),
-            func.coalesce(packed_sub.c.total_unpacked, 0).label("unpackedQty"),
+            func.coalesce(inv_sub.c.packed_qty, 0).label("packedQty"),
+            func.coalesce(inv_sub.c.unpacked_qty, 0).label("unpackedQty"),
+            inv_sub.c.stock_date.label("stockDate"),
         )
         .outerjoin(amazon_inv, Product.Id == amazon_inv.c.ProductId)
         .outerjoin(blinkit_inv, Product.Id == blinkit_inv.c.ProductId)
-        .outerjoin(packed_sub, Product.Id == packed_sub.c.ProductId)
+        .outerjoin(inv_sub, Product.Id == inv_sub.c.product_id)
         .filter(Product.IsActive == True)
     )
 
@@ -474,10 +486,14 @@ async def get_product_overview(
             "category": row.Category,
             "brand": row.Brand,
             "amazonStock": int(row.amazonStock or 0),
-            "blinkitStock": int(row.blinkitStock or 0),
+            "blinkitHubStock": int(row.blinkitHub or 0),
+            "blinkitStoreStock": int(row.blinkitStoreQty or 0),
+            "blinkitStock": int(row.blinkitHub or 0) + int(row.blinkitStoreQty or 0),
             "totalStock": total_stock,
             "packedQty": int(row.packedQty or 0),
             "unpackedQty": int(row.unpackedQty or 0),
+            "stockDate": row.stockDate.isoformat() if row.stockDate else None,
+            "needsVerification": needs_verification(row.stockDate),
             "status": status,
         })
 

@@ -127,10 +127,17 @@ def read_file(contents: bytes, filename: str, skiprows: int = 0) -> pd.DataFrame
 
 
 def safe_str(val, max_len=None):
-    """Safely convert value to string, return None for NaN/empty."""
+    """Safely convert value to string, return None for NaN/empty.
+
+    Text is stored exactly as provided (accents, symbols and other scripts are kept).
+    Only control characters, the byte-order mark and zero-width characters are removed.
+    """
     if pd.isna(val) or str(val).strip() in ('', 'nan', 'UNKNOWN'):
         return None
-    s = str(val).strip()
+    s = str(val).replace('\u00a0', ' ')
+    s = re.sub(r'[\x00-\x08\x0b-\x1f\x7f\u200b-\u200f\u2028-\u202e\ufeff]', '', s).strip()
+    if not s or s in ('nan', 'UNKNOWN'):
+        return None
     if max_len:
         s = s[:max_len]
     return s

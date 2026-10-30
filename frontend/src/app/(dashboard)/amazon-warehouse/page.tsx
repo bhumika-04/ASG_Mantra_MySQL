@@ -24,6 +24,9 @@ export default function AmazonWarehousePage() {
   const [formData, setFormData] = useState({
     warehouseCode: '',
     warehouseName: '',
+    location: '',
+    address: '',
+    pincode: '',
     city: '',
     state: '',
     region: '',
@@ -69,6 +72,9 @@ export default function AmazonWarehousePage() {
         channel: 'Amazon',
         city: formData.city || undefined,
         state: formData.state,
+        location: formData.location || undefined,
+        address: formData.address || undefined,
+        pincode: formData.pincode || undefined,
         region: formData.region || undefined,
         fcType: formData.fcType || undefined,
         isActive: formData.isActive,
@@ -84,6 +90,9 @@ export default function AmazonWarehousePage() {
       setFormData({
         warehouseCode: '',
         warehouseName: '',
+        location: '',
+        address: '',
+        pincode: '',
         city: '',
         state: '',
         region: '',
@@ -203,7 +212,7 @@ export default function AmazonWarehousePage() {
                     <div className="bg-muted/50 rounded-lg p-4 mt-6">
                       <h4 className="font-medium mb-2">Expected Columns:</h4>
                       <p className="text-sm text-muted-foreground">
-                        FC Code, FC Name, City, State, Region, FC Type, Status
+                        FC Code, FC Name, City, State, Region, FC Type, Status (optional: Location, Address, Pincode)
                       </p>
                     </div>
 
@@ -476,6 +485,38 @@ export default function AmazonWarehousePage() {
                         </div>
                       </div>
 
+                      {/* Location, Pincode and Address (kept for warehouse management) */}
+                      <div className="grid grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium">Location</label>
+                          <Input
+                            type="text"
+                            placeholder="e.g., Dhateer"
+                            value={formData.location}
+                            onChange={(e) => handleInputChange('location', e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm font-medium">Pincode</label>
+                          <Input
+                            type="text"
+                            inputMode="numeric"
+                            placeholder="e.g., 121102"
+                            value={formData.pincode}
+                            onChange={(e) => handleInputChange('pincode', e.target.value)}
+                          />
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <label className="text-sm font-medium">Address</label>
+                        <Input
+                          type="text"
+                          placeholder="Full address"
+                          value={formData.address}
+                          onChange={(e) => handleInputChange('address', e.target.value)}
+                        />
+                      </div>
+
                       <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-2">
                           <label className="text-sm font-medium">Region</label>
@@ -583,6 +624,8 @@ export default function AmazonWarehousePage() {
                                   <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
                                     {warehouse.city && <span>📍 {warehouse.city}</span>}
                                     {warehouse.state && <span>{warehouse.state}</span>}
+                                    {warehouse.pincode && <span>PIN {warehouse.pincode}</span>}
+                                    {warehouse.address && <span className="basis-full">{warehouse.address}</span>}
                                     {warehouse.fcType && <span className="px-2 py-1 bg-orange-100 text-orange-700 rounded">
                                       {warehouse.fcType}
                                     </span>}

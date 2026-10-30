@@ -52,6 +52,9 @@ interface DashboardStats {
   amazonUnpacked: number;
   amazonPendingPOs: number;
   blinkitInventory: number;
+  blinkitHub?: number;
+  blinkitStore?: number;
+  needsVerificationCount?: number;
   blinkitPacked: number;
   blinkitUnpacked: number;
   blinkitPendingPOs: number;
@@ -65,6 +68,8 @@ interface LowInventoryItem {
   unpackedQty: number;
   severity: 'critical' | 'low';
   inventoryDate: string | null;
+  totalQty?: number;
+  needsVerification?: boolean;
 }
 
 interface MonthlySalesItem {
@@ -139,6 +144,9 @@ export default function DashboardPage() {
     amazonUnpacked: 0,
     amazonPendingPOs: 0,
     blinkitInventory: 0,
+    blinkitHub: 0,
+    blinkitStore: 0,
+    needsVerificationCount: 0,
     blinkitPacked: 0,
     blinkitUnpacked: 0,
     blinkitPendingPOs: 0,
@@ -282,7 +290,7 @@ export default function DashboardPage() {
             title="Blinkit Stock"
             value={stats.blinkitInventory.toLocaleString('en-IN')}
             icon={Truck}
-            description="Units at Blinkit hub (latest)"
+            description={`Hub ${(stats.blinkitHub ?? 0).toLocaleString('en-IN')} · Store ${(stats.blinkitStore ?? 0).toLocaleString('en-IN')}`}
             variant="yellow"
           />
           <StatsCard
@@ -506,6 +514,11 @@ export default function DashboardPage() {
                   <span className="text-xs font-normal text-muted-foreground">(ASG Warehouse)</span>
                 </CardTitle>
                 <div className="flex items-center gap-2">
+                  {(stats.needsVerificationCount ?? 0) > 0 && (
+                    <Badge className="bg-amber-100 text-amber-800 border border-amber-200 hover:bg-amber-100" title="Stock not updated for more than 15 days">
+                      {stats.needsVerificationCount} to verify
+                    </Badge>
+                  )}
                   {lowStockCounts.critical > 0 && (
                     <Badge className="bg-red-100 text-red-700 border border-red-200 hover:bg-red-100">
                       {lowStockCounts.critical} Critical
@@ -546,6 +559,12 @@ export default function DashboardPage() {
                           {item.productName}
                         </p>
                         <p className="text-xs text-gray-500 font-mono">{item.asgSku}</p>
+                        <p className="text-[11px] text-gray-400">
+                          {item.inventoryDate ? `Stock as of ${fmtDate(item.inventoryDate)}` : 'No stock record'}
+                          {item.needsVerification && (
+                            <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 font-medium text-amber-800">Verify</span>
+                          )}
+                        </p>
                       </div>
                       <div className="flex items-center gap-6 flex-shrink-0">
                         <div className="text-right w-16">
@@ -573,7 +592,7 @@ export default function DashboardPage() {
                   <div className="text-center py-8 text-gray-500">
                     <PackageCheck className="h-8 w-8 mx-auto mb-2 text-green-400" />
                     <p className="text-sm font-medium">All stock levels healthy</p>
-                    <p className="text-xs mt-1 text-gray-400">No low packed inventory found</p>
+                    <p className="text-xs mt-1 text-gray-400">No product is at or below the low-stock limit</p>
                   </div>
                 )}
               </div>

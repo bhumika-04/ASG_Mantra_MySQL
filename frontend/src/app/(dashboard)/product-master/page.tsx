@@ -45,7 +45,7 @@ interface UploadResult {
   message: string;
   summary: { totalRows: number; uploaded: number; skipped: number; errors: number };
   uploadedProducts: { asgSku: string; productName: string }[];
-  skippedProducts: { asgSku: string; productName: string; reason: string }[];
+  skippedProducts: { row?: number; asgSku: string; productName: string; reason: string; type?: string }[];
   errors: { row: number; error: string }[];
 }
 
@@ -529,7 +529,7 @@ export default function ProductMasterPage() {
 
                     {previewResult.valid === 0 && (
                       <p className="text-sm text-red-500">
-                        No valid rows to upload. Fix the errors above and try again.
+                        No valid rows to upload. Fix the rows marked above and try again.
                       </p>
                     )}
                   </div>
@@ -600,13 +600,13 @@ export default function ProductMasterPage() {
                       </Card>
                     )}
 
-                    {/* Skipped duplicates */}
+                    {/* Skipped rows: duplicate SKU, duplicate/invalid Amazon or Blinkit ID, missing fields */}
                     {uploadResult.skippedProducts?.length > 0 && (
                       <Card>
                         <CardHeader className="pb-2">
                           <CardTitle className="text-sm flex items-center gap-2">
                             <XCircle className="h-4 w-4 text-yellow-500" />
-                            Skipped — Duplicate ({uploadResult.skippedProducts.length})
+                            Skipped rows ({uploadResult.skippedProducts.length}) — not saved, with the reason
                           </CardTitle>
                         </CardHeader>
                         <CardContent>
@@ -614,7 +614,7 @@ export default function ProductMasterPage() {
                             {uploadResult.skippedProducts.map((p, i) => (
                               <div key={i} className="p-2 bg-yellow-50 rounded text-sm">
                                 <div className="flex items-center justify-between">
-                                  <span className="font-medium">{p.productName}</span>
+                                  <span className="font-medium">{p.row ? `Row ${p.row}: ` : ''}{p.productName || '(no name)'}</span>
                                   <span className="font-mono text-xs text-muted-foreground">{p.asgSku}</span>
                                 </div>
                                 <p className="text-xs text-muted-foreground mt-0.5">{p.reason}</p>

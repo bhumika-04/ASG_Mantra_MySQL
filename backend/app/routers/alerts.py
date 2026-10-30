@@ -17,7 +17,7 @@ from app.models.inventory import Inventory
 from app.utils.dependencies import get_current_user
 from app.utils.timeutil import now_ist
 
-LOW_STOCK_THRESHOLD = 50  # Products with total stock below this are "Warning"
+from app.utils.stock import LOW_STOCK_THRESHOLD  # total stock (Packed + Unpacked) at or below this is low
 
 
 class ResolveAlertRequest(BaseModel):
@@ -292,7 +292,7 @@ async def sync_alerts(
                 Channel=None,
                 AlertType="Out of Stock",
                 Severity="High",
-                Message=f"{product.ProductName} ({product.AsgSku or 'N/A'}) has 0 stock across all channels",
+                Message=f"{product.ProductName} ({product.AsgSku or 'N/A'}) has 0 units in the ASG warehouse",
                 IsResolved=False,
             )
             db.add(alert)

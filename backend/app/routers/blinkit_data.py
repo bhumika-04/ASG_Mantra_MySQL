@@ -230,14 +230,17 @@ def read_file(contents: bytes, filename: str, skiprows: int = 0) -> pd.DataFrame
 
 
 def safe_str(val, max_len=None):
-    """Safely convert value to string, return None for NaN/empty."""
+    """Safely convert value to string, return None for NaN/empty.
+
+    Text is stored exactly as provided, including accents, symbols (₹, –, é) and other scripts.
+    Only invisible junk is removed: control characters, the byte-order mark and zero-width
+    characters. A non-breaking space becomes a normal space.
+    """
     if pd.isna(val) or str(val).strip() in ('', 'nan', 'UNKNOWN'):
         return None
-    s = str(val).strip()
-    # Strip ALL non-printable/non-ASCII chars (BOM, NBSP, zero-width, etc.)
-    # MSSQL VARCHAR columns store these as '?'
-    s = re.sub(r'[^\x20-\x7E]', '', s).strip()
-    if not s or s in ('', 'nan', 'UNKNOWN'):
+    s = str(val).replace('\u00a0', ' ')
+    s = re.sub(r'[\x00-\x08\x0b-\x1f\x7f\u200b-\u200f\u2028-\u202e\ufeff]', '', s).strip()
+    if not s or s in ('nan', 'UNKNOWN'):
         return None
     if max_len:
         s = s[:max_len]

@@ -8,7 +8,8 @@ from sqlalchemy import or_, func
 from typing import Optional, List
 import pandas as pd
 import io
-from decimal import Decimal
+import re
+from decimal import Decimal, InvalidOperation
 
 from app.database import get_db
 from app.models.user import User
@@ -31,6 +32,39 @@ def _norm_identifier(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
     return value.strip() or None
+
+
+_ASIN_RE = re.compile(r'^[A-Z0-9]{10}$')
+_BLINKIT_RE = re.compile(r'^\d{5,12}$')
+
+
+def _id_text(value) -> Optional[str]:
+    """Channel ID as clean text. Blank -> None. A spreadsheet number such as 10012345.0 -> '10012345'."""
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return None
+    t = str(value).strip()
+    if t == '' or t.lower() == 'nan':
+        return None
+    if re.fullmatch(r'\d+\.0+', t):
+        t = t.split('.')[0]
+    return t
+
+
+def _id_problem(amazon_id: Optional[str], blinkit_id: Optional[str]) -> Optional[str]:
+    """Format problem with a channel ID, or None."""
+    if amazon_id and not _ASIN_RE.match(amazon_id):
+        return f"Amazon ID '{amazon_id}' is not a valid ASIN (10 letters/digits)"
+    if blinkit_id and not _BLINKIT_RE.match(blinkit_id):
+        return f"Blinkit ID '{blinkit_id}' is not valid (digits only)"
+    return None
+
+
+def _id_owner(db: Session, column, value: str, exclude_id: Optional[int] = None):
+    """Product that already owns this Amazon/Blinkit ID, or None."""
+    q = db.query(Product).filter(column == value)
+    if exclude_id is not None:
+        q = q.filter(Product.Id != exclude_id)
+    return q.first()
 
 
 @router.get("/categories/list")
@@ -221,12 +255,26 @@ async def create_product(
     if existing:
         raise HTTPException(status_code=400, detail="Product with this ASG SKU already exists")
 
+    amazon_id = _id_text(product_data.amazonId)
+    blinkit_id = _id_text(product_data.blinkitId)
+    problem = _id_problem(amazon_id, blinkit_id)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+    if amazon_id:
+        owner = _id_owner(db, Product.AmazonId, amazon_id)
+        if owner:
+            raise HTTPException(status_code=400, detail=f"Amazon ID {amazon_id} already belongs to product {owner.AsgSku}")
+    if blinkit_id:
+        owner = _id_owner(db, Product.BlinkitId, blinkit_id)
+        if owner:
+            raise HTTPException(status_code=400, detail=f"Blinkit ID {blinkit_id} already belongs to product {owner.AsgSku}")
+
     # Create new product
     new_product = Product(
         ProductName=product_data.productName,
         AsgSku=product_data.asgSku,
-        AmazonId=_norm_identifier(product_data.amazonId),
-        BlinkitId=_norm_identifier(product_data.blinkitId),
+        AmazonId=amazon_id,
+        BlinkitId=blinkit_id,
         Gs1=product_data.gs1,
         Category=product_data.category,
         Brand=product_data.brand,
@@ -292,10 +340,26 @@ async def update_product(
         product.AsgSku = product_data.asgSku
 
     if product_data.amazonId is not None:
-        product.AmazonId = _norm_identifier(product_data.amazonId)
+        new_amazon = _id_text(product_data.amazonId)
+        problem = _id_problem(new_amazon, None)
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+        if new_amazon:
+            owner = _id_owner(db, Product.AmazonId, new_amazon, exclude_id=product_id)
+            if owner:
+                raise HTTPException(status_code=400, detail=f"Amazon ID {new_amazon} already belongs to product {owner.AsgSku}")
+        product.AmazonId = new_amazon
 
     if product_data.blinkitId is not None:
-        product.BlinkitId = _norm_identifier(product_data.blinkitId)
+        new_blinkit = _id_text(product_data.blinkitId)
+        problem = _id_problem(None, new_blinkit)
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+        if new_blinkit:
+            owner = _id_owner(db, Product.BlinkitId, new_blinkit, exclude_id=product_id)
+            if owner:
+                raise HTTPException(status_code=400, detail=f"Blinkit ID {new_blinkit} already belongs to product {owner.AsgSku}")
+        product.BlinkitId = new_blinkit
 
     if product_data.category is not None:
         product.Category = product_data.category
@@ -512,6 +576,122 @@ async def link_amazon_product(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+_COLUMN_MAPPING = {
+    'product name': 'productName', 'productname': 'productName', 'product_name': 'productName', 'name': 'productName',
+    'asg sku': 'asgSku', 'asgsku': 'asgSku', 'asg_sku': 'asgSku', 'asg-sku': 'asgSku', 'asg sku id': 'asgSku',
+    'asg-sku-id': 'asgSku', 'asg_sku_id': 'asgSku', 'sku': 'asgSku',
+    'amazon id': 'amazonId', 'amazonid': 'amazonId', 'amazon_id': 'amazonId', 'amazon asin': 'amazonId', 'asin': 'amazonId',
+    'blinkit id': 'blinkitId', 'blinkitid': 'blinkitId', 'blinkit_id': 'blinkitId', 'blinkit sku': 'blinkitId',
+    'blinkit sku id': 'blinkitId', 'blinkit_sku_id': 'blinkitId',
+    'gs1': 'gs1', 'gs-1': 'gs1', 'gs1 code': 'gs1', 'gs-1 code': 'gs1', 'gs1_code': 'gs1',
+    'category': 'category', 'brand': 'brand',
+    'unit price': 'unitPrice', 'unitprice': 'unitPrice', 'unit_price': 'unitPrice', 'price': 'unitPrice', 'mrp': 'unitPrice',
+    'unit weight': 'unitWeight', 'unitweight': 'unitWeight', 'unit_weight': 'unitWeight', 'weight': 'unitWeight',
+    'pack size': 'packSize', 'packsize': 'packSize', 'pack_size': 'packSize', 'size': 'packSize',
+}
+
+
+def _read_products_file(contents: bytes, ext: str) -> pd.DataFrame:
+    """Read the file with every cell as text, so IDs are never turned into numbers (10012345.0)."""
+    if ext == 'csv':
+        df = pd.read_csv(io.BytesIO(contents), dtype=str)
+    else:
+        df = pd.read_excel(io.BytesIO(contents), dtype=str)
+    df = df.rename(columns={c: _COLUMN_MAPPING.get(str(c).strip().lower(), c) for c in df.columns})
+    return df
+
+
+def _text(value) -> Optional[str]:
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return None
+    t = str(value).strip()
+    return None if t == '' or t.lower() == 'nan' else t
+
+
+def _validate_products(df: pd.DataFrame, db: Session) -> list:
+    """Check every row. Returns one dict per row with status 'valid' | 'duplicate' | 'error' and a reason.
+
+    Skipped (never saved): a missing name or SKU, a SKU already in the database or earlier in the
+    file, an Amazon/Blinkit ID that is malformed or already belongs to another product or an earlier
+    row, and a bad price or pack size. Valid rows are not affected by the skipped ones.
+    """
+    existing_skus = {(p[0] or '').strip().lower() for p in db.query(Product.AsgSku).all()}
+    amazon_owner = {p[0]: p[1] for p in db.query(Product.AmazonId, Product.AsgSku).filter(Product.AmazonId.isnot(None)).all()}
+    blinkit_owner = {p[0]: p[1] for p in db.query(Product.BlinkitId, Product.AsgSku).filter(Product.BlinkitId.isnot(None)).all()}
+    seen_sku, seen_amz, seen_blk = {}, {}, {}
+    rows = []
+
+    for index, row in df.iterrows():
+        n = index + 2  # header row + 1-based
+        name, sku = _text(row.get('productName')), _text(row.get('asgSku'))
+        amz, blk = _id_text(row.get('amazonId')), _id_text(row.get('blinkitId'))
+        out = {
+            'rowNumber': n, 'status': 'valid', 'reason': None,
+            'productName': name or '', 'asgSku': sku or '', 'amazonId': amz, 'blinkitId': blk,
+            'gs1': _text(row.get('gs1')), 'brand': _text(row.get('brand')), 'category': _text(row.get('category')),
+            'unitPrice': None, 'unitWeight': _text(row.get('unitWeight')), 'packSize': None,
+        }
+
+        def fail(status, reason):
+            out['status'], out['reason'] = status, reason
+            rows.append(out)
+
+        if not name and not sku:
+            fail('error', 'Missing both Product Name and ASG SKU'); continue
+        if not name:
+            fail('error', 'Missing Product Name (required)'); continue
+        if not sku:
+            fail('error', 'Missing ASG SKU (required)'); continue
+        key = sku.lower()
+        if key in existing_skus:
+            fail('duplicate', f'ASG SKU "{sku}" already exists in the database'); continue
+        if key in seen_sku:
+            fail('duplicate', f'ASG SKU "{sku}" is repeated in this file (first on row {seen_sku[key]})'); continue
+        problem = _id_problem(amz, blk)
+        if problem:
+            fail('error', problem); continue
+        if amz and amz in amazon_owner:
+            fail('error', f'Amazon ID {amz} already belongs to product {amazon_owner[amz]}'); continue
+        if amz and amz in seen_amz:
+            fail('error', f'Amazon ID {amz} is repeated in this file (first on row {seen_amz[amz]})'); continue
+        if blk and blk in blinkit_owner:
+            fail('error', f'Blinkit ID {blk} already belongs to product {blinkit_owner[blk]}'); continue
+        if blk and blk in seen_blk:
+            fail('error', f'Blinkit ID {blk} is repeated in this file (first on row {seen_blk[blk]})'); continue
+        price, pack = _text(row.get('unitPrice')), _text(row.get('packSize'))
+        if price is not None:
+            try:
+                out['unitPrice'] = Decimal(price.replace(',', ''))
+                if out['unitPrice'] < 0:
+                    raise InvalidOperation
+            except InvalidOperation:
+                fail('error', f'Unit price "{price}" is not a valid amount'); continue
+        if pack is not None:
+            try:
+                out['packSize'] = int(float(pack))
+                if out['packSize'] < 1:
+                    raise ValueError
+            except ValueError:
+                fail('error', f'Pack size "{pack}" is not a whole number of 1 or more'); continue
+
+        seen_sku[key] = n
+        if amz:
+            seen_amz[amz] = n
+        if blk:
+            seen_blk[blk] = n
+        rows.append(out)
+    return rows
+
+
+def _check_products_upload(file: UploadFile) -> str:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file provided")
+    ext = file.filename.split('.')[-1].lower()
+    if ext not in ('csv', 'xlsx', 'xls'):
+        raise HTTPException(status_code=400, detail="Invalid file type. Please upload CSV or Excel file")
+    return ext
+
+
 @router.post("/upload")
 async def upload_products(
     file: UploadFile = File(...),
@@ -519,177 +699,35 @@ async def upload_products(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Upload products from Excel/CSV file with duplicate checking
-    Only uploads products that don't exist based on ASG SKU
-    Admin and Manager only
+    Upload products from Excel/CSV. Valid rows are saved; rows that are skipped (duplicate SKU,
+    duplicate or malformed Amazon/Blinkit ID, missing fields, bad price) are listed with the
+    reason. Admin and Manager only.
     """
-    # Check permissions
     if current_user.Role not in ["Admin", "Manager"]:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    # Validate file type
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
-
-    file_extension = file.filename.split('.')[-1].lower()
-    if file_extension not in ['csv', 'xlsx', 'xls']:
-        raise HTTPException(status_code=400, detail="Invalid file type. Please upload CSV or Excel file")
+    ext = _check_products_upload(file)
 
     try:
-        # Read file content
-        contents = await file.read()
-
-        # Parse file based on type
-        if file_extension == 'csv':
-            df = pd.read_csv(io.BytesIO(contents))
-        else:
-            df = pd.read_excel(io.BytesIO(contents))
-
-        # Normalize column names - handle common variations
-        column_mapping = {
-            # Product Name variations
-            'product name': 'productName',
-            'productname': 'productName',
-            'product_name': 'productName',
-            'name': 'productName',
-
-            # ASG SKU variations
-            'asg sku': 'asgSku',
-            'asgsku': 'asgSku',
-            'asg_sku': 'asgSku',
-            'asg-sku': 'asgSku',
-            'asg sku id': 'asgSku',
-            'asg-sku-id': 'asgSku',
-            'asg_sku_id': 'asgSku',
-            'sku': 'asgSku',
-
-            # Amazon ID variations
-            'amazon id': 'amazonId',
-            'amazonid': 'amazonId',
-            'amazon_id': 'amazonId',
-            'amazon asin': 'amazonId',
-            'asin': 'amazonId',
-
-            # Blinkit ID variations
-            'blinkit id': 'blinkitId',
-            'blinkitid': 'blinkitId',
-            'blinkit_id': 'blinkitId',
-            'blinkit sku': 'blinkitId',
-            'blinkit sku id': 'blinkitId',
-            'blinkit_sku_id': 'blinkitId',
-
-            # GS1 variations
-            'gs1': 'gs1',
-            'gs-1': 'gs1',
-            'gs1 code': 'gs1',
-            'gs-1 code': 'gs1',
-            'gs1_code': 'gs1',
-
-            # Category variations
-            'category': 'category',
-
-            # Brand variations
-            'brand': 'brand',
-
-            # Unit Price variations
-            'unit price': 'unitPrice',
-            'unitprice': 'unitPrice',
-            'unit_price': 'unitPrice',
-            'price': 'unitPrice',
-            'mrp': 'unitPrice',
-
-            # Unit Weight variations
-            'unit weight': 'unitWeight',
-            'unitweight': 'unitWeight',
-            'unit_weight': 'unitWeight',
-            'weight': 'unitWeight',
-
-            # Pack Size variations
-            'pack size': 'packSize',
-            'packsize': 'packSize',
-            'pack_size': 'packSize',
-            'size': 'packSize',
-        }
-
-        # Create a mapping of current columns to standardized names
-        new_columns = {}
-        for col in df.columns:
-            col_lower = str(col).strip().lower()
-            if col_lower in column_mapping:
-                new_columns[col] = column_mapping[col_lower]
-            else:
-                new_columns[col] = col
-
-        # Rename columns
-        df = df.rename(columns=new_columns)
-
-        # Validate required columns
-        required_columns = ['productName', 'asgSku']
-        missing_columns = [col for col in required_columns if col not in df.columns]
-
-        if missing_columns:
+        df = _read_products_file(await file.read(), ext)
+        missing = [c for c in ('productName', 'asgSku') if c not in df.columns]
+        if missing:
             raise HTTPException(
                 status_code=400,
-                detail=f"Missing required columns: {', '.join(missing_columns)}. Your file has columns: {', '.join(df.columns.tolist())}"
+                detail=f"Missing required columns: {', '.join(missing)}. Your file has columns: {', '.join(map(str, df.columns))}"
             )
-
-        total_rows = len(df)
-        uploaded_products = []
-        skipped_products = []
-        errors = []
-
-        # Process each row
-        for index, row in df.iterrows():
-            try:
-                # Check if ASG SKU is provided
-                if pd.isna(row.get('asgSku')) or str(row.get('asgSku')).strip() == '':
-                    errors.append({
-                        'row': index + 2,  # +2 because Excel rows start at 1 and we have header
-                        'error': 'Missing ASG SKU'
-                    })
-                    continue
-
-                asg_sku = str(row['asgSku']).strip()
-
-                # Check if product already exists
-                existing = db.query(Product).filter(Product.AsgSku == asg_sku).first()
-
-                if existing:
-                    skipped_products.append({
-                        'asgSku': asg_sku,
-                        'productName': str(row.get('productName', '')),
-                        'reason': 'Already exists in database'
-                    })
-                    continue
-
-                # Create new product
-                new_product = Product(
-                    ProductName=str(row.get('productName', '')).strip() if not pd.isna(row.get('productName')) else '',
-                    AsgSku=asg_sku,
-                    AmazonId=str(row.get('amazonId', '')).strip() if not pd.isna(row.get('amazonId')) else None,
-                    BlinkitId=str(row.get('blinkitId', '')).strip() if not pd.isna(row.get('blinkitId')) else None,
-                    Gs1=str(row.get('gs1', '')).strip() if not pd.isna(row.get('gs1')) else None,
-                    Category=str(row.get('category', '')).strip() if not pd.isna(row.get('category')) else None,
-                    Brand=str(row.get('brand', '')).strip() if not pd.isna(row.get('brand')) else None,
-                    UnitPrice=Decimal(str(row.get('unitPrice', 0))) if not pd.isna(row.get('unitPrice')) and row.get('unitPrice') != '' else None,
-                    UnitWeight=str(row.get('unitWeight', '')).strip() if not pd.isna(row.get('unitWeight')) else None,
-                    PackSize=int(row.get('packSize')) if not pd.isna(row.get('packSize')) and str(row.get('packSize')).strip() != '' else None,
-                    IsActive=True
-                )
-
-                db.add(new_product)
-                uploaded_products.append({
-                    'asgSku': asg_sku,
-                    'productName': new_product.ProductName
-                })
-
-            except Exception as e:
-                errors.append({
-                    'row': index + 2,
-                    'error': str(e)
-                })
-
-        # Commit all new products
+        rows = _validate_products(df, db)
+        uploaded, skipped = [], []
+        for r in rows:
+            if r['status'] == 'valid':
+                db.add(Product(
+                    ProductName=r['productName'], AsgSku=r['asgSku'], AmazonId=r['amazonId'], BlinkitId=r['blinkitId'],
+                    Gs1=r['gs1'], Category=r['category'], Brand=r['brand'], UnitPrice=r['unitPrice'],
+                    UnitWeight=r['unitWeight'], PackSize=r['packSize'], IsActive=True,
+                ))
+                uploaded.append({'asgSku': r['asgSku'], 'productName': r['productName']})
+            else:
+                skipped.append({'row': r['rowNumber'], 'asgSku': r['asgSku'], 'productName': r['productName'],
+                                'reason': r['reason'], 'type': r['status']})
         try:
             db.commit()
         except Exception as e:
@@ -698,21 +736,16 @@ async def upload_products(
 
         return {
             "success": True,
-            "message": f"Upload completed. {len(uploaded_products)} products added, {len(skipped_products)} skipped",
-            "summary": {
-                "totalRows": total_rows,
-                "uploaded": len(uploaded_products),
-                "skipped": len(skipped_products),
-                "errors": len(errors)
-            },
-            "uploadedProducts": uploaded_products,
-            "skippedProducts": skipped_products,
-            "errors": errors
+            "message": f"Upload completed. {len(uploaded)} products added, {len(skipped)} skipped",
+            "summary": {"totalRows": len(df), "uploaded": len(uploaded), "skipped": len(skipped), "errors": 0},
+            "uploadedProducts": uploaded,
+            "skippedProducts": skipped,
+            "errors": [],
         }
-
     except HTTPException:
         raise
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
 
 
@@ -723,155 +756,34 @@ async def preview_products_upload(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Preview what a product CSV/Excel upload would do — no DB writes.
-    Returns per-row status: valid | duplicate | error
-    Validates required fields: productName, asgSku
+    Preview what a product CSV/Excel upload would do — no DB writes. Uses exactly the same checks
+    as the upload, so every row marked valid will be saved and every other row is skipped with its reason.
     """
     if current_user.Role not in ["Admin", "Manager"]:
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
-
-    file_extension = file.filename.split('.')[-1].lower()
-    if file_extension not in ['csv', 'xlsx', 'xls']:
-        raise HTTPException(status_code=400, detail="Invalid file type. Please upload CSV or Excel file")
+    ext = _check_products_upload(file)
 
     try:
-        contents = await file.read()
-
-        if file_extension == 'csv':
-            df = pd.read_csv(io.BytesIO(contents))
-        else:
-            df = pd.read_excel(io.BytesIO(contents))
-
-        # Same column normalization as upload
-        column_mapping = {
-            'product name': 'productName', 'productname': 'productName',
-            'product_name': 'productName', 'name': 'productName',
-            'asg sku': 'asgSku', 'asgsku': 'asgSku', 'asg_sku': 'asgSku',
-            'asg-sku': 'asgSku', 'asg sku id': 'asgSku', 'asg-sku-id': 'asgSku',
-            'asg_sku_id': 'asgSku', 'sku': 'asgSku',
-            'amazon id': 'amazonId', 'amazonid': 'amazonId', 'amazon_id': 'amazonId',
-            'amazon asin': 'amazonId', 'asin': 'amazonId',
-            'blinkit id': 'blinkitId', 'blinkitid': 'blinkitId', 'blinkit_id': 'blinkitId',
-            'blinkit sku': 'blinkitId', 'blinkit sku id': 'blinkitId', 'blinkit_sku_id': 'blinkitId',
-            'gs1': 'gs1', 'gs-1': 'gs1', 'gs1 code': 'gs1', 'gs-1 code': 'gs1', 'gs1_code': 'gs1',
-            'category': 'category', 'brand': 'brand',
-            'unit price': 'unitPrice', 'unitprice': 'unitPrice', 'unit_price': 'unitPrice',
-            'price': 'unitPrice', 'mrp': 'unitPrice',
-            'unit weight': 'unitWeight', 'unitweight': 'unitWeight', 'unit_weight': 'unitWeight',
-            'weight': 'unitWeight',
-            'pack size': 'packSize', 'packsize': 'packSize', 'pack_size': 'packSize', 'size': 'packSize',
-        }
-        new_columns = {}
-        for col in df.columns:
-            col_lower = str(col).strip().lower()
-            new_columns[col] = column_mapping.get(col_lower, col)
-        df = df.rename(columns=new_columns)
-
-        # Check required columns exist in file
+        df = _read_products_file(await file.read(), ext)
         if 'productName' not in df.columns and 'asgSku' not in df.columns:
             raise HTTPException(
                 status_code=400,
-                detail=f"Missing required columns: productName, asgSku. File has: {', '.join(df.columns.tolist())}"
+                detail=f"Missing required columns: productName, asgSku. File has: {', '.join(map(str, df.columns))}"
             )
-
-        rows = []
-        valid_count = 0
-        duplicate_count = 0
-        error_count = 0
-
-        for index, row in df.iterrows():
-            row_number = index + 2  # +2: header row + 1-based
-
-            product_name = str(row.get('productName', '')).strip() if not pd.isna(row.get('productName', '')) else ''
-            asg_sku = str(row.get('asgSku', '')).strip() if not pd.isna(row.get('asgSku', '')) else ''
-
-            # Validate required fields
-            if not product_name and not asg_sku:
-                error_count += 1
-                rows.append({
-                    'rowNumber': row_number,
-                    'status': 'error',
-                    'reason': 'Missing both Product Name and ASG SKU',
-                    'productName': '', 'asgSku': '', 'amazonId': None,
-                    'blinkitId': None, 'gs1': None, 'brand': None,
-                    'category': None, 'unitPrice': None, 'unitWeight': None, 'packSize': None,
-                })
-                continue
-
-            if not product_name:
-                error_count += 1
-                rows.append({
-                    'rowNumber': row_number,
-                    'status': 'error',
-                    'reason': 'Missing Product Name (required)',
-                    'productName': '', 'asgSku': asg_sku, 'amazonId': None,
-                    'blinkitId': None, 'gs1': None, 'brand': None,
-                    'category': None, 'unitPrice': None, 'unitWeight': None, 'packSize': None,
-                })
-                continue
-
-            if not asg_sku:
-                error_count += 1
-                rows.append({
-                    'rowNumber': row_number,
-                    'status': 'error',
-                    'reason': 'Missing ASG SKU (required)',
-                    'productName': product_name, 'asgSku': '', 'amazonId': None,
-                    'blinkitId': None, 'gs1': None, 'brand': None,
-                    'category': None, 'unitPrice': None, 'unitWeight': None, 'packSize': None,
-                })
-                continue
-
-            # Check duplicate in DB
-            existing = db.query(Product).filter(Product.AsgSku == asg_sku).first()
-            if existing:
-                duplicate_count += 1
-                rows.append({
-                    'rowNumber': row_number,
-                    'status': 'duplicate',
-                    'reason': f'ASG SKU "{asg_sku}" already exists in database',
-                    'productName': product_name,
-                    'asgSku': asg_sku,
-                    'amazonId': str(row.get('amazonId', '')).strip() if not pd.isna(row.get('amazonId', '')) else None,
-                    'blinkitId': str(row.get('blinkitId', '')).strip() if not pd.isna(row.get('blinkitId', '')) else None,
-                    'gs1': str(row.get('gs1', '')).strip() if not pd.isna(row.get('gs1', '')) else None,
-                    'brand': str(row.get('brand', '')).strip() if not pd.isna(row.get('brand', '')) else None,
-                    'category': str(row.get('category', '')).strip() if not pd.isna(row.get('category', '')) else None,
-                    'unitPrice': float(row.get('unitPrice')) if not pd.isna(row.get('unitPrice', float('nan'))) else None,
-                    'unitWeight': str(row.get('unitWeight', '')).strip() if not pd.isna(row.get('unitWeight', '')) else None,
-                    'packSize': int(row.get('packSize')) if not pd.isna(row.get('packSize', float('nan'))) else None,
-                })
-                continue
-
-            valid_count += 1
-            rows.append({
-                'rowNumber': row_number,
-                'status': 'valid',
-                'reason': None,
-                'productName': product_name,
-                'asgSku': asg_sku,
-                'amazonId': str(row.get('amazonId', '')).strip() if not pd.isna(row.get('amazonId', '')) else None,
-                'blinkitId': str(row.get('blinkitId', '')).strip() if not pd.isna(row.get('blinkitId', '')) else None,
-                'gs1': str(row.get('gs1', '')).strip() if not pd.isna(row.get('gs1', '')) else None,
-                'brand': str(row.get('brand', '')).strip() if not pd.isna(row.get('brand', '')) else None,
-                'category': str(row.get('category', '')).strip() if not pd.isna(row.get('category', '')) else None,
-                'unitPrice': float(row.get('unitPrice')) if not pd.isna(row.get('unitPrice', float('nan'))) else None,
-                'unitWeight': str(row.get('unitWeight', '')).strip() if not pd.isna(row.get('unitWeight', '')) else None,
-                'packSize': int(row.get('packSize')) if not pd.isna(row.get('packSize', float('nan'))) else None,
-            })
-
+        for need in ('productName', 'asgSku'):
+            if need not in df.columns:
+                df[need] = None
+        rows = _validate_products(df, db)
+        for r in rows:
+            r['unitPrice'] = float(r['unitPrice']) if r['unitPrice'] is not None else None
         return {
             "success": True,
             "totalRows": len(df),
-            "valid": valid_count,
-            "duplicates": duplicate_count,
-            "errors": error_count,
+            "valid": sum(1 for r in rows if r['status'] == 'valid'),
+            "duplicates": sum(1 for r in rows if r['status'] == 'duplicate'),
+            "errors": sum(1 for r in rows if r['status'] == 'error'),
             "rows": rows,
         }
-
     except HTTPException:
         raise
     except Exception as e:
