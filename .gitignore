@@ -2,7 +2,6 @@
 # Excluded folders (per policy)
 # ===========================
 /Data/
-/database/
 /docs/
 
 # ===========================
