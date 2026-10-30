@@ -1,14 +1,12 @@
-'use client';
+﻿'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import { fmtDate, fmtDayMonth, fmtMonthYear } from '@/lib/format';
+import { useFilter, computeDateRange, FilterMode } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
-import { DataGrid, GridColumn, useDataGrid, ViewOptionsButton } from '@/components/ui/data-grid';
-import { FilterBar } from '@/components/ui/filter-bar';
-import { exportToCSV } from '@/lib/export';
 import {
   Package,
   PackageCheck,
@@ -16,13 +14,13 @@ import {
   ClipboardList,
   AlertTriangle,
   ArrowRight,
-  Download,
-  Search,
+  ShoppingCart,
+  Truck,
+  XCircle,
 } from 'lucide-react';
 import {
   PieChart,
   Pie,
-  Cell,
   BarChart,
   Bar,
   AreaChart,
@@ -36,7 +34,6 @@ import {
 } from 'recharts';
 import Link from 'next/link';
 import { api } from '@/lib/api';
-import { FilterPanel, FilterValues, DEFAULT_FILTER_VALUES } from '@/components/ui/filter-panel';
 
 // Dashboard is INVENTORY-focused, NOT sales-focused
 // Sales metrics belong in Sales Overview page
@@ -55,6 +52,9 @@ interface DashboardStats {
   amazonUnpacked: number;
   amazonPendingPOs: number;
   blinkitInventory: number;
+  blinkitHub?: number;
+  blinkitStore?: number;
+  needsVerificationCount?: number;
   blinkitPacked: number;
   blinkitUnpacked: number;
   blinkitPendingPOs: number;
@@ -64,9 +64,12 @@ interface LowInventoryItem {
   id: number;
   productName: string;
   asgSku: string;
-  channel: string;
-  currentStock: number;
-  toPackQty: number;
+  packedQty: number;
+  unpackedQty: number;
+  severity: 'critical' | 'low';
+  inventoryDate: string | null;
+  totalQty?: number;
+  needsVerification?: boolean;
 }
 
 interface MonthlySalesItem {
@@ -77,6 +80,7 @@ interface MonthlySalesItem {
 
 interface TopProduct {
   name: string;
+  sku: string;
   channel: string;
   revenue: number;
   quantity: number;
@@ -85,40 +89,46 @@ interface TopProduct {
 interface ChartData {
   monthly_sales: MonthlySalesItem[];
   top_products: TopProduct[];
+  granularity: 'daily' | 'weekly' | 'monthly';
 }
 
-interface ProductOverviewItem {
-  id: number;
-  productName: string;
-  asgSku: string;
-  amazonId: string | null;
-  blinkitId: string | null;
-  amazonStock: number;
-  blinkitStock: number;
-  totalStock: number;
-  packedQty: number;
-  unpackedQty: number;
-  status: string;
+
+function stripBrand(name: string): string {
+  return name
+    .replace(/^organix\s+mantra\s*/i, '')
+    .replace(/^organic\s+mantra\s*/i, '')
+    .trim();
 }
 
-const TIME_OPTIONS = [
-  { label: '3 Months', value: '3months' },
-  { label: '6 Months', value: '6months' },
-  { label: '1 Year', value: '1year' },
-  { label: 'All Time', value: 'all' },
-];
+function formatPeriodLabel(p: string, granularity: 'daily' | 'weekly' | 'monthly'): string {
+  if ((granularity === 'daily' || granularity === 'weekly') && p.length === 10) {
+    return fmtDayMonth(p);
+  }
+  return fmtMonthYear(p);
+}
 
-function filterMonthly(data: any[], period: string) {
-  if (period === 'all') return data;
-  const n = period === '3months' ? 3 : period === '6months' ? 6 : 12;
-  return data.slice(-n);
+function fmtRangeDate(iso: string): string {
+  return fmtDate(iso);
 }
 
 export default function DashboardPage() {
+  const { filterMode, customStart, customEnd, channel } = useFilter();
+
+  const dateRangeLabel = (() => {
+    if (filterMode === 'all') return null;
+    const { start_date, end_date } = computeDateRange(filterMode as FilterMode, customStart, customEnd);
+    if (start_date && end_date) return `${fmtRangeDate(start_date)} – ${fmtRangeDate(end_date)}`;
+    if (start_date) return `From ${fmtRangeDate(start_date)}`;
+    return null;
+  })();
+
   const [topProductsChannel, setTopProductsChannel] = useState('all');
-  const [chart1Period, setChart1Period] = useState('6months');
-  const [chart2Period, setChart2Period] = useState('6months');
-  const [chart3Period, setChart3Period] = useState('6months');
+
+  // Sync top-products channel selector to global channel filter
+  useEffect(() => {
+    setTopProductsChannel(channel === 'all' ? 'all' : channel);
+  }, [channel]);
+  const [isChartLoading, setIsChartLoading] = useState(true);
   const [isLoading, setIsLoading] = useState(true);
   const [stats, setStats] = useState<DashboardStats>({
     totalSKUs: 0,
@@ -134,196 +144,81 @@ export default function DashboardPage() {
     amazonUnpacked: 0,
     amazonPendingPOs: 0,
     blinkitInventory: 0,
+    blinkitHub: 0,
+    blinkitStore: 0,
+    needsVerificationCount: 0,
     blinkitPacked: 0,
     blinkitUnpacked: 0,
     blinkitPendingPOs: 0,
   });
   const [lowInventoryItems, setLowInventoryItems] = useState<LowInventoryItem[]>([]);
-  const [chartData, setChartData] = useState<ChartData>({ monthly_sales: [], top_products: [] });
-  const [productOverview, setProductOverview] = useState<ProductOverviewItem[]>([]);
-  const [productSearch, setProductSearch] = useState('');
-  const [productChannel, setProductChannel] = useState('all');
+  const [lowStockCounts, setLowStockCounts] = useState({ critical: 0, low: 0 });
+  const [chartData, setChartData] = useState<ChartData>({ monthly_sales: [], top_products: [], granularity: 'monthly' });
 
-  // Fetch dashboard data from API
+  const isFirstChartRender = useRef(true);
+
+  // Fetch stats, low stock, AND charts together on mount — single parallel burst
   useEffect(() => {
-    const fetchDashboardData = async () => {
+    const fetchInitial = async () => {
       try {
-        // Fetch inventory-focused stats using centralized API client
-        const statsData: any = await api.dashboard.getInventoryStats();
+        const { start_date, end_date } = computeDateRange(filterMode, customStart, customEnd);
+        const [statsData, lowStockData, charts]: any[] = await Promise.all([
+          api.dashboard.getInventoryStats(),
+          api.inventory.getLowStock({ limit: 10 }),
+          api.dashboard.getCharts({ start_date, end_date }),
+        ]);
         setStats(statsData);
-
-        // Fetch low inventory items
-        const lowStockData: any = await api.inventory.getLowStock({ limit: 5 });
         setLowInventoryItems(lowStockData.items || []);
-
-        // Fetch chart data
-        const charts: any = await api.dashboard.getCharts();
+        setLowStockCounts({
+          critical: lowStockData.critical_count || 0,
+          low: lowStockData.low_count || 0,
+        });
         setChartData({
           monthly_sales: charts.monthly_sales || [],
-          top_products: charts.top_products || []
+          top_products: charts.top_products || [],
+          granularity: charts.granularity || 'monthly',
         });
-
-        // Fetch product overview (all products for mapping view)
-        const productData: any = await api.dashboard.getProductOverview({ page_size: 100 });
-        setProductOverview(productData.items || []);
-
       } catch (error) {
         console.error('Error fetching dashboard data:', error);
       } finally {
         setIsLoading(false);
+        setIsChartLoading(false);
       }
     };
+    fetchInitial();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-    fetchDashboardData();
-  }, []);
-
-  // Filter product overview client-side
-  const filteredProductOverview = useMemo(() => {
-    let filtered = [...productOverview];
-
-    if (productSearch) {
-      const term = productSearch.toLowerCase();
-      filtered = filtered.filter(p =>
-        (p.productName || '').toLowerCase().includes(term) ||
-        (p.asgSku || '').toLowerCase().includes(term) ||
-        (p.amazonId || '').toLowerCase().includes(term) ||
-        (p.blinkitId || '').toLowerCase().includes(term)
-      );
+  // Re-fetch charts on filter change (skip first render — handled by mount effect above)
+  useEffect(() => {
+    if (isFirstChartRender.current) {
+      isFirstChartRender.current = false;
+      return;
     }
+    const { start_date, end_date } = computeDateRange(filterMode, customStart, customEnd);
+    if (filterMode === 'custom' && !start_date) return;
+    setIsChartLoading(true);
+    api.dashboard.getCharts({ start_date, end_date })
+      .then((charts: any) => {
+        setChartData({
+          monthly_sales: charts.monthly_sales || [],
+          top_products: charts.top_products || [],
+          granularity: charts.granularity || 'monthly',
+        });
+      })
+      .catch((err: any) => console.error('Chart fetch error:', err))
+      .finally(() => setIsChartLoading(false));
+  }, [filterMode, customStart, customEnd]);
 
-    if (productChannel === 'amazon') {
-      filtered = filtered.map(p => ({
-        ...p,
-        totalStock: p.amazonStock,
-        status: p.amazonStock === 0 ? 'Out of Stock' : 'Healthy',
-      }));
-    } else if (productChannel === 'blinkit') {
-      filtered = filtered.map(p => ({
-        ...p,
-        totalStock: p.blinkitStock,
-        status: p.blinkitStock === 0 ? 'Out of Stock' : 'Healthy',
-      }));
-    }
-
-    return filtered;
-  }, [productOverview, productSearch, productChannel]);
-
-  // Product overview grid columns
-  const productColumns: GridColumn<ProductOverviewItem>[] = [
-    {
-      id: 'asgSku',
-      header: 'ASG SKU',
-      accessorKey: 'asgSku',
-      sortable: true,
-      width: 180,
-      minWidth: 140,
-      cell: (row) => <code className="text-xs bg-muted px-1.5 py-0.5 rounded whitespace-nowrap">{row.asgSku || '—'}</code>,
-    },
-    {
-      id: 'productName',
-      header: 'Product Name',
-      accessorKey: 'productName',
-      sortable: true,
-      width: 380,
-      minWidth: 200,
-      cell: (row) => (
-        <span
-          className="font-medium text-sm leading-snug"
-          style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
-          title={row.productName}
-        >
-          {row.productName || '—'}
-        </span>
-      ),
-    },
-    {
-      id: 'amazonId',
-      header: 'Amazon ASIN',
-      accessorKey: 'amazonId',
-      sortable: true,
-      width: 140,
-      minWidth: 110,
-      cell: (row) => row.amazonId
-        ? <code className="text-xs bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200">{row.amazonId}</code>
-        : <span className="text-muted-foreground text-xs">—</span>,
-    },
-    {
-      id: 'blinkitId',
-      header: 'Blinkit ID',
-      accessorKey: 'blinkitId',
-      sortable: true,
-      width: 120,
-      minWidth: 90,
-      cell: (row) => row.blinkitId
-        ? <code className="text-xs bg-yellow-50 text-yellow-700 px-1.5 py-0.5 rounded border border-yellow-200">{row.blinkitId}</code>
-        : <span className="text-muted-foreground text-xs">—</span>,
-    },
-    {
-      id: 'amazonStock',
-      header: 'Amazon Stock',
-      accessorKey: 'amazonStock',
-      sortable: true,
-      width: 120,
-      minWidth: 90,
-      align: 'right',
-      cell: (row) => (
-        <span className={row.amazonStock > 0 ? 'text-blue-600 font-semibold text-xs' : 'text-muted-foreground text-xs'}>
-          {row.amazonStock.toLocaleString()}
-        </span>
-      ),
-    },
-    {
-      id: 'blinkitStock',
-      header: 'Blinkit Stock',
-      accessorKey: 'blinkitStock',
-      sortable: true,
-      width: 120,
-      minWidth: 90,
-      align: 'right',
-      cell: (row) => (
-        <span className={row.blinkitStock > 0 ? 'text-yellow-600 font-semibold text-xs' : 'text-muted-foreground text-xs'}>
-          {row.blinkitStock.toLocaleString()}
-        </span>
-      ),
-    },
-    {
-      id: 'totalStock',
-      header: 'Total',
-      accessorKey: 'totalStock',
-      sortable: true,
-      width: 100,
-      minWidth: 80,
-      align: 'right',
-      cell: (row) => (
-        <span className="bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded font-semibold text-xs border border-emerald-200">
-          {row.totalStock.toLocaleString()}
-        </span>
-      ),
-    },
-    {
-      id: 'status',
-      header: 'Status',
-      accessorKey: 'status',
-      sortable: true,
-      width: 120,
-      minWidth: 100,
-      align: 'center',
-      cell: (row) => (
-        <Badge
-          variant="outline"
-          className={
-            row.status === 'Healthy'
-              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-              : 'bg-red-50 text-red-700 border-red-200'
-          }
-        >
-          {row.status}
-        </Badge>
-      ),
-    },
-  ];
-
-  const productGridState = useDataGrid(productColumns);
+  // Channel-derived KPI values (no extra fetch needed — all fields already in stats)
+  // Packed/Unpacked are ASG warehouse totals — no per-channel breakdown exists
+  const kpiPacked    = stats.packedInventory;
+  const kpiUnpacked  = stats.unpackedInventory;
+  const kpiPendingPOs = channel === 'amazon' ? stats.amazonPendingPOs : channel === 'blinkit' ? stats.blinkitPendingPOs : stats.pendingPOs;
+  const kpiPendingDesc = channel === 'amazon'
+    ? 'Amazon POs pending'
+    : channel === 'blinkit'
+      ? 'Blinkit POs pending'
+      : `${stats.amazonPendingPOs} Amazon · ${stats.blinkitPendingPOs} Blinkit`;
 
   if (isLoading) {
     return (
@@ -347,7 +242,7 @@ export default function DashboardPage() {
             Inventory overview and platform allocation
           </p>
           <Badge variant="outline" className="text-xs">
-            Last updated: {new Date().toLocaleTimeString()}
+            Last updated: {new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' })}
           </Badge>
         </div>
 
@@ -355,304 +250,363 @@ export default function DashboardPage() {
         <StatsGrid columns={4}>
           <StatsCard
             title="Total SKUs"
-            value={stats.totalSKUs.toLocaleString()}
+            value={stats.totalSKUs.toLocaleString('en-IN')}
             icon={Package}
             description="Active products"
           />
           <StatsCard
             title="Packed Inventory"
-            value={stats.packedInventory.toLocaleString()}
+            value={kpiPacked.toLocaleString('en-IN')}
             icon={PackageCheck}
             description="Ready to ship"
             variant="blue"
           />
           <StatsCard
             title="Unpacked Inventory"
-            value={stats.unpackedInventory.toLocaleString()}
+            value={kpiUnpacked.toLocaleString('en-IN')}
             icon={PackageOpen}
             description="Raw stock"
             variant="yellow"
           />
           <StatsCard
             title="Pending POs"
-            value={stats.pendingPOs.toLocaleString()}
+            value={kpiPendingPOs.toLocaleString('en-IN')}
             icon={ClipboardList}
-            description={`${stats.delayedPOs} delayed`}
+            description={kpiPendingDesc}
             variant={stats.delayedPOs > 0 ? 'orange' : 'default'}
           />
         </StatsGrid>
 
-        {/* Sales Charts - 4 charts */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* 1. Sales Performance - Area Chart */}
-          <Card>
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base font-medium">Monthly Sales Performance</CardTitle>
-                <select value={chart1Period} onChange={(e) => setChart1Period(e.target.value)} className="h-7 text-xs border border-border rounded-md px-2 py-1 bg-background text-foreground cursor-pointer">
-                  {TIME_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                </select>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <ResponsiveContainer width="100%" height={240}>
-                <AreaChart data={filterMonthly(chartData.monthly_sales, chart1Period)}>
-                  <defs>
-                    <linearGradient id="colorAmazon" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#60a5fa" stopOpacity={0.6}/>
-                      <stop offset="95%" stopColor="#93c5fd" stopOpacity={0.05}/>
-                    </linearGradient>
-                    <linearGradient id="colorBlinkit" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="5%" stopColor="#fbbf24" stopOpacity={0.6}/>
-                      <stop offset="95%" stopColor="#fde68a" stopOpacity={0.05}/>
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                  <XAxis dataKey="month" tick={{ fill: '#6b7280', fontSize: 12 }} />
-                  <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
-                  <Tooltip formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString()}`, '']} />
-                  <Legend />
-                  <Area type="monotone" dataKey="Amazon" stroke="#60a5fa" strokeWidth={2} fillOpacity={1} fill="url(#colorAmazon)" />
-                  <Area type="monotone" dataKey="Blinkit" stroke="#fbbf24" strokeWidth={2} fillOpacity={1} fill="url(#colorBlinkit)" />
-                </AreaChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
+        {/* Channel Stock + Alert KPIs */}
+        <StatsGrid columns={4}>
+          <StatsCard
+            title="Amazon Stock"
+            value={stats.amazonInventory.toLocaleString('en-IN')}
+            icon={ShoppingCart}
+            description="Sellable units at Amazon (latest)"
+            variant="blue"
+          />
+          <StatsCard
+            title="Blinkit Stock"
+            value={stats.blinkitInventory.toLocaleString('en-IN')}
+            icon={Truck}
+            description={`Hub ${(stats.blinkitHub ?? 0).toLocaleString('en-IN')} · Store ${(stats.blinkitStore ?? 0).toLocaleString('en-IN')}`}
+            variant="yellow"
+          />
+          <StatsCard
+            title="Low Stock Alerts"
+            value={stats.lowInventoryCount.toLocaleString('en-IN')}
+            icon={AlertTriangle}
+            description="Unresolved alerts"
+            variant={stats.lowInventoryCount > 0 ? 'orange' : 'default'}
+          />
+          <StatsCard
+            title="Out of Stock"
+            value={stats.outOfStockCount.toLocaleString('en-IN')}
+            icon={XCircle}
+            description="ASG SKUs at zero units"
+            variant={stats.outOfStockCount > 0 ? 'red' : 'default'}
+          />
+        </StatsGrid>
 
-          {/* 2. Platform Sales Comparison - Bar Chart */}
-          <Card>
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base font-medium">Platform Sales Comparison</CardTitle>
-                <select value={chart2Period} onChange={(e) => setChart2Period(e.target.value)} className="h-7 text-xs border border-border rounded-md px-2 py-1 bg-background text-foreground cursor-pointer">
-                  {TIME_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                </select>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <ResponsiveContainer width="100%" height={240}>
-                <BarChart data={filterMonthly(chartData.monthly_sales, chart2Period)}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                  <XAxis dataKey="month" tick={{ fill: '#6b7280', fontSize: 12 }} />
-                  <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
-                  <Tooltip formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString()}`, '']} />
-                  <Legend />
-                  <Bar dataKey="Amazon" fill="#60a5fa" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="Blinkit" fill="#fbbf24" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
-
-          {/* 3. Channel Distribution - Pie Chart */}
-          <Card>
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base font-medium">Channel Distribution</CardTitle>
-                <select value={chart3Period} onChange={(e) => setChart3Period(e.target.value)} className="h-7 text-xs border border-border rounded-md px-2 py-1 bg-background text-foreground cursor-pointer">
-                  {TIME_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                </select>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {(() => {
-                const filtered3 = filterMonthly(chartData.monthly_sales, chart3Period);
-                const amazonTotal = filtered3.reduce((s, r) => s + r.Amazon, 0);
-                const blinkitTotal = filtered3.reduce((s, r) => s + r.Blinkit, 0);
-                const total = amazonTotal + blinkitTotal;
-                const distData = [
-                  { name: 'Amazon', value: amazonTotal, color: '#60a5fa' },
-                  { name: 'Blinkit', value: blinkitTotal, color: '#fbbf24' },
-                ];
-                return (
-                  <ResponsiveContainer width="100%" height={240}>
-                    <PieChart>
-                      <Pie
-                        data={distData}
-                        cx="50%"
-                        cy="50%"
-                        labelLine={false}
-                        label={({ name, value }) => `${name}: ${total > 0 ? Math.round((value / total) * 100) : 0}%`}
-                        outerRadius={90}
-                        dataKey="value"
-                      >
-                        {distData.map((entry, i) => (
-                          <Cell key={i} fill={entry.color} />
-                        ))}
-                      </Pie>
-                      <Tooltip formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString()}`, 'Revenue']} />
-                      <Legend />
-                    </PieChart>
-                  </ResponsiveContainer>
-                );
-              })()}
-            </CardContent>
-          </Card>
-
-          {/* 4. Top Products by Revenue - Horizontal Bar Chart */}
-          <Card>
-            <CardHeader className="pb-2">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-base font-medium">Top Products by Revenue</CardTitle>
-                <select
-                  value={topProductsChannel}
-                  onChange={(e) => setTopProductsChannel(e.target.value)}
-                  className="h-7 text-xs border border-border rounded-md px-2 py-1 bg-background text-foreground cursor-pointer"
-                >
-                  <option value="all">All Channels</option>
-                  <option value="amazon">Amazon</option>
-                  <option value="blinkit">Blinkit</option>
-                </select>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {(() => {
-                const filteredTop = (topProductsChannel === 'all'
-                  ? chartData.top_products
-                  : chartData.top_products.filter(p => p.channel.toLowerCase() === topProductsChannel)
-                ).slice(0, 5);
-                return (
-                  <ResponsiveContainer width="100%" height={240}>
-                    <BarChart data={filteredTop} layout="vertical">
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                      <XAxis type="number" tick={{ fill: '#6b7280', fontSize: 11 }} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
-                      <YAxis dataKey="name" type="category" width={110} tick={{ fill: '#6b7280', fontSize: 10 }} />
-                      <Tooltip formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString()}`, 'Revenue']} />
-                      <Bar dataKey="revenue" radius={[0, 4, 4, 0]} name="Revenue">
-                        {filteredTop.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={entry.channel === 'Amazon' ? '#60a5fa' : '#fbbf24'} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                );
-              })()}
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Product Mapping & Stock Overview */}
-        <Card>
-          <CardHeader className="pb-2">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-base font-medium">Product Mapping & Stock Overview</CardTitle>
-              <div className="flex items-center gap-2">
-                <select
-                  value={productChannel}
-                  onChange={(e) => setProductChannel(e.target.value)}
-                  className="h-7 text-xs border border-border rounded-md px-2 py-1 bg-background text-foreground cursor-pointer"
-                >
-                  <option value="all">All Channels</option>
-                  <option value="amazon">Amazon</option>
-                  <option value="blinkit">Blinkit</option>
-                </select>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={() => exportToCSV(
-                    filteredProductOverview.map(p => ({
-                      'ASG SKU': p.asgSku || '',
-                      'Product Name': p.productName || '',
-                      'Amazon ASIN': p.amazonId || '',
-                      'Blinkit ID': p.blinkitId || '',
-                      'Amazon Stock': p.amazonStock,
-                      'Blinkit Stock': p.blinkitStock,
-                      'Total Stock': p.totalStock,
-                      'Status': p.status,
-                    })),
-                    'product_mapping_overview'
+        {/* Sales Charts */}
+        <div className="space-y-4">
+          {isChartLoading && (
+            <div className="flex justify-end">
+              <div className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-blue-600 border-t-transparent" />
+            </div>
+          )}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* 1. Sales Performance - Area Chart */}
+            <Card>
+              <CardHeader className="pb-2">
+                <div className="flex items-start justify-between gap-2">
+                  <CardTitle className="text-base font-medium">
+                    {chartData.granularity === 'daily' ? 'Daily' : chartData.granularity === 'weekly' ? 'Weekly' : 'Monthly'} Sales Performance
+                  </CardTitle>
+                  {dateRangeLabel && (
+                    <span className="text-xs text-muted-foreground whitespace-nowrap shrink-0">{dateRangeLabel}</span>
                   )}
-                >
-                  <Download className="h-3.5 w-3.5 mr-1" />
-                  Export
-                </Button>
-              </div>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="mb-3">
-              <div className="relative">
-                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <input
-                  type="text"
-                  placeholder="Search by product name, SKU, ASIN, or Blinkit ID..."
-                  value={productSearch}
-                  onChange={(e) => setProductSearch(e.target.value)}
-                  className="w-full pl-9 pr-3 py-2 text-sm border border-border rounded-md bg-background"
-                />
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground mb-2">
-              Showing {filteredProductOverview.length} of {productOverview.length} products
-            </p>
-            {filteredProductOverview.length === 0 ? (
-              <div className="text-center py-8 text-muted-foreground">
-                <Package className="h-10 w-10 mx-auto mb-2 opacity-50" />
-                <p className="text-sm">No products found</p>
-              </div>
-            ) : (
-              <DataGrid data={filteredProductOverview} gridState={productGridState} />
-            )}
-          </CardContent>
-        </Card>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <ResponsiveContainer width="100%" height={240}>
+                  <AreaChart data={chartData.monthly_sales}>
+                    <defs>
+                      <linearGradient id="colorAmazon" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#60a5fa" stopOpacity={0.6}/>
+                        <stop offset="95%" stopColor="#93c5fd" stopOpacity={0.05}/>
+                      </linearGradient>
+                      <linearGradient id="colorBlinkit" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#fbbf24" stopOpacity={0.6}/>
+                        <stop offset="95%" stopColor="#fde68a" stopOpacity={0.05}/>
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                    <XAxis dataKey="month" tick={{ fill: '#6b7280', fontSize: 11 }} tickFormatter={(v) => formatPeriodLabel(v, chartData.granularity)} />
+                    <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
+                    <Tooltip labelFormatter={(v) => formatPeriodLabel(v, chartData.granularity)} formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString('en-IN')}`, '']} />
+                    <Legend />
+                    {channel !== 'blinkit' && <Area type="monotone" dataKey="Amazon" stroke="#60a5fa" strokeWidth={2} fillOpacity={1} fill="url(#colorAmazon)" />}
+                    {channel !== 'amazon' && <Area type="monotone" dataKey="Blinkit" stroke="#fbbf24" strokeWidth={2} fillOpacity={1} fill="url(#colorBlinkit)" />}
+                  </AreaChart>
+                </ResponsiveContainer>
+              </CardContent>
+            </Card>
+
+            {/* 2. Platform Sales Comparison - Bar Chart */}
+            <Card>
+              <CardHeader className="pb-2">
+                <div className="flex items-start justify-between gap-2">
+                  <CardTitle className="text-base font-medium">Platform Sales Comparison</CardTitle>
+                  {dateRangeLabel && (
+                    <span className="text-xs text-muted-foreground whitespace-nowrap shrink-0">{dateRangeLabel}</span>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent>
+                <ResponsiveContainer width="100%" height={240}>
+                  <BarChart data={chartData.monthly_sales}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                    <XAxis dataKey="month" tick={{ fill: '#6b7280', fontSize: 11 }} tickFormatter={(v) => formatPeriodLabel(v, chartData.granularity)} />
+                    <YAxis tick={{ fill: '#6b7280', fontSize: 12 }} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
+                    <Tooltip labelFormatter={(v) => formatPeriodLabel(v, chartData.granularity)} formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString('en-IN')}`, '']} />
+                    <Legend />
+                    {channel !== 'blinkit' && <Bar dataKey="Amazon" fill="#60a5fa" radius={[4, 4, 0, 0]} />}
+                    {channel !== 'amazon' && <Bar dataKey="Blinkit" fill="#fbbf24" radius={[4, 4, 0, 0]} />}
+                  </BarChart>
+                </ResponsiveContainer>
+              </CardContent>
+            </Card>
+
+            {/* 3. Channel Distribution - Pie Chart */}
+            <Card className="flex flex-col">
+              <CardHeader className="pb-2 shrink-0">
+                <CardTitle className="text-base font-medium">Channel Distribution</CardTitle>
+              </CardHeader>
+              <CardContent className="flex-1 flex flex-col pt-0 pb-4">
+                {(() => {
+                  const amazonTotal = chartData.monthly_sales.reduce((s, r) => s + r.Amazon, 0);
+                  const blinkitTotal = chartData.monthly_sales.reduce((s, r) => s + r.Blinkit, 0);
+                  const total = amazonTotal + blinkitTotal;
+                  const amazonPct = total > 0 ? Math.round((amazonTotal / total) * 100) : 0;
+                  const blinkitPct = total > 0 ? 100 - amazonPct : 0;
+                  const distData = channel === 'amazon'
+                    ? [{ name: 'Amazon', value: amazonTotal, fill: '#60a5fa' }]
+                    : channel === 'blinkit'
+                      ? [{ name: 'Blinkit', value: blinkitTotal, fill: '#fbbf24' }]
+                      : [
+                          { name: 'Amazon', value: amazonTotal, fill: '#60a5fa' },
+                          { name: 'Blinkit', value: blinkitTotal, fill: '#fbbf24' },
+                        ];
+                  return (
+                    <div className="flex-1 flex flex-col">
+                      <ResponsiveContainer width="100%" height={200}>
+                        <PieChart>
+                          <Pie
+                            data={distData}
+                            cx="50%"
+                            cy="50%"
+                            outerRadius={88}
+                            dataKey="value"
+                          />
+                          <Tooltip formatter={(v: number | undefined) => [`₹${Number(v ?? 0).toLocaleString('en-IN')}`, 'Revenue']} />
+                        </PieChart>
+                      </ResponsiveContainer>
+                      {/* Channel breakdown — no overlap, always readable */}
+                      <div className="flex items-center justify-center gap-8 pt-3 border-t mt-auto">
+                        {channel !== 'blinkit' && (
+                          <div className="flex items-center gap-2.5">
+                            <div className="h-3 w-3 rounded-full bg-blue-400 shrink-0" />
+                            <div>
+                              <p className="text-sm font-bold leading-none">{channel === 'amazon' ? '100' : amazonPct}%</p>
+                              <p className="text-xs text-muted-foreground mt-0.5">Amazon</p>
+                            </div>
+                          </div>
+                        )}
+                        {channel === 'all' && <div className="h-8 w-px bg-border" />}
+                        {channel !== 'amazon' && (
+                          <div className="flex items-center gap-2.5">
+                            <div className="h-3 w-3 rounded-full bg-yellow-400 shrink-0" />
+                            <div>
+                              <p className="text-sm font-bold leading-none">{channel === 'blinkit' ? '100' : blinkitPct}%</p>
+                              <p className="text-xs text-muted-foreground mt-0.5">Blinkit</p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </CardContent>
+            </Card>
+
+            {/* 4. Top Products by Revenue - Horizontal Bar Chart */}
+            <Card>
+              <CardHeader className="pb-2">
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-base font-medium">Top Products by Revenue</CardTitle>
+                  <select
+                    value={topProductsChannel}
+                    onChange={(e) => setTopProductsChannel(e.target.value)}
+                    className="h-7 text-xs border border-border rounded-md px-2 py-1 bg-background text-foreground cursor-pointer"
+                  >
+                    <option value="all">All Channels</option>
+                    <option value="amazon">Amazon</option>
+                    <option value="blinkit">Blinkit</option>
+                  </select>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {(() => {
+                  const filteredTop = (topProductsChannel === 'all'
+                    ? chartData.top_products
+                    : chartData.top_products.filter(p => (p.channel || '').toLowerCase() === topProductsChannel)
+                  ).slice(0, 5).map((p: any) => {
+                    const full = stripBrand(p.name);
+                    return {
+                      ...p,
+                      fullName: full,
+                      sku: p.sku || '',
+                      name: full.length > 18 ? full.slice(0, 18) + '…' : full,
+                      fill: (p.channel || '').toLowerCase() === 'amazon' ? '#60a5fa' : '#fbbf24',
+                    };
+                  });
+                  return (
+                    <ResponsiveContainer width="100%" height={240}>
+                      <BarChart data={filteredTop} layout="vertical">
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                        <XAxis type="number" tick={{ fill: '#6b7280', fontSize: 11 }} tickFormatter={(v) => `${(v/1000).toFixed(0)}k`} />
+                        <YAxis dataKey="name" type="category" width={130} tick={{ fill: '#6b7280', fontSize: 10 }} />
+                        <Tooltip
+                          content={({ active, payload }) => {
+                            if (!active || !payload?.length) return null;
+                            const d = payload[0];
+                            return (
+                              <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 8, padding: '10px 12px', maxWidth: 260, boxShadow: '0 2px 8px rgba(0,0,0,0.10)' }}>
+                                <p style={{ fontWeight: 600, fontSize: 13, marginBottom: 4, lineHeight: 1.4, whiteSpace: 'normal', wordBreak: 'break-word' }}>{d.payload.fullName}</p>
+                                {d.payload.sku && (
+                                  <p style={{ fontSize: 11, color: '#6b7280', marginBottom: 4 }}>SKU: <span style={{ fontFamily: 'monospace', color: '#374151' }}>{d.payload.sku}</span></p>
+                                )}
+                                <p style={{ fontSize: 13, color: '#6b7280' }}>Revenue: ₹{Number(d.value ?? 0).toLocaleString('en-IN')}</p>
+                              </div>
+                            );
+                          }}
+                        />
+                        <Bar dataKey="revenue" radius={[0, 4, 4, 0]} name="Revenue" />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  );
+                })()}
+              </CardContent>
+            </Card>
+          </div>
+        </div>
 
         {/* Low Inventory Alerts */}
         <div>
           <Card>
-            <CardHeader className="pb-2">
+            <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
                 <CardTitle className="text-base font-medium flex items-center gap-2">
                   <AlertTriangle className="h-4 w-4 text-yellow-500" />
                   Low Inventory Alerts
+                  <span className="text-xs font-normal text-muted-foreground">(ASG Warehouse)</span>
                 </CardTitle>
-                <Badge variant="secondary">{stats.lowInventoryCount}</Badge>
+                <div className="flex items-center gap-2">
+                  {(stats.needsVerificationCount ?? 0) > 0 && (
+                    <Badge className="bg-amber-100 text-amber-800 border border-amber-200 hover:bg-amber-100" title="Stock not updated for more than 15 days">
+                      {stats.needsVerificationCount} to verify
+                    </Badge>
+                  )}
+                  {lowStockCounts.critical > 0 && (
+                    <Badge className="bg-red-100 text-red-700 border border-red-200 hover:bg-red-100">
+                      {lowStockCounts.critical} Critical
+                    </Badge>
+                  )}
+                  {lowStockCounts.low > 0 && (
+                    <Badge className="bg-orange-100 text-orange-700 border border-orange-200 hover:bg-orange-100">
+                      {lowStockCounts.low} Low
+                    </Badge>
+                  )}
+                </div>
               </div>
             </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
+            <CardContent className="pt-0">
+              {lowInventoryItems.length > 0 && (
+                <div className="flex items-center justify-between px-3 pb-2 text-xs text-muted-foreground font-medium border-b mb-2">
+                  <span>Product</span>
+                  <div className="flex items-center gap-6 text-right">
+                    <span className="w-16">Packed</span>
+                    <span className="w-16">Unpacked</span>
+                    <span className="w-14">Total</span>
+                  </div>
+                </div>
+              )}
+              <div className="space-y-2">
                 {lowInventoryItems.length > 0 ? (
                   lowInventoryItems.map((item) => (
                     <div
                       key={item.id}
-                      className="flex items-center justify-between p-3 bg-yellow-50 rounded-lg border border-yellow-100"
+                      className={`flex items-center justify-between p-3 rounded-lg border-l-4 ${
+                        item.severity === 'critical'
+                          ? 'bg-red-50 border-l-red-500 border border-red-100'
+                          : 'bg-orange-50 border-l-orange-400 border border-orange-100'
+                      }`}
                     >
-                      <div>
-                        <p className="font-medium text-sm text-gray-900 truncate max-w-[180px]">
+                      <div className="min-w-0 flex-1 mr-4">
+                        <p className="font-medium text-sm text-gray-900 truncate" title={item.productName}>
                           {item.productName}
                         </p>
-                        <p className="text-xs text-gray-500">{item.asgSku}</p>
+                        <p className="text-xs text-gray-500 font-mono">{item.asgSku}</p>
+                        <p className="text-[11px] text-gray-400">
+                          {item.inventoryDate ? `Stock as of ${fmtDate(item.inventoryDate)}` : 'No stock record'}
+                          {item.needsVerification && (
+                            <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 font-medium text-amber-800">Verify</span>
+                          )}
+                        </p>
                       </div>
-                      <div className="text-right">
-                        <p className="text-sm font-bold text-yellow-600">
-                          Stock: {item.currentStock}
-                        </p>
-                        <p className="text-xs text-orange-500 font-medium">
-                          To Pack: {item.toPackQty}
-                        </p>
+                      <div className="flex items-center gap-6 flex-shrink-0">
+                        <div className="text-right w-16">
+                          <p className={`text-sm font-bold ${item.packedQty === 0 ? 'text-red-600' : 'text-orange-600'}`}>
+                            {item.packedQty}
+                          </p>
+                          <p className="text-xs text-gray-400">Packed</p>
+                        </div>
+                        <div className="text-right w-16">
+                          <p className="text-sm font-semibold text-gray-700">
+                            {item.unpackedQty}
+                          </p>
+                          <p className="text-xs text-gray-400">Unpacked</p>
+                        </div>
+                        <div className="text-right w-14">
+                          <p className="text-sm font-bold text-gray-900">
+                            {item.packedQty + item.unpackedQty}
+                          </p>
+                          <p className="text-xs text-gray-400">Total</p>
+                        </div>
                       </div>
                     </div>
                   ))
                 ) : (
                   <div className="text-center py-8 text-gray-500">
-                    <p className="text-sm">No pending packing orders</p>
-                    <p className="text-xs mt-1">All POs are fully packed</p>
+                    <PackageCheck className="h-8 w-8 mx-auto mb-2 text-green-400" />
+                    <p className="text-sm font-medium">All stock levels healthy</p>
+                    <p className="text-xs mt-1 text-gray-400">No product is at or below the low-stock limit</p>
                   </div>
                 )}
               </div>
 
               <Link
-                href="/low-stock-alerts"
+                href="/inventory"
                 className="mt-4 flex items-center justify-center gap-1 text-sm text-blue-600 hover:text-blue-800"
               >
-                View All Alerts
+                View Full Inventory
                 <ArrowRight className="h-4 w-4" />
               </Link>
             </CardContent>
           </Card>
         </div>
-
-
       </div>
     </ProtectedRoute>
   );

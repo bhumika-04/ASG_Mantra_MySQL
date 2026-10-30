@@ -4,7 +4,7 @@ Writes to: BlinkitSales, BlinkitInventory, BlinkitPO, BlinkitPOItem
 """
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, func as sqlfunc, text
+from sqlalchemy import desc, func as sqlfunc, text, or_
 from datetime import datetime, date, timedelta
 from typing import Optional
 import pandas as pd
@@ -24,8 +24,47 @@ from app.models.distributor import Distributor
 from app.models.inventory import Inventory
 from app.utils.dependencies import get_current_user
 from app.schemas.blinkit_po import POConfirmRequest
-from app.routers.uploads import find_or_create_product, find_or_create_warehouse
-from app.utils.audit import log_audit, log_upload
+from app.routers.uploads import find_or_create_product, find_or_create_warehouse, find_warehouse
+from app.utils.timeutil import today_ist
+from app.utils.audit import log_audit, log_upload, notify
+from app.services.eagle_pdf_parser import extract_po_from_pdf
+
+
+# State inference map for Blinkit facility names (first keyword match wins)
+_FACILITY_STATE_MAP = [
+    (['bengaluru', 'bangalore'], 'Karnataka'),
+    (['coimbatore', 'madurai'], 'Tamil Nadu'),
+    (['mangalore', 'mysore', 'mysuru', 'hubli'], 'Karnataka'),
+    (['chennai'], 'Tamil Nadu'),
+    (['mumbai', 'bhiwandi', 'thane', 'mum'], 'Maharashtra'),
+    (['pune', 'nagpur', 'nashik'], 'Maharashtra'),
+    (['noida', 'agra', 'lucknow', 'kanpur', 'meerut', 'varanasi', 'prayagraj', 'allahabad'], 'Uttar Pradesh'),
+    (['gurgaon', 'gurugram', 'faridabad', 'kundli', 'manesar', 'sonepat', 'panipat', 'dharuhera', 'dhd'], 'Haryana'),
+    (['delhi'], 'Delhi'),
+    (['kolkata', 'howrah'], 'West Bengal'),
+    (['hyderabad', 'secunderabad'], 'Telangana'),
+    (['visakhapatnam', 'vizag', 'vijayawada'], 'Andhra Pradesh'),
+    (['ahmedabad', 'surat', 'vadodara', 'rajkot'], 'Gujarat'),
+    (['jaipur', 'jodhpur', 'kota', 'udaipur'], 'Rajasthan'),
+    (['kochi', 'trivandrum', 'kozhikode', 'thiruvananthapuram'], 'Kerala'),
+    (['bhopal', 'indore', 'jabalpur'], 'Madhya Pradesh'),
+    (['chandigarh', 'mohali', 'patiala', 'ludhiana', 'amritsar'], 'Punjab'),
+    (['patna', 'gaya'], 'Bihar'),
+    (['guwahati'], 'Assam'),
+    (['bhubaneswar', 'cuttack'], 'Odisha'),
+]
+
+
+def _infer_state(facility_name: str) -> str:
+    """Infer Indian state from Blinkit facility name via city keyword matching."""
+    if not facility_name:
+        return 'Other'
+    lower = facility_name.lower()
+    for keywords, state in _FACILITY_STATE_MAP:
+        for kw in keywords:
+            if kw in lower:
+                return state
+    return 'Other'
 
 
 def _get_packing_alerts_blinkit(db: Session, items: list) -> list:
@@ -40,9 +79,16 @@ def _get_packing_alerts_blinkit(db: Session, items: list) -> list:
         product = db.query(Product).filter(Product.AsgSku == item_code).first()
         packed_qty = 0
         if product:
-            packed_qty = db.query(sqlfunc.sum(Inventory.PackedQty)).filter(
+            # Only the product's most recent snapshot is current stock — summing every
+            # historical InventoryDate massively overstates what is available.
+            latest_date = db.query(sqlfunc.max(Inventory.InventoryDate)).filter(
                 Inventory.ProductId == product.Id
-            ).scalar() or 0
+            ).scalar()
+            if latest_date is not None:
+                packed_qty = db.query(sqlfunc.sum(Inventory.PackedQty)).filter(
+                    Inventory.ProductId == product.Id,
+                    Inventory.InventoryDate == latest_date,
+                ).scalar() or 0
         gap = int(ordered_qty) - packed_qty
         if gap > 0:
             alerts.append({
@@ -54,6 +100,7 @@ def _get_packing_alerts_blinkit(db: Session, items: list) -> list:
             })
     return alerts
 
+
 router = APIRouter()
 
 
@@ -64,6 +111,7 @@ router = APIRouter()
 async def get_blinkit_inventory(
     search: Optional[str] = Query(None),
     facility: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
     report_date: Optional[str] = Query(None, description="Filter by report date (YYYY-MM-DD)"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
@@ -87,8 +135,17 @@ async def get_blinkit_inventory(
     if search:
         query = query.filter(BlinkitInventoryData.ItemName.ilike(f"%{search}%"))
 
-    if facility:
-        query = query.filter(BlinkitInventoryData.BackendFacilityName.ilike(f"%{facility}%"))
+    # State filter: derive matching facility names then filter by IN clause
+    if state and state != 'all':
+        all_facilities = [r[0] for r in db.query(BlinkitInventoryData.BackendFacilityName).distinct().all() if r[0]]
+        matching = [f for f in all_facilities if _infer_state(f) == state]
+        if matching:
+            query = query.filter(BlinkitInventoryData.BackendFacilityName.in_(matching))
+        else:
+            query = query.filter(BlinkitInventoryData.BackendFacilityName == None)  # no match → 0 rows
+
+    if facility and facility != 'all':
+        query = query.filter(BlinkitInventoryData.BackendFacilityName == facility)
 
     total = query.count()
 
@@ -105,10 +162,21 @@ async def get_blinkit_inventory(
         BlinkitInventoryData.BackendFacilityName
     ).offset(offset).limit(page_size).all()
 
-    facilities_list = db.query(BlinkitInventoryData.BackendFacilityName).distinct().all()
+    all_facilities_list = sorted([r[0] for r in db.query(BlinkitInventoryData.BackendFacilityName).distinct().all() if r[0]])
     dates_list = db.query(BlinkitInventoryData.ReportDate).distinct().order_by(
         desc(BlinkitInventoryData.ReportDate)
-    ).limit(20).all()
+    ).all()
+
+    # Derive unique states from all facility names (sorted, 'Other' last)
+    state_set = sorted({_infer_state(f) for f in all_facilities_list} - {'Other'})
+    if any(_infer_state(f) == 'Other' for f in all_facilities_list):
+        state_set.append('Other')
+
+    # Facilities list: when state is active, return only that state's facilities
+    if state and state != 'all':
+        response_facilities = [f for f in all_facilities_list if _infer_state(f) == state]
+    else:
+        response_facilities = all_facilities_list
 
     total_backend = int(stats_row.total_backend or 0)
     total_frontend = int(stats_row.total_frontend or 0)
@@ -126,7 +194,8 @@ async def get_blinkit_inventory(
             "uniqueFacilities": int(stats_row.unique_facilities or 0),
         },
         "filters": {
-            "facilities": [f[0] for f in facilities_list if f[0]],
+            "facilities": response_facilities,
+            "states": state_set,
             "report_dates": [d[0].isoformat() for d in dates_list if d[0]],
         }
     }
@@ -161,10 +230,18 @@ def read_file(contents: bytes, filename: str, skiprows: int = 0) -> pd.DataFrame
 
 
 def safe_str(val, max_len=None):
-    """Safely convert value to string, return None for NaN/empty."""
+    """Safely convert value to string, return None for NaN/empty.
+
+    Text is stored exactly as provided, including accents, symbols (₹, –, é) and other scripts.
+    Only invisible junk is removed: control characters, the byte-order mark and zero-width
+    characters. A non-breaking space becomes a normal space.
+    """
     if pd.isna(val) or str(val).strip() in ('', 'nan', 'UNKNOWN'):
         return None
-    s = str(val).strip()
+    s = str(val).replace('\u00a0', ' ')
+    s = re.sub(r'[\x00-\x08\x0b-\x1f\x7f\u200b-\u200f\u2028-\u202e\ufeff]', '', s).strip()
+    if not s or s in ('nan', 'UNKNOWN'):
+        return None
     if max_len:
         s = s[:max_len]
     return s
@@ -195,8 +272,8 @@ def _parse_date(val) -> date:
     if pd.isna(val) or str(val).strip() in ('', 'nan'):
         return None
     s = str(val).strip()
-    for fmt in ('%m/%d/%Y', '%m/%d/%y', '%d/%m/%Y', '%d/%m/%y',
-                '%Y-%m-%d', '%d-%m-%Y', '%d.%m.%Y', '%d.%m.%y'):
+    for fmt in ('%d/%m/%Y', '%d/%m/%y', '%d-%m-%Y', '%d-%m-%y',
+                '%d.%m.%Y', '%d.%m.%y', '%Y-%m-%d', '%m/%d/%Y', '%m/%d/%y'):
         try:
             return datetime.strptime(s.split(' ')[0], fmt).date()
         except ValueError:
@@ -210,18 +287,26 @@ def _parse_date(val) -> date:
 
 def _ensure_product_blinkit(db: Session, item_id: int, item_name: str, category: str, seen: set) -> bool:
     """Auto-create a Product record for an unknown Blinkit item_id.
-    Uses placeholder AsgSku = 'UNLINKED-BLNK-{item_id}' so user can fill in the real SKU later.
-    Returns True if a new product was created, False if it already existed.
+    First tries to match by BlinkitId, then by normalized product name.
+    Only creates a new UNLINKED-BLNK placeholder if no match is found at all.
+    Returns True if a new product was created, False if it already existed or was linked.
     """
     key = str(item_id)
     if key in seen:
         return False
     seen.add(key)
+
+    # Already linked by BlinkitId
     if db.query(Product).filter(Product.BlinkitId == key).first():
         return False
+
+    # Placeholder already exists
     placeholder = f"UNLINKED-BLNK-{item_id}"[:50]
     if db.query(Product).filter(Product.AsgSku == placeholder).first():
         return False
+
+    # Blinkit names differ significantly from ASG names (e.g. "Nilgiri Eucalyptus" vs "Eucalyptus"),
+    # so name matching is skipped — admin manually links via Product Master UI.
     db.add(Product(
         ProductName=(item_name or str(item_id))[:255],
         AsgSku=placeholder,
@@ -231,51 +316,90 @@ def _ensure_product_blinkit(db: Session, item_id: int, item_name: str, category:
     return True
 
 
+def _eagle_distributor_id(db: Session) -> int:
+    """Id of the Blinkit distributor (Eagle Network). Looked up by channel; 2 is the fallback."""
+    d = db.query(Distributor).filter(Distributor.Channel == 'Blinkit', Distributor.Active == True).first()
+    return d.Id if d else 2
+
+
+def _ensure_distributor_facility(
+    db: Session, facility_name: str, seen: set,
+    ship_to_address: str = None, ship_to_gstin: str = None,
+    ship_to_name: str = None, po_number: str = None
+) -> bool:
+    """Auto-create a DistributorFacility (Eagle Network hub) per city inferred from PO address.
+    ShipToName is always the company name so it cannot be used as the hub identifier;
+    city is the right granularity (one Eagle hub per city).
+    Returns True if a new facility was created, False if it already existed.
+    """
+    from app.routers.purchase_orders import _blk_city_state as _infer_city_state
+
+    city, state = _infer_city_state(ship_to_address, ship_to_name or facility_name, ship_to_gstin, po_number)
+
+    # Dedup key: city if inferred, otherwise fall back to company name
+    dedup_key = city.strip().lower() if city else (facility_name or '').strip().lower()
+    if not dedup_key or dedup_key in seen:
+        return False
+    seen.add(dedup_key)
+
+    # Facility name: city-specific for hub granularity, fall back to raw name
+    eff_name = f"Eagle Network - {city}" if city else (facility_name or '').strip()
+
+    # Check existence by city (covers both old "EAGLE NETWORK SUPPLY PVT. LTD." rows and new city-named rows)
+    eagle_id = _eagle_distributor_id(db)
+    if city:
+        exists = db.query(DistributorFacility).filter(
+            DistributorFacility.DistributorId == eagle_id,
+            DistributorFacility.City == city,
+        ).first()
+    else:
+        exists = db.query(DistributorFacility).filter(
+            DistributorFacility.DistributorId == eagle_id,
+            DistributorFacility.FacilityName == eff_name,
+        ).first()
+
+    if exists:
+        # Backfill state if the existing row is missing it
+        if state and not exists.State:
+            exists.State = state
+        return False
+
+    db.add(DistributorFacility(
+        DistributorId=eagle_id,  # Eagle Network (the Blinkit distributor)
+        FacilityName=eff_name,
+        FacilityType="Backend",
+        City=city,
+        State=state,
+        Active=True,
+    ))
+    return True
+
+
 def _ensure_blinkit_facility(db: Session, facility_id: int, facility_name: str, seen: set) -> bool:
-    """Auto-create a DistributorFacility record for a new Blinkit backend facility.
-    Looks up the Blinkit distributor dynamically. Skips creation if none found.
-    Returns True if a new facility was created, False if it already existed or skipped.
+    """Auto-create a Warehouse record (Channel=Blinkit) for a new Blinkit backend facility.
+    Blinkit FE/BE warehouses come from Sales/Inventory uploads → stored in Warehouses table.
+    DistributorFacility (Eagle Network's own warehouses) is populated from PO uploads, not here.
+    Returns True if a new warehouse was created, False if it already existed.
     """
     key = str(facility_id) if facility_id else (facility_name or '').lower()
     if key in seen:
         return False
     seen.add(key)
-    if facility_name and db.query(DistributorFacility).filter(
-        DistributorFacility.FacilityName == facility_name
-    ).first():
-        return False
 
-    # Look up Blinkit distributor dynamically
-    blinkit_distributor = db.query(Distributor).filter(
-        Distributor.Channel == 'Blinkit',
-        Distributor.Active == True
-    ).first()
-
-    if not blinkit_distributor:
-        # No Blinkit distributor in DB — skip auto-creating facility
-        return False
+    name = facility_name or f"Facility-{facility_id}"
 
     # Extract city from facility name (e.g. "Delhi BF 1" → "Delhi")
     city = None
-    name = facility_name or f"Facility-{facility_id}"
     if name:
         import re
         city_match = re.match(r'^(\w+(?:\s\w+)?)\s+BF', name, re.IGNORECASE)
         if city_match:
             city = city_match.group(1).strip().title()
 
-    db.add(DistributorFacility(
-        DistributorId=blinkit_distributor.Id,
-        FacilityName=name,
-        FacilityType='Backend',
-        City=city,
-        Active=True,
-    ))
+    # Only write to Warehouses table (Channel=Blinkit, WarehouseType=Backend)
+    _, created = find_or_create_warehouse(db, name, channel="Blinkit", city=city, warehouse_type="Backend")
 
-    # Also create in Warehouses table (Channel=Blinkit, WarehouseType=Backend)
-    find_or_create_warehouse(db, name, channel="Blinkit", city=city, warehouse_type="Backend")
-
-    return True
+    return bool(created)
 
 
 # ============================================================
@@ -309,6 +433,7 @@ async def preview_blinkit_sales(
             detected_date = date(year, int(mm), int(dd))
             date_found = True
 
+        # Must list every column in upload_blinkit_sales' col_map.
         col_map = {}
         for col in df.columns:
             cl = str(col).strip().lower().replace(' ', '_')
@@ -316,8 +441,12 @@ async def preview_blinkit_sales(
                 col_map[col] = 'item_id'
             elif cl in ('item_name', 'itemname'):
                 col_map[col] = 'item_name'
+            elif cl in ('manufacturer_id', 'manufacturerid'):
+                col_map[col] = 'manufacturer_id'
             elif cl in ('manufacturer_name', 'manufacturername'):
                 col_map[col] = 'manufacturer_name'
+            elif cl in ('city_id', 'cityid'):
+                col_map[col] = 'city_id'
             elif cl in ('city_name', 'cityname', 'city'):
                 col_map[col] = 'city_name'
             elif cl == 'category':
@@ -326,6 +455,14 @@ async def preview_blinkit_sales(
                 col_map[col] = 'qty_sold'
             elif cl == 'mrp':
                 col_map[col] = 'mrp'
+            elif cl in ('date', 'sale_date', 'saledate'):
+                col_map[col] = 'date'
+        from app.routers.uploads import check_column_warnings
+        column_warnings = check_column_warnings(
+            list(df.columns), col_map,
+            required_targets=['item_id', 'item_name', 'qty_sold'],
+            optional_targets=['city_name', 'mrp', 'manufacturer_id', 'manufacturer_name', 'city_id'],
+        )
         df = df.rename(columns=col_map)
 
         seen_ids: set = set()
@@ -375,7 +512,18 @@ async def preview_blinkit_sales(
                 BlinkitSalesData.SaleDate == detected_date
             ).scalar()
             if existing_count > 0:
-                duplicate_warning = f"Found {existing_count} existing sales records for {detected_date.strftime('%Y-%m-%d')}. This data may already be uploaded."
+                duplicate_warning = f"Found {existing_count} existing sales records for {detected_date.strftime('%d-%m-%Y')}. This data may already be uploaded."
+
+        # Mandatory-data check: besides the header, `qty_sold` must not be blank in every row.
+        # An Inventory file uploaded to the Sales page has the headers but no sales values.
+        mandatory_data_warning = None
+        if valid_rows > 0 and preview_rows and all(r.get('qtySold') is None for r in preview_rows):
+            mandatory_data_warning = (
+                f"Qty Sold is blank for all {len(preview_rows)} previewed rows in this file. "
+                "This usually means the wrong file was selected for this section — e.g. an "
+                "Inventory report uploaded here instead of a Sales report. Uploading now will "
+                "create Sales records with no real sales figures."
+            )
 
         return {
             'success': True,
@@ -386,6 +534,8 @@ async def preview_blinkit_sales(
             'detectedDate': detected_date.isoformat() if detected_date else None,
             'previewRows': preview_rows,
             'duplicateDataWarning': duplicate_warning,
+            'mandatoryDataWarning': mandatory_data_warning,
+            'columnWarnings': column_warnings,
         }
     except HTTPException:
         raise
@@ -448,6 +598,12 @@ async def upload_blinkit_sales(
             col_map[col] = 'mrp'
     df = df.rename(columns=col_map)
 
+    if not override_date and 'date' not in df.columns:
+        raise HTTPException(
+            status_code=400,
+            detail="This file has no date column. Enter the report date and upload again.",
+        )
+
     rows_processed = 0
     rows_skipped = 0
     errors = []
@@ -474,10 +630,17 @@ async def upload_blinkit_sales(
             if override_date:
                 sale_date = override_date
             else:
+                # A row with no readable date is skipped and reported, never saved as today.
                 try:
-                    sale_date = pd.to_datetime(row.get('date', datetime.utcnow())).date()
+                    raw_date = row.get('date')
+                    if raw_date is None or pd.isna(raw_date):
+                        raise ValueError("blank date")
+                    sale_date = pd.to_datetime(raw_date).date()
                 except Exception:
-                    sale_date = datetime.utcnow().date()
+                    rows_skipped += 1
+                    if len(errors) < 10:
+                        errors.append(f"Row {idx + 2}: date is missing or unreadable, row not saved")
+                    continue
 
             city_id = safe_int(row.get('city_id'))
 
@@ -516,6 +679,9 @@ async def upload_blinkit_sales(
                total_rows=len(df), success_rows=rows_processed, error_rows=rows_skipped, status="Success")
     log_audit(db, current_user.Id, "UPLOAD", "BlinkitSales", None,
               new_values={"type": "BlinkitSales", "file": file.filename, "rows": rows_processed})
+    notify(db, current_user.Id, "Blinkit Sales Uploaded",
+           f"{rows_processed} rows processed from {file.filename}" + (f", {rows_skipped} skipped" if rows_skipped else ""),
+           "upload")
     db.commit()
     msg = f"Blinkit sales uploaded: {rows_processed} rows processed, {rows_skipped} skipped"
     if auto_created_products:
@@ -565,7 +731,7 @@ async def preview_blinkit_inventory(
             try:
                 detected_date = datetime.strptime(date_match.group(1).replace('_', '-'), '%Y-%m-%d').date()
                 date_found = True
-            except:
+            except (ValueError, TypeError, AttributeError):
                 pass
 
         # If not in filename, try created_at column
@@ -578,7 +744,7 @@ async def preview_blinkit_inventory(
                     else:
                         detected_date = first_date.date() if hasattr(first_date, 'date') else first_date
                     date_found = True
-                except:
+                except (ValueError, TypeError, AttributeError):
                     pass
 
         col_map = {}
@@ -596,6 +762,12 @@ async def preview_blinkit_inventory(
                 col_map[col] = 'facility_name'
             elif cl in ('backend_facility_id', 'facility_id'):
                 col_map[col] = 'facility_id'
+        from app.routers.uploads import check_column_warnings
+        column_warnings = check_column_warnings(
+            list(df.columns), col_map,
+            required_targets=['item_id', 'item_name'],
+            optional_targets=['backend_inv_qty', 'frontend_inv_qty', 'facility_name'],
+        )
         df = df.rename(columns=col_map)
 
         seen_item_ids: set = set()
@@ -643,11 +815,10 @@ async def preview_blinkit_inventory(
                 fkey = str(facility_id) if facility_id else (facility_name or '').lower()
                 if fkey not in seen_facility_keys:
                     seen_facility_keys.add(fkey)
-                    exists = False
-                    if facility_name:
-                        exists = db.query(DistributorFacility).filter(
-                            DistributorFacility.FacilityName == facility_name
-                        ).first() is not None
+                    # The upload stores Blinkit hubs/stores in Warehouses, so check that list
+                    # (same matching the upload uses), not DistributorFacilities.
+                    lookup_name = facility_name or (f"Facility-{facility_id}" if facility_id else None)
+                    exists = bool(lookup_name and find_warehouse(db, lookup_name))
                     if not exists:
                         new_facilities.append({
                             'facilityId': facility_id,
@@ -663,7 +834,20 @@ async def preview_blinkit_inventory(
                 BlinkitInventoryData.ReportDate == detected_date
             ).scalar()
             if existing_count > 0:
-                duplicate_warning = f"Found {existing_count} existing inventory records for {detected_date.strftime('%Y-%m-%d')}. This data may already be uploaded."
+                duplicate_warning = f"Found {existing_count} existing inventory records for {detected_date.strftime('%d-%m-%Y')}. This data may already be uploaded."
+
+        # Mandatory-data check: either inventory quantity may be absent, but not both in
+        # every row. A Sales file uploaded to the Inventory page carries no stock numbers.
+        mandatory_data_warning = None
+        if valid_rows > 0 and preview_rows and all(
+            r.get('backendQty') is None and r.get('frontendQty') is None for r in preview_rows
+        ):
+            mandatory_data_warning = (
+                f"Backend Qty and Frontend Qty are both blank for all {len(preview_rows)} "
+                "previewed rows in this file. This usually means the wrong file was selected "
+                "for this section — e.g. a Sales report uploaded here instead of an Inventory "
+                "report. Uploading now will create Inventory records with no real stock figures."
+            )
 
         return {
             'success': True,
@@ -674,6 +858,8 @@ async def preview_blinkit_inventory(
             'detectedDate': detected_date.isoformat() if detected_date else None,
             'previewRows': preview_rows,
             'duplicateDataWarning': duplicate_warning,
+            'mandatoryDataWarning': mandatory_data_warning,
+            'columnWarnings': column_warnings,
         }
     except HTTPException:
         raise
@@ -803,6 +989,9 @@ async def upload_blinkit_inventory(
                total_rows=len(df), success_rows=rows_processed, error_rows=rows_skipped, status="Success")
     log_audit(db, current_user.Id, "UPLOAD", "BlinkitInventory", None,
               new_values={"type": "BlinkitInventory", "file": file.filename, "rows": rows_processed})
+    notify(db, current_user.Id, "Blinkit Inventory Uploaded",
+           f"{rows_processed} rows processed from {file.filename}" + (f", {rows_skipped} skipped" if rows_skipped else ""),
+           "upload")
     db.commit()
     msg = f"Blinkit inventory uploaded: {rows_processed} rows processed, {rows_skipped} skipped"
     extras = []
@@ -829,7 +1018,8 @@ async def upload_blinkit_inventory(
 
 def _extract_blinkit_inventory_date(df: pd.DataFrame, filename: str) -> date:
     """Extract report date from Blinkit inventory CSV.
-    Tries: created_at column first, then filename pattern (DD.MM.YY), fallback to today.
+    Tries: created_at column first, then filename pattern (DD.MM.YY). If neither is readable the
+    upload is refused (HTTP 400) so the user enters the date; it is never saved as today.
     """
     # Try from created_at/report_date column
     if 'report_date' in df.columns and not df['report_date'].isna().all():
@@ -846,7 +1036,10 @@ def _extract_blinkit_inventory_date(df: pd.DataFrame, filename: str) -> date:
         except ValueError:
             pass
 
-    return date.today()
+    raise HTTPException(
+        status_code=400,
+        detail="The report date could not be read from this file. Enter the report date and upload again.",
+    )
 
 
 # ============================================================
@@ -933,6 +1126,16 @@ async def preview_blinkit_po(
                         'facilityName': ship_to_name,
                     })
 
+        # Check for duplicate PO numbers already in the database
+        duplicate_pos = []
+        for po in po_summary:
+            existing = db.query(BlinkitPOData).filter(BlinkitPOData.PONumber == po['poNumber']).first()
+            if existing:
+                duplicate_pos.append({
+                    'poNumber': po['poNumber'],
+                    'uploadedOn': existing.CreatedAt.strftime('%d-%m-%Y') if existing.CreatedAt else 'unknown date',
+                })
+
         return {
             'success': True,
             'validRows': valid_rows,
@@ -940,6 +1143,7 @@ async def preview_blinkit_po(
             'newFacilities': new_facilities,
             'poSummary': po_summary,
             'poItems': po_items,
+            'duplicatePos': duplicate_pos,
         }
     except HTTPException:
         raise
@@ -973,6 +1177,11 @@ async def upload_blinkit_po(
     packing_items = []  # (item_code, item_name, ordered_qty) for packing check
     products_created = []
     warehouses_created = []
+    seen_facility_names: set = set()
+    # PO numbers whose header this run created — used to tell "second row of a PO in this
+    # file" apart from "PO already uploaded previously".
+    po_numbers_created_this_run: set = set()
+    duplicate_pos_skipped: set = set()
 
     for idx, row in df.iterrows():
         try:
@@ -983,10 +1192,27 @@ async def upload_blinkit_po(
 
             # Find or create PO header
             po = db.query(BlinkitPOData).filter(BlinkitPOData.PONumber == po_number).first()
+
+            # A PO spans several rows, so finding a header created earlier in this run is
+            # normal. A header that already existed means the PO was uploaded before; its line
+            # items would be appended again and double the quantities, so those rows are skipped.
+            if po is not None and po_number not in po_numbers_created_this_run:
+                duplicate_pos_skipped.add(po_number)
+                rows_skipped += 1
+                continue
+
             if not po:
                 ship_to_name = safe_str(row.get('ShipToName') or row.get('Ship To Name'), 200)
                 ship_to_address = safe_str(row.get('ShipToAddress') or row.get('Ship To Address'), 500)
 
+                if not ship_to_address or not ship_to_address.strip().strip('-—–').strip():
+                    errors.append(f"Row {idx+1} (PO {po_number}): Ship To Address is blank or invalid — row skipped")
+                    rows_skipped += 1
+                    continue
+
+                ship_to_gstin_val = safe_str(row.get('ShipToGSTIN') or row.get('Ship To GSTIN'), 20)
+                from app.routers.purchase_orders import _blk_city_state as _extract_city_state
+                _city, _state = _extract_city_state(ship_to_address, ship_to_name, ship_to_gstin_val, po_number)
                 po = BlinkitPOData(
                     PONumber=po_number,
                     PODate=_parse_date(row.get('PODate') or row.get('PO Date')),
@@ -1006,27 +1232,27 @@ async def upload_blinkit_po(
                     BillToGSTIN=safe_str(row.get('BillToGSTIN') or row.get('Bill To GSTIN'), 20),
                     ShipToName=ship_to_name,
                     ShipToAddress=ship_to_address,
-                    ShipToGSTIN=safe_str(row.get('ShipToGSTIN') or row.get('Ship To GSTIN'), 20),
+                    ShipToGSTIN=ship_to_gstin_val,
+                    ShipToCity=safe_str(_city, 100),
+                    ShipToState=safe_str(_state, 100),
                     TotalTaxableAmount=clean_numeric(row.get('TotalTaxableAmount') or row.get('Total Taxable Amount')) or None,
                     TotalTax=clean_numeric(row.get('TotalTax') or row.get('Total Tax')) or None,
                     DiscountTD=clean_numeric(row.get('DiscountTD') or row.get('Discount TD')) or None,
                     DiscountCD=clean_numeric(row.get('DiscountCD') or row.get('Discount CD')) or None,
                     DiscountSD=clean_numeric(row.get('DiscountSD') or row.get('Discount SD')) or None,
                     GrandTotal=clean_numeric(row.get('GrandTotal') or row.get('Grand Total')) or None,
-                    Status=safe_str(row.get('Status'), 50),
+                    Status='Created',
                 )
                 db.add(po)
                 db.flush()
                 po_created += 1
+                po_numbers_created_this_run.add(po_number)
 
-                # Auto-create warehouse from ShipToName
+                # Auto-create DistributorFacility from ShipToName (Eagle Network receiving point)
                 if ship_to_name:
-                    wh_id, wh_created = find_or_create_warehouse(
-                        db, ship_to_name, channel="Blinkit",
-                        warehouse_type="Frontend"
-                    )
-                    if wh_created:
-                        warehouses_created.append({"name": ship_to_name, "code": ship_to_name.upper().replace(' ', '-')[:50]})
+                    _ensure_distributor_facility(db, ship_to_name, seen_facility_names,
+                                                 ship_to_address=ship_to_address, ship_to_gstin=ship_to_gstin_val,
+                                                 ship_to_name=ship_to_name, po_number=po_number)
 
             # Auto-create product from item data if not found
             item_code = safe_str(row.get('ItemCode') or row.get('Item Code'), 100)
@@ -1097,15 +1323,25 @@ async def upload_blinkit_po(
                total_rows=len(df), success_rows=rows_processed, error_rows=rows_skipped, status="Success")
     log_audit(db, current_user.Id, "UPLOAD", "BlinkitPO", None,
               new_values={"type": "BlinkitPO", "file": file.filename, "rows": rows_processed, "pos": po_created})
+    notify(db, current_user.Id, "Blinkit PO Uploaded",
+           f"{po_created} POs with {rows_processed} line items from {file.filename}", "upload")
     db.commit()
+    # Notify about low/insufficient packed inventory (no auto-deduction — manual via AcceptedQty)
     packing_alerts = _get_packing_alerts_blinkit(db, packing_items)
+    dupes = sorted(duplicate_pos_skipped)
+    message = f"Blinkit PO uploaded: {po_created} POs, {rows_processed} line items"
+    if dupes:
+        message += f" — skipped {len(dupes)} already-uploaded PO(s): {', '.join(dupes[:5])}"
+        if len(dupes) > 5:
+            message += f" and {len(dupes) - 5} more"
     return {
         "success": True,
-        "message": f"Blinkit PO uploaded: {po_created} POs, {rows_processed} line items",
+        "message": message,
         "data": {
             "po_created": po_created,
             "rows_processed": rows_processed,
             "rows_skipped": rows_skipped,
+            "duplicate_pos_skipped": dupes,
             "errors": errors,
             "packing_alerts": packing_alerts,
             "products_created": products_created,
@@ -1145,10 +1381,14 @@ async def update_blinkit_po_status(
         raise HTTPException(status_code=404, detail=f"Blinkit PO with id {po_id} not found")
 
     old_status = po.Status
+    if old_status in ('Delivered', 'Received') and status in ('Created', 'Packed', 'Dispatched', 'In Transit', 'Delayed'):
+        raise HTTPException(status_code=422, detail=f"A {old_status} PO cannot go back to '{status}'.")
     po.Status = status
     log_audit(db, current_user.Id, "STATUS_CHANGE", "BlinkitPO", str(po.Id),
               old_values={"status": old_status},
               new_values={"status": status})
+    notify(db, current_user.Id, "Blinkit PO Status Updated",
+           f"PO {po.PONumber}: {old_status} → {status}", "po_status")
     db.commit()
 
     return {
@@ -1169,6 +1409,7 @@ async def update_blinkit_po_status(
 @router.post("/purchase-orders/extract-pdf")
 async def extract_blinkit_po_pdf(
     file: UploadFile = File(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Extract PO data from Eagle Network PDF for preview.
@@ -1186,8 +1427,10 @@ async def extract_blinkit_po_pdf(
     if len(contents) == 0:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    from app.services.eagle_pdf_parser import extract_po_from_pdf
-    result = extract_po_from_pdf(contents)
+    try:
+        result = extract_po_from_pdf(contents)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF parsing error: {str(e)}")
 
     if not result.success:
         raise HTTPException(
@@ -1195,7 +1438,24 @@ async def extract_blinkit_po_pdf(
             detail=f"Failed to parse PDF: {'; '.join(result.errors)}"
         )
 
-    return result.to_dict()
+    try:
+        data = result.to_dict()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to serialize result: {str(e)}")
+
+    # Check if this PO already exists in the database
+    po_number = ((data.get('header') or {}).get('po_number') or '').strip()
+    if po_number:
+        try:
+            existing = db.query(BlinkitPOData).filter(BlinkitPOData.PONumber == po_number).first()
+            if existing:
+                uploaded_on = existing.CreatedAt.strftime('%d-%m-%Y') if existing.CreatedAt else 'unknown date'
+                data['duplicate_warning'] = f"PO {po_number} already exists in the database (uploaded {uploaded_on}). Saving again will be blocked."
+                data['existing_po_id'] = existing.Id
+        except Exception as e:
+            data['duplicate_check_error'] = str(e)
+
+    return data
 
 
 # ============================================================
@@ -1220,6 +1480,10 @@ async def confirm_blinkit_po_pdf(
     if not header.po_number or not header.po_number.strip():
         raise HTTPException(status_code=400, detail="PO Number is required")
 
+    _addr = (header.ship_to_address or '').strip().strip('-—–').strip()
+    if not _addr:
+        raise HTTPException(status_code=400, detail="Ship To Address is required and cannot be a placeholder")
+
     # Check for duplicate PO
     existing = db.query(BlinkitPOData).filter(
         BlinkitPOData.PONumber == header.po_number.strip()
@@ -1233,6 +1497,11 @@ async def confirm_blinkit_po_pdf(
     try:
         products_created = []
         warehouses_created = []
+
+        from app.routers.purchase_orders import _blk_city_state as _extract_city_state
+        __pdf_city, __pdf_state = _extract_city_state(
+            header.ship_to_address, header.ship_to_name, header.ship_to_gstin, header.po_number
+        )
 
         po = BlinkitPOData(
             PONumber=header.po_number.strip(),
@@ -1252,8 +1521,10 @@ async def confirm_blinkit_po_pdf(
             BillToAddress=safe_str(header.bill_to_address, 500),
             BillToGSTIN=safe_str(header.bill_to_gstin, 20),
             ShipToName=safe_str(header.ship_to_name, 200),
-            ShipToAddress=safe_str(header.ship_to_address, 500),
+            ShipToAddress=safe_str(header.ship_to_address, 1000),
             ShipToGSTIN=safe_str(header.ship_to_gstin, 20),
+            ShipToCity=safe_str(__pdf_city, 100),
+            ShipToState=safe_str(__pdf_state, 100),
             TotalTaxableAmount=header.total_taxable_amount,
             TotalTax=header.total_tax,
             DiscountTD=header.discount_td,
@@ -1265,24 +1536,47 @@ async def confirm_blinkit_po_pdf(
         db.add(po)
         db.flush()
 
-        # Auto-create warehouse from ShipToName
+        # Auto-create DistributorFacility from ShipToName (Eagle Network receiving point)
         ship_to_name = safe_str(header.ship_to_name, 200)
         if ship_to_name:
-            wh_id, wh_created = find_or_create_warehouse(
-                db, name=ship_to_name, channel="Blinkit", warehouse_type="Frontend"
-            )
-            if wh_created:
-                warehouses_created.append({"name": ship_to_name, "code": ship_to_name.upper().replace(' ', '-')[:50]})
+            _ensure_distributor_facility(db, ship_to_name, set(),
+                                         ship_to_address=safe_str(header.ship_to_address, 1000),
+                                         ship_to_gstin=safe_str(header.ship_to_gstin, 20),
+                                         ship_to_name=ship_to_name,
+                                         po_number=header.po_number)
 
         items_created = 0
         for item_data in items:
+            # Resolve product first so we can store ProductId on the item
+            item_code = safe_str(item_data.item_code, 100)
+            eagle_code = item_data.eagle_code
+            item_name = safe_str(item_data.item_name, 300)
+            blinkit_id = str(eagle_code) if eagle_code else (item_code or None)
+            product = None
+            if item_code or eagle_code:
+                from app.models.product import Product
+                from sqlalchemy import or_ as _or
+                filters = []
+                if blinkit_id:
+                    filters.append(Product.BlinkitId == blinkit_id)
+                if item_code:
+                    filters.append(Product.AsgSku == item_code)
+                existing_product = db.query(Product).filter(_or(*filters)).first() if filters else None
+                if existing_product:
+                    product = existing_product
+                else:
+                    product = find_or_create_product(db, model_number=item_code, product_title=item_name, blinkit_id=blinkit_id)
+                    if product:
+                        products_created.append({"name": item_name or item_code, "sku": item_code, "blinkit_id": blinkit_id})
+
             item = BlinkitPOItemData(
                 POId=po.Id,
                 PONumber=header.po_number.strip(),
+                ProductId=product.Id if product else None,
                 Sno=item_data.sno,
-                EagleCode=item_data.eagle_code,
-                ItemCode=safe_str(item_data.item_code, 100),
-                ItemName=safe_str(item_data.item_name, 300),
+                EagleCode=eagle_code,
+                ItemCode=item_code,
+                ItemName=item_name,
                 MRP=item_data.mrp,
                 Size=safe_str(item_data.size, 50),
                 HSNCode=safe_str(item_data.hsn_code, 20),
@@ -1302,31 +1596,20 @@ async def confirm_blinkit_po_pdf(
             db.add(item)
             items_created += 1
 
-            # Auto-create product if missing
-            item_code = safe_str(item_data.item_code, 100)
-            eagle_code = item_data.eagle_code
-            item_name = safe_str(item_data.item_name, 300)
-            blinkit_id = str(eagle_code) if eagle_code else (item_code or None)
-            if item_code or eagle_code:
-                from app.models.product import Product
-                existing_product = db.query(Product).filter(
-                    (Product.BlinkitId == blinkit_id) | (Product.AsgSku == item_code)
-                ).first()
-                if not existing_product:
-                    find_or_create_product(db, model_number=item_code, product_title=item_name, blinkit_id=blinkit_id)
-                    products_created.append({"name": item_name or item_code, "sku": item_code, "blinkit_id": blinkit_id})
-
         log_upload(db, "BlinkitPO", "Blinkit", f"PDF-{header.po_number}", 0, current_user.Id,
                    total_rows=len(items), success_rows=items_created, error_rows=0, status="Success")
         log_audit(db, current_user.Id, "UPLOAD", "BlinkitPO", str(po.Id),
                   new_values={"type": "BlinkitPO_PDF", "po_number": header.po_number, "items": items_created})
+        notify(db, current_user.Id, "Blinkit PO PDF Uploaded",
+               f"PO {header.po_number} saved with {items_created} line items", "upload")
         db.commit()
 
-        # Check packing gaps for all PO items
+        # Check packing gaps and deduct from inventory
         pdf_items = [
             (safe_str(i.item_code, 100), safe_str(i.item_name, 300), i.qty)
             for i in items if i.item_code and i.qty
         ]
+        # Notify about low/insufficient packed inventory (no auto-deduction — manual via AcceptedQty)
         packing_alerts = _get_packing_alerts_blinkit(db, pdf_items)
 
         return {
@@ -1355,100 +1638,127 @@ async def confirm_blinkit_po_pdf(
 # ============================================================
 @router.get("/analytics")
 async def get_blinkit_sales_analytics(
-    days: int = Query(1825, ge=1, le=1825, description="Number of days to look back"),
+    days: Optional[int] = Query(None, ge=1, le=36500, description="Days to look back (omit for all-time)"),
+    start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD (overrides days)"),
+    end_date: Optional[str] = Query(None, description="End date YYYY-MM-DD (default: today)"),
+    item_id: Optional[str] = Query(None, description="Filter by item_id or product name"),
+    prev_start_date: Optional[str] = Query(None, description="Start of previous period for growth comparison"),
+    prev_end_date: Optional[str] = Query(None, description="End of previous period for growth comparison"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Get analytics from the BlinkitSales table (daily CSV uploads)."""
-    end_dt = date.today()
-    start_dt = end_dt - timedelta(days=days)
-    start_dt_s = start_dt.isoformat()  # e.g. '2021-02-10'
+    end_dt = date.fromisoformat(end_date) if end_date else today_ist()
+    if start_date:
+        start_dt = date.fromisoformat(start_date)
+    elif days is not None:
+        start_dt = end_dt - timedelta(days=days)
+    else:
+        start_dt = None  # all-time: no lower bound
+    start_dt_s = start_dt.isoformat() if start_dt else '1900-01-01'
+    end_dt_s = end_dt.isoformat()
+
+    # COLLATE is explicit: CAST(... AS CHAR) otherwise uses the server default
+    # (utf8mb4_0900_ai_ci), which clashes with the utf8mb4_general_ci columns.
+    item_filter = "AND (CAST(ItemId AS CHAR(50)) COLLATE utf8mb4_general_ci = :item_id OR ItemName LIKE CONCAT('%', :item_id, '%'))" if item_id else ""
+    item_params: dict = {"item_id": item_id} if item_id else {}
 
     try:
-        # ----- Total rows all-time (diagnostic: confirms table has data) -----
-        total_records_all_time = int(
-            db.execute(text("SELECT COUNT(*) FROM BlinkitSales")).scalar() or 0
-        )
-
-        # ----- Summary stats -----
-        summary_row = db.execute(text("""
+        # ----- Summary + growth + all-time count in one CTE query -----
+        summary_row = db.execute(text(f"""
+            WITH base AS (
+                SELECT * FROM BlinkitSales
+                WHERE SaleDate >= :start_dt AND SaleDate <= :end_dt
+                {item_filter}
+            ),
+            mx AS (SELECT MAX(SaleDate) AS max_date FROM base)
             SELECT
                 COUNT(*)                AS total_records,
-                COUNT(DISTINCT ItemId)  AS active_items,
-                SUM(QtySold)            AS total_qty,
-                SUM(MRP)                AS total_revenue,
-                MAX(SaleDate)           AS max_date
-            FROM BlinkitSales
-            WHERE SaleDate >= :start_dt
-        """), {"start_dt": start_dt_s}).fetchone()
+                COUNT(DISTINCT b.ItemId) AS active_items,
+                SUM(b.QtySold)          AS total_qty,
+                SUM(b.MRP)              AS total_revenue,
+                mx.max_date,
+                (SELECT COUNT(*) FROM BlinkitSales WHERE 1=1 {item_filter}) AS total_records_all_time,
+                SUM(CASE WHEN b.SaleDate > DATE_SUB(mx.max_date, INTERVAL 30 DAY)
+                              AND b.SaleDate <= mx.max_date
+                         THEN b.QtySold END)                                AS current_qty,
+                SUM(CASE WHEN b.SaleDate > DATE_SUB(mx.max_date, INTERVAL 60 DAY)
+                              AND b.SaleDate <= DATE_SUB(mx.max_date, INTERVAL 30 DAY)
+                         THEN b.QtySold END)                                AS prev_qty
+            FROM base b
+            CROSS JOIN mx
+            GROUP BY mx.max_date
+        """), {"start_dt": start_dt_s, "end_dt": end_dt_s, **item_params}).fetchone()
+
+        if summary_row is None:
+            summary_row = (0, 0, 0, 0, None, 0, 0, 0)
 
         total_records_in_range = int(summary_row[0] or 0)
         active_items           = int(summary_row[1] or 0)
         total_qty              = float(summary_row[2] or 0)
         total_revenue          = float(summary_row[3] or 0)
-        max_date               = summary_row[4]  # Python date/datetime or None
-
-        # ----- Monthly growth -----
-        monthly_growth = 0.0
-        if max_date:
-            max_date_d    = max_date.date() if hasattr(max_date, 'date') else max_date
-            current_start = max_date_d - timedelta(days=30)
-            prev_start    = max_date_d - timedelta(days=60)
-
-            growth_row = db.execute(text("""
-                SELECT
-                    SUM(CASE WHEN SaleDate > :current_start AND SaleDate <= :max_date
-                             THEN QtySold END) AS current_qty,
-                    SUM(CASE WHEN SaleDate > :prev_start    AND SaleDate <= :current_start
-                             THEN QtySold END) AS prev_qty
+        total_records_all_time = int(summary_row[5] or 0)
+        if prev_start_date and prev_end_date:
+            prev_row = db.execute(text(f"""
+                SELECT COALESCE(SUM(QtySold), 0)
                 FROM BlinkitSales
-                WHERE SaleDate > :prev_start AND SaleDate <= :max_date
-            """), {
-                "current_start": current_start.isoformat(),
-                "max_date":      max_date_d.isoformat(),
-                "prev_start":    prev_start.isoformat(),
-            }).fetchone()
+                WHERE SaleDate >= :p_start AND SaleDate <= :p_end
+                {item_filter}
+            """), {"p_start": prev_start_date, "p_end": prev_end_date, **item_params}).fetchone()
+            prev_q = float(prev_row[0] or 0) if prev_row else 0.0
+            current_q = float(total_qty)
+        else:
+            current_q = float(summary_row[6] or 0)
+            prev_q    = float(summary_row[7] or 0)
 
-            current_q = float(growth_row[0] or 0)
-            prev_q    = float(growth_row[1] or 0)
-            if prev_q > 0:
-                monthly_growth = round(((current_q - prev_q) / prev_q) * 100, 1)
+        monthly_growth = round(((current_q - prev_q) / prev_q) * 100, 1) if prev_q > 0 else 0.0
 
-        # ----- Top 10 products -----
-        top_rows = db.execute(text("""
-            SELECT TOP 10
-                ItemId,
-                MAX(ItemName)   AS item_name,
-                SUM(QtySold)    AS total_qty,
-                SUM(MRP)        AS total_revenue
-            FROM BlinkitSales
-            WHERE SaleDate >= :start_dt
-            GROUP BY ItemId
-            ORDER BY SUM(QtySold) DESC
-        """), {"start_dt": start_dt_s}).fetchall()
+        # ----- All products -----
+        # asg_sku is joined in so cross-channel views can merge on the ASG SKU rather
+        # than on product name — the same product is named differently per channel.
+        top_rows = db.execute(text(f"""
+            SELECT
+                s.ItemId,
+                MAX(s.ItemName)   AS item_name,
+                SUM(s.QtySold)    AS total_qty,
+                SUM(s.MRP)        AS total_revenue,
+                MIN(s.SaleDate)   AS first_sale,
+                MAX(s.SaleDate)   AS last_sale,
+                MAX(p.AsgSku)     AS asg_sku
+            FROM BlinkitSales s
+            LEFT JOIN Products p ON p.BlinkitId = CAST(s.ItemId AS CHAR(50)) COLLATE utf8mb4_general_ci  -- was NVARCHAR(50)
+            WHERE s.SaleDate >= :start_dt AND s.SaleDate <= :end_dt
+            {item_filter.replace('ItemId', 's.ItemId').replace('ItemName', 's.ItemName')}
+            GROUP BY s.ItemId
+            ORDER BY SUM(s.QtySold) DESC
+        """), {"start_dt": start_dt_s, "end_dt": end_dt_s, **item_params}).fetchall()
 
         top_products = [
             {
                 "item_id":       int(row[0] or 0),
                 "item_name":     row[1] or str(row[0]),
+                "asg_sku":       row[6] or "",
                 "total_qty":     float(row[2] or 0),
                 "total_revenue": float(row[3] or 0),
+                "first_sale":    row[4].strftime('%d-%m-%Y') if row[4] else None,
+                "last_sale":     row[5].strftime('%d-%m-%Y') if row[5] else None,
             }
             for row in top_rows
         ]
 
         # ----- Daily / Monthly trend -----
         # First try daily grouping; if only 1 distinct date fall back to monthly
-        daily_rows = db.execute(text("""
+        daily_rows = db.execute(text(f"""
             SELECT
                 SaleDate,
                 SUM(QtySold)    AS total_qty,
                 SUM(MRP)        AS total_revenue
             FROM BlinkitSales
-            WHERE SaleDate >= :start_dt
+            WHERE SaleDate >= :start_dt AND SaleDate <= :end_dt
+            {item_filter}
             GROUP BY SaleDate
             ORDER BY SaleDate
-        """), {"start_dt": start_dt_s}).fetchall()
+        """), {"start_dt": start_dt_s, "end_dt": end_dt_s, **item_params}).fetchall()
 
         if len(daily_rows) > 1:
             daily_trend = [
@@ -1460,16 +1770,17 @@ async def get_blinkit_sales_analytics(
                 for row in daily_rows
             ]
         else:
-            monthly_rows = db.execute(text("""
+            monthly_rows = db.execute(text(f"""
                 SELECT
-                    CONVERT(varchar(7), SaleDate, 120) AS month,
+                    DATE_FORMAT(SaleDate, '%Y-%m') AS month,
                     SUM(QtySold)    AS total_qty,
                     SUM(MRP)        AS total_revenue
                 FROM BlinkitSales
-                WHERE SaleDate IS NOT NULL
-                GROUP BY CONVERT(varchar(7), SaleDate, 120)
-                ORDER BY CONVERT(varchar(7), SaleDate, 120)
-            """)).fetchall()
+                WHERE SaleDate >= :start_dt AND SaleDate <= :end_dt
+                {item_filter}
+                GROUP BY DATE_FORMAT(SaleDate, '%Y-%m')
+                ORDER BY DATE_FORMAT(SaleDate, '%Y-%m')
+            """), {"start_dt": start_dt_s, "end_dt": end_dt_s, **item_params}).fetchall()
             daily_trend = [
                 {
                     "date":          row[0],
@@ -1494,7 +1805,8 @@ async def get_blinkit_sales_analytics(
             "total_records_in_range": total_records_in_range,
             "total_records_all_time": total_records_all_time,
             "date_range": {
-                "start": start_dt.isoformat(),
+                # start_dt is None in all-time mode (no lower bound) — must stay guarded
+                "start": start_dt.isoformat() if start_dt else None,
                 "end":   end_dt.isoformat(),
                 "days":  days,
             }
@@ -1505,13 +1817,80 @@ async def get_blinkit_sales_analytics(
 
 
 # ============================================================
+# ENDPOINT 7b: Blinkit Sales — All Products (paginated)
+# ============================================================
+@router.get("/products")
+async def list_blinkit_sales_products(
+    search: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    start_date: Optional[str] = Query(None, description="Filter from date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="Filter to date YYYY-MM-DD"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """List all products from BlinkitSales aggregated by ItemId, with pagination, search, and date range."""
+    try:
+        clauses = ["ItemId IS NOT NULL"]
+        params: dict = {"offset": (page - 1) * page_size, "page_size": page_size}
+        if search:
+            clauses.append("(ItemName LIKE :search OR CAST(ItemId AS CHAR) COLLATE utf8mb4_general_ci LIKE :search)")  # was NVARCHAR
+            params["search"] = f"%{search}%"
+        if start_date:
+            clauses.append("SaleDate >= :start_date")
+            params["start_date"] = start_date
+        if end_date:
+            clauses.append("SaleDate <= :end_date")
+            params["end_date"] = end_date
+        where = "WHERE " + " AND ".join(clauses)
+
+        total = int(db.execute(text(f"SELECT COUNT(DISTINCT ItemId) FROM BlinkitSales {where}"), params).scalar() or 0)
+
+        rows = db.execute(text(f"""
+            SELECT
+                ItemId,
+                MAX(ItemName)    AS item_name,
+                SUM(QtySold)     AS total_qty,
+                SUM(MRP)         AS total_revenue,
+                MIN(SaleDate)    AS first_sale,
+                MAX(SaleDate)    AS last_sale
+            FROM BlinkitSales
+            {where}
+            GROUP BY ItemId
+            ORDER BY SUM(QtySold) DESC
+            LIMIT :page_size OFFSET :offset
+        """), params).fetchall()
+
+        items = [
+            {
+                "itemId":       str(row[0]) if row[0] is not None else "",
+                "itemName":     row[1] or str(row[0]) or "Unknown",
+                "totalQty":     float(row[2] or 0),
+                "totalRevenue": float(row[3] or 0),
+                "firstSale":    row[4].isoformat() if row[4] else None,
+                "lastSale":     row[5].isoformat() if row[5] else None,
+            }
+            for row in rows
+        ]
+
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        return {"items": items, "total": total, "page": page, "page_size": page_size, "total_pages": total_pages}
+
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Blinkit products query failed: {exc}")
+
+
+# ============================================================
 # ENDPOINT 8: Distributor Stock — Query
 # ============================================================
 @router.get("/distributor-stock")
 async def get_distributor_stock(
     search: Optional[str] = Query(None),
     distributor_id: Optional[int] = Query(None, description="Filter by distributor (1=RK, 2=Eagle)"),
-    report_date: Optional[str] = Query(None, description="Filter by report date (YYYY-MM-DD)"),
+    report_date: Optional[str] = Query(None, description="Filter by exact report date (YYYY-MM-DD)"),
+    date_from: Optional[str] = Query(None, description="Filter from date (YYYY-MM-DD)"),
+    date_to: Optional[str] = Query(None, description="Filter to date (YYYY-MM-DD)"),
+    region: Optional[str] = Query(None, description="Filter by region: dl, mh, kt, wb"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -1529,20 +1908,47 @@ async def get_distributor_stock(
             query = query.filter(DistributorStockData.ReportDate == rd)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
-    else:
-        latest = db.query(sqlfunc.max(DistributorStockData.ReportDate)).scalar()
-        if latest:
-            query = query.filter(DistributorStockData.ReportDate == latest)
+
+    if date_from:
+        try:
+            df = datetime.strptime(date_from, "%Y-%m-%d").date()
+            query = query.filter(DistributorStockData.ReportDate >= df)
+        except ValueError:
+            pass
+
+    if date_to:
+        try:
+            dt = datetime.strptime(date_to, "%Y-%m-%d").date()
+            query = query.filter(DistributorStockData.ReportDate <= dt)
+        except ValueError:
+            pass
 
     if search:
-        query = query.filter(DistributorStockData.ItemName.ilike(f"%{search}%"))
+        query = query.filter(or_(
+            DistributorStockData.ItemName.ilike(f"%{search}%"),
+            DistributorStockData.SKU.ilike(f"%{search}%"),
+        ))
+
+    region_map = {
+        'dl': DistributorStockData.DL_Qty,
+        'mh': DistributorStockData.MH_Qty,
+        'kt': DistributorStockData.KT_Qty,
+        'wb': DistributorStockData.WB_Qty,
+        'hr': DistributorStockData.HR_Qty,
+    }
+    if region and region in region_map:
+        query = query.filter(region_map[region] > 0)
 
     total = query.count()
 
     stats_row = query.with_entities(
-        sqlfunc.sum(DistributorStockData.OpeningQty).label('total_opening'),
         sqlfunc.sum(DistributorStockData.ClosingQty).label('total_closing'),
-        sqlfunc.sum(DistributorStockData.SaleQty).label('total_sale'),
+        sqlfunc.sum(DistributorStockData.DL_Qty).label('total_dl'),
+        sqlfunc.sum(DistributorStockData.MH_Qty).label('total_mh'),
+        sqlfunc.sum(DistributorStockData.KT_Qty).label('total_kt'),
+        sqlfunc.sum(DistributorStockData.WB_Qty).label('total_wb'),
+        sqlfunc.sum(DistributorStockData.HR_Qty).label('total_hr'),
+        sqlfunc.count(sqlfunc.distinct(DistributorStockData.ItemName)).label('total_skus'),
     ).one()
 
     offset = (page - 1) * page_size
@@ -1550,7 +1956,7 @@ async def get_distributor_stock(
 
     dates_list = db.query(DistributorStockData.ReportDate).distinct().order_by(
         desc(DistributorStockData.ReportDate)
-    ).limit(20).all()
+    ).all()
 
     return {
         "items": [item.to_dict() for item in items],
@@ -1559,13 +1965,154 @@ async def get_distributor_stock(
         "page_size": page_size,
         "total_pages": (total + page_size - 1) // page_size,
         "stats": {
-            "totalOpeningQty": int(stats_row.total_opening or 0),
             "totalClosingQty": int(stats_row.total_closing or 0),
-            "totalSaleQty": int(stats_row.total_sale or 0),
+            "totalDlQty": int(stats_row.total_dl or 0),
+            "totalMhQty": int(stats_row.total_mh or 0),
+            "totalKtQty": int(stats_row.total_kt or 0),
+            "totalWbQty": int(stats_row.total_wb or 0),
+            "totalHrQty": int(stats_row.total_hr or 0),
+            "totalSkus": int(stats_row.total_skus or 0),
         },
         "filters": {
             "report_dates": [d[0].isoformat() for d in dates_list if d[0]],
         }
+    }
+
+
+# ============================================================
+# ENDPOINT 8a: Distributor Stock — Preview (parse without saving)
+# ============================================================
+@router.post("/distributor-stock/preview")
+async def preview_distributor_stock(
+    file: UploadFile = File(...),
+    distributor_id: Optional[int] = Query(None),
+    channel: Optional[str] = Query(None),
+    report_date: Optional[str] = Query(None, description="Override report date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Parse distributor stock file and return preview rows without saving."""
+    if current_user.Role not in ['Admin', 'Manager']:
+        raise HTTPException(status_code=403, detail="Admin or Manager role required")
+
+    # Resolve distributor
+    if channel:
+        dist = db.query(Distributor).filter(Distributor.Channel == channel, Distributor.Active == True).first()
+        if not dist:
+            raise HTTPException(status_code=404, detail=f"No active distributor found for channel '{channel}'")
+        distributor_id = dist.Id
+    elif distributor_id is None:
+        raise HTTPException(status_code=400, detail="Provide either distributor_id or channel query param")
+
+    contents = await file.read()
+    filename = file.filename or "unknown.xlsx"
+    df = read_file(contents, filename)
+
+    # Must list every column in upload_distributor_stock's col_map.
+    col_map = {}
+    assigned_targets: dict[str, str] = {}
+    for col in df.columns:
+        cl = str(col).strip().lower().replace(' ', '_').replace('-', '_')
+        target = None
+        if cl in ('report_date', 'reportdate', 'date', 'week_date', 'week', 'report_week'):
+            target = 'report_date'
+        elif cl in ('item_name', 'itemname', 'product_name', 'product', 'item',
+                    'name', 'description', 'product_description', 'sku_name', 'item_description'):
+            target = 'item_name'
+        elif cl in ('opening_qty', 'openingqty', 'opening', 'open_qty', 'opening_stock',
+                    'op_stock', 'open_stock', 'opening_quantity'):
+            target = 'opening_qty'
+        elif cl in ('closing_qty', 'closingqty', 'closing', 'close_qty', 'closing_stock',
+                    'cl_stock', 'close_stock', 'closing_quantity',
+                    'total_stock', 'total_qty', 'total_quantity', 'stock', 'current_stock'):
+            target = 'closing_qty'
+        elif cl in ('sale_qty', 'saleqty', 'sales_qty', 'sold_qty', 'dispatched_qty', 'dispatch',
+                    'dispatched', 'dispatch_qty', 'dispatched_quantity', 'sale', 'sales',
+                    'blinkit_dispatch', 'blinkit_sale', 'sold'):
+            target = 'sale_qty'
+        elif cl in ('sku', 'sku_code', 'asg_sku', 'product_sku', 'item_sku', 'model_number', 'model_no'):
+            target = 'sku'
+        elif cl == 'dl':
+            target = 'dl_qty'
+        elif cl == 'mh':
+            target = 'mh_qty'
+        elif cl in ('kt', 'kar', 'ka'):
+            target = 'kt_qty'
+        elif cl == 'wb':
+            target = 'wb_qty'
+        elif cl in ('hr', 'har', 'haryana'):
+            target = 'hr_qty'
+        if target:
+            if target in assigned_targets:
+                del col_map[assigned_targets[target]]
+            col_map[col] = target
+            assigned_targets[target] = col
+    from app.routers.uploads import check_column_warnings
+    column_warnings = check_column_warnings(
+        list(df.columns), col_map,
+        required_targets=['item_name', 'closing_qty'],
+        optional_targets=['dl_qty', 'mh_qty', 'kt_qty', 'wb_qty', 'hr_qty', 'opening_qty', 'sale_qty', 'sku'],
+    )
+    df = df.rename(columns=col_map)
+
+    # Override date if provided
+    override_date = None
+    if report_date:
+        try:
+            from datetime import datetime as dt_obj
+            override_date = dt_obj.strptime(report_date, '%Y-%m-%d').date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid report_date format. Use YYYY-MM-DD")
+
+    rows = []
+    detected_date = None
+    missing_date_rows = 0
+    for idx, row in df.iterrows():
+        item_name = safe_str(row.get('item_name'), 300)
+        if not item_name:
+            continue
+        rd = override_date or _parse_date(row.get('report_date'))
+        if rd is None:
+            missing_date_rows += 1
+            continue
+        if detected_date is None:
+            detected_date = rd.isoformat()
+        rows.append({
+            "itemName": item_name,
+            "sku": safe_str(row.get('sku'), 100),
+            "openingQty": safe_int(row.get('opening_qty')),
+            "closingQty": safe_int(row.get('closing_qty')),
+            "saleQty": safe_int(row.get('sale_qty')),
+            "dlQty": safe_int(row.get('dl_qty')),
+            "mhQty": safe_int(row.get('mh_qty')),
+            "ktQty": safe_int(row.get('kt_qty')),
+            "wbQty": safe_int(row.get('wb_qty')),
+            "hrQty": safe_int(row.get('hr_qty')),
+            "reportDate": rd.isoformat(),
+        })
+
+    # Duplicate check: does data already exist for this distributor + detected date?
+    duplicate_warning = None
+    if detected_date and distributor_id:
+        existing_count = db.query(DistributorStockData).filter(
+            DistributorStockData.DistributorId == distributor_id,
+            DistributorStockData.ReportDate == detected_date,
+        ).count()
+        if existing_count > 0:
+            duplicate_warning = f"Data for {detected_date} already exists ({existing_count} records). Uploading will overwrite existing records for this date."
+
+    if missing_date_rows:
+        column_warnings = list(column_warnings) + [
+            f"{missing_date_rows} row(s) have no readable report date and will be refused. "
+            "Enter the report date before uploading."
+        ]
+
+    return {
+        "rows": rows,
+        "detectedDate": detected_date,
+        "totalRows": len(rows),
+        "duplicateWarning": duplicate_warning,
+        "columnWarnings": column_warnings,
     }
 
 
@@ -1577,6 +2124,7 @@ async def upload_distributor_stock(
     file: UploadFile = File(...),
     distributor_id: Optional[int] = Query(None, description="Distributor ID"),
     channel: Optional[str] = Query(None, description="Channel name: Amazon or Blinkit (looked up dynamically)"),
+    report_date: Optional[str] = Query(None, description="Override report date for all rows (YYYY-MM-DD)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -1608,21 +2156,69 @@ async def upload_distributor_stock(
     filename = file.filename or "unknown.xlsx"
     df = read_file(contents, filename)
 
-    # Normalize column names
+    # Normalize column names — build col_map, then deduplicate by keeping last assignment
+    # so that a more specific column (e.g. ITEM) wins over a generic one (e.g. SKU)
     col_map = {}
+    assigned_targets: dict[str, str] = {}  # target → last source col that maps to it
     for col in df.columns:
-        cl = str(col).strip().lower().replace(' ', '_')
-        if cl in ('report_date', 'reportdate', 'date', 'week_date'):
-            col_map[col] = 'report_date'
-        elif cl in ('item_name', 'itemname', 'product_name', 'product', 'item'):
-            col_map[col] = 'item_name'
-        elif cl in ('opening_qty', 'openingqty', 'opening', 'open_qty', 'opening_stock'):
-            col_map[col] = 'opening_qty'
-        elif cl in ('closing_qty', 'closingqty', 'closing', 'close_qty', 'closing_stock'):
-            col_map[col] = 'closing_qty'
-        elif cl in ('sale_qty', 'saleqty', 'sales_qty', 'sold_qty', 'dispatched_qty', 'dispatch'):
-            col_map[col] = 'sale_qty'
+        cl = str(col).strip().lower().replace(' ', '_').replace('-', '_')
+        target = None
+        if cl in ('report_date', 'reportdate', 'date', 'week_date', 'week', 'report_week'):
+            target = 'report_date'
+        elif cl in ('item_name', 'itemname', 'product_name', 'product', 'item',
+                    'name', 'description', 'product_description', 'sku_name', 'item_description'):
+            target = 'item_name'
+        elif cl in ('opening_qty', 'openingqty', 'opening', 'open_qty', 'opening_stock',
+                    'op_stock', 'open_stock', 'opening_quantity'):
+            target = 'opening_qty'
+        elif cl in ('closing_qty', 'closingqty', 'closing', 'close_qty', 'closing_stock',
+                    'cl_stock', 'close_stock', 'closing_quantity',
+                    'total_stock', 'total_qty', 'total_quantity', 'stock', 'current_stock'):
+            target = 'closing_qty'
+        elif cl in ('sale_qty', 'saleqty', 'sales_qty', 'sold_qty', 'dispatched_qty', 'dispatch',
+                    'dispatched', 'dispatch_qty', 'dispatched_quantity', 'sale', 'sales',
+                    'blinkit_dispatch', 'blinkit_sale', 'sold'):
+            target = 'sale_qty'
+        elif cl in ('sku', 'sku_code', 'asg_sku', 'product_sku', 'item_sku', 'model_number', 'model_no'):
+            target = 'sku'
+        elif cl == 'dl':
+            target = 'dl_qty'
+        elif cl == 'mh':
+            target = 'mh_qty'
+        elif cl in ('kt', 'kar', 'ka'):
+            target = 'kt_qty'
+        elif cl == 'wb':
+            target = 'wb_qty'
+        elif cl in ('hr', 'har', 'haryana'):
+            target = 'hr_qty'
+        if target:
+            # If a previous column already mapped to this target, drop its mapping first
+            if target in assigned_targets:
+                del col_map[assigned_targets[target]]
+            col_map[col] = target
+            assigned_targets[target] = col
     df = df.rename(columns=col_map)
+
+    # Parse optional date override from query param
+    override_date = None
+    if report_date:
+        try:
+            from datetime import datetime as dt_obj
+            override_date = dt_obj.strptime(report_date, '%Y-%m-%d').date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid report_date format. Use YYYY-MM-DD")
+
+    if not override_date:
+        undated = sum(
+            1 for _, r in df.iterrows()
+            if safe_str(r.get('item_name'), 300) and _parse_date(r.get('report_date')) is None
+        )
+        if undated:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{undated} row(s) have no readable report date. Nothing was saved. "
+                       "Enter the report date and upload again.",
+            )
 
     rows_processed = 0
     rows_skipped = 0
@@ -1635,29 +2231,50 @@ async def upload_distributor_stock(
                 rows_skipped += 1
                 continue
 
-            report_date = _parse_date(row.get('report_date'))
-            if not report_date:
-                report_date = date.today()
+            row_date = override_date or _parse_date(row.get('report_date'))
 
-            # Skip duplicate (DistributorId + ReportDate + ItemName)
+            sku = safe_str(row.get('sku'), 100)
+            opening_qty = safe_int(row.get('opening_qty'))
+            closing_qty = safe_int(row.get('closing_qty'))
+            sale_qty = safe_int(row.get('sale_qty'))
+            dl_qty = safe_int(row.get('dl_qty'))
+            mh_qty = safe_int(row.get('mh_qty'))
+            kt_qty = safe_int(row.get('kt_qty'))
+            wb_qty = safe_int(row.get('wb_qty'))
+            hr_qty = safe_int(row.get('hr_qty'))
+
+            # Upsert: update quantities if row already exists (DistributorId + ReportDate + ItemName)
             existing = db.query(DistributorStockData).filter(
                 DistributorStockData.DistributorId == distributor_id,
-                DistributorStockData.ReportDate == report_date,
+                DistributorStockData.ReportDate == row_date,
                 DistributorStockData.ItemName == item_name
             ).first()
             if existing:
-                rows_skipped += 1
-                continue
-
-            record = DistributorStockData(
-                ReportDate=report_date,
-                DistributorId=distributor_id,
-                ItemName=item_name,
-                OpeningQty=safe_int(row.get('opening_qty')),
-                ClosingQty=safe_int(row.get('closing_qty')),
-                SaleQty=safe_int(row.get('sale_qty')),
-            )
-            db.add(record)
+                existing.SKU = sku
+                existing.OpeningQty = opening_qty
+                existing.ClosingQty = closing_qty
+                existing.SaleQty = sale_qty
+                existing.DL_Qty = dl_qty
+                existing.MH_Qty = mh_qty
+                existing.KT_Qty = kt_qty
+                existing.WB_Qty = wb_qty
+                existing.HR_Qty = hr_qty
+            else:
+                record = DistributorStockData(
+                    ReportDate=row_date,
+                    DistributorId=distributor_id,
+                    ItemName=item_name,
+                    SKU=sku,
+                    OpeningQty=opening_qty,
+                    ClosingQty=closing_qty,
+                    SaleQty=sale_qty,
+                    DL_Qty=dl_qty,
+                    MH_Qty=mh_qty,
+                    KT_Qty=kt_qty,
+                    WB_Qty=wb_qty,
+                    HR_Qty=hr_qty,
+                )
+                db.add(record)
             rows_processed += 1
 
         except Exception as e:

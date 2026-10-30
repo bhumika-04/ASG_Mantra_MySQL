@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
+import { fmtDate, fmtCurrency, fmtN, todayIST } from '@/lib/format';
 
 interface UploadResult {
   success: boolean;
@@ -82,6 +83,8 @@ interface SemanticPreview {
   newProducts: NewProduct[];
   detectedDate: string | null; // null = date not found in CSV metadata
   duplicateDataWarning?: string | null; // Warning if similar data already exists
+  mandatoryDataWarning?: string | null; // Core metric column is blank for every row — likely the wrong file
+  columnWarnings?: string[]; // Warnings about extra or missing columns
   poSummary?: {
     poNumber: string;
     shipToLocationCode: string;
@@ -92,6 +95,7 @@ interface SemanticPreview {
     paymentTerms: string;
   }[];
   poItems?: POItem[];
+  duplicatePos?: { poNumber: string; uploadedOn: string }[];
 }
 
 export default function AmazonUploadPage() {
@@ -108,6 +112,7 @@ export default function AmazonUploadPage() {
   const [isExtracting, setIsExtracting] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
   const [packingAlerts, setPackingAlerts] = useState<{ asin: string; title: string; ordered_qty: number; packed_qty: number; gap: number }[]>([]);
+  const [inventoryWarnings, setInventoryWarnings] = useState<{ asin: string; title: string; ordered_qty: number; packed_qty: number; shortfall: number }[]>([]);
 
   // Hidden file input refs for Sales and Inventory
   const salesFileInputRef = useRef<HTMLInputElement>(null);
@@ -136,8 +141,11 @@ export default function AmazonUploadPage() {
           newProducts: result.newProducts ?? [],
           detectedDate,
           duplicateDataWarning: result.duplicateDataWarning ?? null,
+          mandatoryDataWarning: result.mandatoryDataWarning ?? null,
+          columnWarnings: result.columnWarnings ?? [],
           poSummary: result.poSummary,
           poItems: result.poItems,
+          duplicatePos: result.duplicatePos ?? [],
         });
         // Pre-fill the date input if detected
         setReportDate(detectedDate ?? '');
@@ -160,6 +168,7 @@ export default function AmazonUploadPage() {
     }
     setIsUploading(true);
     setPackingAlerts([]);
+    setInventoryWarnings([]);
     // Always use the user's date (which may be the detected date or user-edited)
     const dateOverride = semanticPreview.uploadType !== 'amazon/purchase-orders' ? reportDate : undefined;
     try {
@@ -172,6 +181,9 @@ export default function AmazonUploadPage() {
         result = await api.upload.amazonPurchaseOrders(semanticPreview.file);
         if (result.data?.packing_alerts?.length > 0) {
           setPackingAlerts(result.data.packing_alerts);
+        }
+        if (result.data?.inventory_warnings?.length > 0) {
+          setInventoryWarnings(result.data.inventory_warnings);
         }
       }
       setUploadResult(result);
@@ -261,6 +273,7 @@ export default function AmazonUploadPage() {
     if (!pdfExtractData) return;
     setIsConfirming(true);
     setPackingAlerts([]);
+    setInventoryWarnings([]);
     try {
       const result: any = await api.upload.amazonPOConfirmPdf({
         header: pdfExtractData.header,
@@ -269,6 +282,9 @@ export default function AmazonUploadPage() {
       if (result.success) {
         if (result.data?.packing_alerts?.length > 0) {
           setPackingAlerts(result.data.packing_alerts);
+        }
+        if (result.data?.inventory_warnings?.length > 0) {
+          setInventoryWarnings(result.data.inventory_warnings);
         }
         toast.success(result.message);
 
@@ -302,6 +318,10 @@ export default function AmazonUploadPage() {
 
   const handleCancelPdfPreview = () => {
     setPdfExtractData(null);
+  };
+
+  const updatePdfHeader = (field: string, value: string) => {
+    setPdfExtractData((prev: any) => prev ? { ...prev, header: { ...prev.header, [field]: value || null } } : prev);
   };
 
   const formatINR = (val: number | null | undefined) => {
@@ -468,9 +488,42 @@ export default function AmazonUploadPage() {
                       type="date"
                       value={reportDate}
                       onChange={(e) => setReportDate(e.target.value)}
-                      max={new Date().toISOString().split('T')[0]}
+                      max={todayIST()}
                       className={`text-sm border rounded px-2 py-1 bg-white focus:outline-none focus:ring-2 ${semanticPreview.detectedDate ? 'border-blue-300 focus:ring-blue-400' : 'border-amber-300 focus:ring-amber-400'}`}
                     />
+                  </div>
+                </div>
+              )}
+
+              {/* Mandatory Data Warning — a core metric column is blank for every row,
+                  usually meaning the wrong file was picked for this section (e.g. an
+                  Inventory report uploaded to Sales, or vice versa). Shown ahead of the
+                  other warnings since it's the most likely to mean "stop and check". */}
+              {semanticPreview.mandatoryDataWarning && (
+                <div className="p-3 bg-red-50 border border-red-300 rounded-lg">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="h-4 w-4 text-red-600 flex-shrink-0" />
+                    <span className="text-sm font-semibold text-red-800">
+                      Wrong file for this section?
+                    </span>
+                  </div>
+                  <p className="text-sm text-red-700 mt-2 ml-6">
+                    {semanticPreview.mandatoryDataWarning}
+                  </p>
+                </div>
+              )}
+
+              {/* Column Warnings */}
+              {(semanticPreview.columnWarnings?.length ?? 0) > 0 && (
+                <div className="p-3 bg-orange-50 border border-orange-200 rounded-lg">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 text-orange-500 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <span className="text-sm font-semibold text-orange-800">Column warnings</span>
+                      {semanticPreview.columnWarnings!.map((w, i) => (
+                        <p key={i} className="text-xs text-orange-700 mt-1">{w}</p>
+                      ))}
+                    </div>
                   </div>
                 </div>
               )}
@@ -535,6 +588,18 @@ export default function AmazonUploadPage() {
                 </div>
               )}
 
+              {/* Duplicate PO warning */}
+              {semanticPreview.duplicatePos && semanticPreview.duplicatePos.length > 0 && (
+                <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-300 rounded-lg">
+                  <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                  <div className="text-sm text-red-800">
+                    <span className="font-semibold">Duplicate POs detected:</span>{' '}
+                    {semanticPreview.duplicatePos.map(d => `PO ${d.poNumber} (uploaded ${d.uploadedOn})`).join(', ')}.
+                    {' '}These POs already exist in the database and will be skipped on confirm.
+                  </div>
+                </div>
+              )}
+
               {/* PO Summary header cards */}
               {semanticPreview.poSummary && semanticPreview.poSummary.length > 0 && (
                 <div className="overflow-x-auto bg-white rounded-lg border">
@@ -571,7 +636,7 @@ export default function AmazonUploadPage() {
                               {po.status || '—'}
                             </span>
                           </td>
-                          <td className="px-3 py-2 text-xs">{po.orderedOnDate || '—'}</td>
+                          <td className="px-3 py-2 text-xs">{fmtDate(po.orderedOnDate)}</td>
                           <td className="px-3 py-2 text-xs">{po.paymentTerms || '—'}</td>
                         </tr>
                       ))}
@@ -629,13 +694,13 @@ export default function AmazonUploadPage() {
                               ) : '—'}
                             </td>
                             <td className="px-3 py-1.5">{item.windowType || '—'}</td>
-                            <td className="px-3 py-1.5">{item.expectedDate || '—'}</td>
+                            <td className="px-3 py-1.5">{fmtDate(item.expectedDate)}</td>
                             <td className="px-3 py-1.5 text-right font-semibold">{item.quantityRequested ?? '—'}</td>
                             <td className="px-3 py-1.5 text-right text-green-700">{item.acceptedQuantity ?? '—'}</td>
                             <td className="px-3 py-1.5 text-right text-blue-700">{item.quantityReceived ?? '—'}</td>
                             <td className="px-3 py-1.5 text-right text-orange-600">{item.quantityOutstanding ?? '—'}</td>
-                            <td className="px-3 py-1.5 text-right">{item.unitCost != null ? `₹${item.unitCost.toFixed(2)}` : '—'}</td>
-                            <td className="px-3 py-1.5 text-right font-medium">{item.totalCost != null ? `₹${item.totalCost.toFixed(2)}` : '—'}</td>
+                            <td className="px-3 py-1.5 text-right">{item.unitCost != null ? fmtCurrency(item.unitCost, 2) : '—'}</td>
+                            <td className="px-3 py-1.5 text-right font-medium">{item.totalCost != null ? fmtCurrency(item.totalCost, 2) : '—'}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -688,24 +753,24 @@ export default function AmazonUploadPage() {
                             <td className="p-2 text-xs max-w-[300px] truncate" title={row.productTitle}>{row.productTitle}</td>
                             {semanticPreview.uploadType === 'amazon/sales' && semanticPreview.salesFormat === 'RKExcel' && (
                               <>
-                                <td className="p-2 text-right text-xs">{row.orderedUnits != null ? row.orderedUnits.toFixed(2) : '—'}</td>
-                                <td className="p-2 text-right text-xs">{row.orderedRevenue ? `₹${row.orderedRevenue.toFixed(2)}` : '—'}</td>
-                                <td className="p-2 text-right text-xs">{row.shippedUnits ?? '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.orderedUnits != null ? fmtN(Math.round(row.orderedUnits)) : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.orderedRevenue ? fmtCurrency(row.orderedRevenue, 2) : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.shippedUnits != null ? fmtN(Math.round(row.shippedUnits)) : '—'}</td>
                               </>
                             )}
                             {semanticPreview.uploadType === 'amazon/sales' && semanticPreview.salesFormat !== 'RKExcel' && (
                               <>
-                                <td className="p-2 text-right text-xs">{row.orderedUnits ?? '—'}</td>
-                                <td className="p-2 text-right text-xs">{row.orderedRevenue ? `₹${row.orderedRevenue.toFixed(2)}` : '—'}</td>
-                                <td className="p-2 text-right text-xs">{row.shippedUnits ?? '—'}</td>
-                                <td className="p-2 text-right text-xs">{row.shippedRevenue ? `₹${row.shippedRevenue.toFixed(2)}` : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.orderedUnits != null ? fmtN(Math.round(row.orderedUnits)) : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.orderedRevenue ? fmtCurrency(row.orderedRevenue, 2) : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.shippedUnits != null ? fmtN(Math.round(row.shippedUnits)) : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.shippedRevenue ? fmtCurrency(row.shippedRevenue, 2) : '—'}</td>
                               </>
                             )}
                             {semanticPreview.uploadType === 'amazon/inventory' && (
                               <>
-                                <td className="p-2 text-right text-xs">{row.sellableQuantity ?? '—'}</td>
-                                <td className="p-2 text-right text-xs">{row.unfulfilledQuantity ?? '—'}</td>
-                                <td className="p-2 text-right text-xs">{row.reservedQuantity ?? '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.sellableQuantity != null ? fmtN(Math.round(row.sellableQuantity)) : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.unfulfilledQuantity != null ? fmtN(Math.round(row.unfulfilledQuantity)) : '—'}</td>
+                                <td className="p-2 text-right text-xs">{row.reservedQuantity != null ? fmtN(Math.round(row.reservedQuantity)) : '—'}</td>
                               </>
                             )}
                           </tr>
@@ -725,7 +790,17 @@ export default function AmazonUploadPage() {
                   <Button variant="outline" onClick={handleCancelSemanticPreview} disabled={isUploading}>
                     Cancel
                   </Button>
-                  <Button onClick={handleConfirmSemanticUpload} disabled={isUploading}>
+                  <Button
+                    onClick={handleConfirmSemanticUpload}
+                    disabled={isUploading || !!semanticPreview.duplicateDataWarning || !!semanticPreview.mandatoryDataWarning}
+                    title={
+                      semanticPreview.mandatoryDataWarning
+                        ? 'Blocked: core data is blank for every row — this looks like the wrong file for this section.'
+                        : semanticPreview.duplicateDataWarning
+                        ? 'Blocked: this data already exists — re-uploading would be skipped anyway.'
+                        : undefined
+                    }
+                  >
                     {isUploading ? (
                       <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Uploading...</>
                     ) : (
@@ -738,7 +813,7 @@ export default function AmazonUploadPage() {
           </Card>
         )}
 
-        <Card>
+        {!semanticPreview && <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -763,7 +838,7 @@ export default function AmazonUploadPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <Tabs defaultValue="sales" className="w-full" onValueChange={(v) => { setActiveTab(v); setUploadResult(null); setSemanticPreview(null); setReportDate(''); setPackingAlerts([]); }}>
+            <Tabs value={activeTab} className="w-full" onValueChange={(v) => { setActiveTab(v); setUploadResult(null); setSemanticPreview(null); setReportDate(''); setPackingAlerts([]); setInventoryWarnings([]); }}>
               <TabsList className="grid w-full grid-cols-3">
                 <TabsTrigger value="sales" className="flex items-center gap-2">
                   <ShoppingCart className="h-4 w-4" />
@@ -826,6 +901,14 @@ export default function AmazonUploadPage() {
                       </CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-4">
+                      {/* Duplicate PO warning */}
+                      {pdfExtractData.duplicateWarning && (
+                        <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-300 rounded-lg">
+                          <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                          <div className="text-sm text-red-800 font-medium">{pdfExtractData.duplicateWarning}</div>
+                        </div>
+                      )}
+
                       {/* Warnings */}
                       {pdfExtractData.warnings && pdfExtractData.warnings.length > 0 && (
                         <div className="flex items-start gap-2 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
@@ -856,13 +939,52 @@ export default function AmazonUploadPage() {
                           <span className="text-gray-500 block text-xs">Ordered On</span>
                           <span className="font-medium">{pdfExtractData.header?.ordered_on_date || '—'}</span>
                         </div>
-                        <div className="p-2 bg-gray-50 rounded">
-                          <span className="text-gray-500 block text-xs">Ship To</span>
-                          <span className="font-medium">
-                            {pdfExtractData.header?.ship_to_location_code || '—'}
-                            {pdfExtractData.header?.ship_to_city ? ` - ${pdfExtractData.header.ship_to_city}` : ''}
-                            {pdfExtractData.header?.ship_to_state ? `, ${pdfExtractData.header.ship_to_state}` : ''}
-                          </span>
+                        <div className="p-2 bg-gray-50 rounded col-span-2 md:col-span-4">
+                          <span className="text-gray-500 block text-xs mb-1.5">Ship To — edit if extraction failed</span>
+                          <div className="flex gap-3 flex-wrap">
+                            <div className="flex-1 min-w-[110px]">
+                              <span className="text-gray-400 text-xs block mb-0.5">FC Code</span>
+                              <input
+                                type="text"
+                                value={pdfExtractData.header?.ship_to_location_code || ''}
+                                onChange={e => updatePdfHeader('ship_to_location_code', e.target.value)}
+                                placeholder="e.g. BOM7"
+                                className="w-full bg-white border border-gray-300 rounded text-sm px-2 py-1 focus:border-blue-500 focus:outline-none"
+                              />
+                            </div>
+                            <div className="flex-1 min-w-[130px]">
+                              <span className={`text-xs block mb-0.5 ${!pdfExtractData.header?.ship_to_city ? 'text-orange-500 font-medium' : 'text-gray-400'}`}>
+                                City{!pdfExtractData.header?.ship_to_city ? ' — needs input' : ''}
+                              </span>
+                              <input
+                                type="text"
+                                value={pdfExtractData.header?.ship_to_city || ''}
+                                onChange={e => updatePdfHeader('ship_to_city', e.target.value)}
+                                placeholder="Enter city..."
+                                className={`w-full bg-white border rounded text-sm px-2 py-1 focus:outline-none ${
+                                  !pdfExtractData.header?.ship_to_city
+                                    ? 'border-orange-400 focus:border-orange-500'
+                                    : 'border-gray-300 focus:border-blue-500'
+                                }`}
+                              />
+                            </div>
+                            <div className="flex-1 min-w-[130px]">
+                              <span className={`text-xs block mb-0.5 ${!pdfExtractData.header?.ship_to_state ? 'text-orange-500 font-medium' : 'text-gray-400'}`}>
+                                State{!pdfExtractData.header?.ship_to_state ? ' — needs input' : ''}
+                              </span>
+                              <input
+                                type="text"
+                                value={pdfExtractData.header?.ship_to_state || ''}
+                                onChange={e => updatePdfHeader('ship_to_state', e.target.value)}
+                                placeholder="Enter state..."
+                                className={`w-full bg-white border rounded text-sm px-2 py-1 focus:outline-none ${
+                                  !pdfExtractData.header?.ship_to_state
+                                    ? 'border-orange-400 focus:border-orange-500'
+                                    : 'border-gray-300 focus:border-blue-500'
+                                }`}
+                              />
+                            </div>
+                          </div>
                         </div>
                         <div className="p-2 bg-gray-50 rounded">
                           <span className="text-gray-500 block text-xs">Ship Window</span>
@@ -953,7 +1075,7 @@ export default function AmazonUploadPage() {
                           <Button variant="outline" onClick={handleCancelPdfPreview}>
                             Cancel
                           </Button>
-                          <Button onClick={handleConfirmPdfUpload} disabled={isConfirming}>
+                          <Button onClick={handleConfirmPdfUpload} disabled={isConfirming || !!pdfExtractData.duplicateWarning}>
                             {isConfirming ? (
                               <><Loader2 className="h-4 w-4 mr-2 animate-spin" /> Saving...</>
                             ) : (
@@ -1032,6 +1154,43 @@ export default function AmazonUploadPage() {
                     <p className="text-xs text-amber-700">Go to <span className="font-medium">Stock Upload</span> page to update packed quantities.</p>
                   </div>
                 )}
+
+                {/* Inventory Deduction Warnings */}
+                {inventoryWarnings.length > 0 && activeTab === 'po' && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-4 space-y-3">
+                    <div className="flex items-center gap-2 text-red-800">
+                      <AlertTriangle className="h-4 w-4 shrink-0" />
+                      <p className="font-medium text-sm">
+                        Insufficient packed inventory for {inventoryWarnings.length} item{inventoryWarnings.length > 1 ? 's' : ''} — deducted what was available
+                      </p>
+                    </div>
+                    <div className="overflow-x-auto rounded border border-red-200">
+                      <table className="w-full text-xs">
+                        <thead className="bg-red-100">
+                          <tr>
+                            <th className="text-left p-2 font-medium">ASIN</th>
+                            <th className="text-left p-2 font-medium">Product Title</th>
+                            <th className="text-right p-2 font-medium">Ordered</th>
+                            <th className="text-right p-2 font-medium">Was Packed</th>
+                            <th className="text-right p-2 font-medium text-red-700">Shortfall</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {inventoryWarnings.map((w, i) => (
+                            <tr key={i} className="border-t border-red-200 bg-white">
+                              <td className="p-2 font-mono">{w.asin}</td>
+                              <td className="p-2 max-w-[200px] truncate" title={w.title}>{w.title}</td>
+                              <td className="p-2 text-right">{w.ordered_qty}</td>
+                              <td className="p-2 text-right text-emerald-700">{w.packed_qty}</td>
+                              <td className="p-2 text-right font-semibold text-red-700">{w.shortfall}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="text-xs text-red-700">Packed inventory was automatically deducted. Please replenish stock for the shortfall quantities.</p>
+                  </div>
+                )}
               </TabsContent>
 
               {/* Inventory Upload Tab */}
@@ -1063,7 +1222,7 @@ export default function AmazonUploadPage() {
               </TabsContent>
             </Tabs>
           </CardContent>
-        </Card>
+        </Card>}
       </div>
     </ProtectedRoute>
   );

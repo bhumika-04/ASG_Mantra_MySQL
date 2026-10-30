@@ -4,10 +4,9 @@ Handles inventory alerts and notifications
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, and_
 from typing import Optional
 from pydantic import BaseModel
-from datetime import datetime
 
 from app.database import get_db
 from app.models.user import User
@@ -15,8 +14,9 @@ from app.models.alert import LowStockAlert
 from app.models.product import Product
 from app.models.inventory import Inventory
 from app.utils.dependencies import get_current_user
+from app.utils.timeutil import now_ist
 
-LOW_STOCK_THRESHOLD = 50  # Products with total stock below this are "Warning"
+from app.utils.stock import LOW_STOCK_THRESHOLD  # total stock (Packed + Unpacked) at or below this is low
 
 
 class ResolveAlertRequest(BaseModel):
@@ -111,7 +111,7 @@ async def resolve_alert(
 
     # Mark as resolved
     alert.IsResolved = True
-    alert.ResolvedAt = datetime.utcnow()
+    alert.ResolvedAt = now_ist()
     if body.remarks is not None:
         alert.Remarks = body.remarks
 
@@ -220,18 +220,39 @@ async def sync_alerts(
     - Products with 0 total stock → Critical "Out of Stock" alert
     - Products with total stock < LOW_STOCK_THRESHOLD → Warning "Low Stock" alert
     Skips products that already have an unresolved alert.
+    Admin only.
     """
-    # Get total stock per product across all channels
-    stock_sub = (
+    if current_user.Role != "Admin":
+        raise HTTPException(status_code=403, detail="Only an Admin can sync alerts")
+
+    # Use each product's own latest snapshot. A single global MAX date would drop
+    # products missing from the newest upload and raise a false "Out of Stock" alert.
+    latest_per_product = (
         db.query(
-            Inventory.ProductId,
-            func.sum(Inventory.CurrentStock).label("total_stock"),
+            Inventory.ProductId.label("pid"),
+            func.max(Inventory.InventoryDate).label("d"),
         )
         .group_by(Inventory.ProductId)
         .subquery()
     )
 
-    # Get all active products with their stock
+    stock_sub = (
+        db.query(
+            Inventory.ProductId,
+            func.sum(Inventory.PackedQty + Inventory.UnpackedQty).label("total_stock"),
+        )
+        .join(
+            latest_per_product,
+            and_(
+                Inventory.ProductId == latest_per_product.c.pid,
+                Inventory.InventoryDate == latest_per_product.c.d,
+            ),
+        )
+        .group_by(Inventory.ProductId)
+        .subquery()
+    )
+
+    # Get all active products with their stock (exclude auto-created unlinked)
     products = (
         db.query(
             Product.Id,
@@ -241,6 +262,7 @@ async def sync_alerts(
         )
         .outerjoin(stock_sub, Product.Id == stock_sub.c.ProductId)
         .filter(Product.IsActive == True)
+        .filter(~Product.AsgSku.like('UNLINKED-%'))
         .all()
     )
 
@@ -266,12 +288,12 @@ async def sync_alerts(
                 Channel=None,
                 AlertType="Out of Stock",
                 Severity="High",
-                Message=f"{product.ProductName} ({product.AsgSku or 'N/A'}) has 0 stock across all channels",
+                Message=f"{product.ProductName} ({product.AsgSku or 'N/A'}) has 0 units in the ASG warehouse",
                 IsResolved=False,
             )
             db.add(alert)
             created_count += 1
-        elif total_stock < LOW_STOCK_THRESHOLD:
+        elif total_stock <= LOW_STOCK_THRESHOLD:
             alert = LowStockAlert(
                 ProductId=product_id,
                 Channel=None,
@@ -288,7 +310,9 @@ async def sync_alerts(
     if existing_alert_product_ids:
         for product in products:
             total_stock = int(product.total_stock or 0)
-            if product.Id in existing_alert_product_ids and total_stock >= LOW_STOCK_THRESHOLD:
+            # Strictly greater: the exact complement of the `<= threshold` create rule above,
+            # so an alert is never created and resolved at the same value.
+            if product.Id in existing_alert_product_ids and total_stock > LOW_STOCK_THRESHOLD:
                 unresolved = (
                     db.query(LowStockAlert)
                     .filter(
@@ -299,7 +323,7 @@ async def sync_alerts(
                 )
                 for a in unresolved:
                     a.IsResolved = True
-                    a.ResolvedAt = datetime.utcnow()
+                    a.ResolvedAt = now_ist()
                     a.Remarks = "Auto-resolved: stock restored"
                     resolved_count += 1
 

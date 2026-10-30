@@ -5,6 +5,7 @@ import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import api from '@/lib/api';
+import { fmtDate } from '@/lib/format';
 import {
   Dialog,
   DialogContent,
@@ -179,8 +180,8 @@ export default function RoleManagementPage() {
 
     return (
       <div className="flex flex-wrap gap-2">
-        {visible.map((name, index) => (
-          <span key={index} className="px-2 py-1 bg-slate-100 text-slate-700 rounded text-xs">
+        {visible.map((name) => (
+          <span key={name} className="px-2 py-1 bg-slate-100 text-slate-700 rounded text-xs">
             {name}
           </span>
         ))}
@@ -249,11 +250,7 @@ export default function RoleManagementPage() {
                       <td className="p-4 text-muted-foreground">{role.description}</td>
                       <td className="p-4">{getPermissionBadges(role.permissions)}</td>
                       <td className="p-4 text-muted-foreground">
-                        {role.created_at ? new Date(role.created_at).toLocaleDateString('en-US', {
-                          month: 'numeric',
-                          day: 'numeric',
-                          year: 'numeric'
-                        }) : 'N/A'}
+                        {role.created_at ? fmtDate(role.created_at) : 'N/A'}
                       </td>
                       <td className="p-4">
                         <div className="flex items-center gap-2">

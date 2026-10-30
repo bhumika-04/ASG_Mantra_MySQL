@@ -12,6 +12,8 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronsUpDown,
+  BookmarkCheck,
+  RotateCcw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -34,6 +36,9 @@ export interface GridColumn<T> {
   width?: number;
   minWidth?: number;
   align?: 'left' | 'center' | 'right';
+  sticky?: boolean;
+  /** Allow cell content to wrap (e.g. multi-line product names). Default: false = single-line truncate */
+  wrap?: boolean;
 }
 
 interface DataGridProps<T> {
@@ -42,6 +47,18 @@ interface DataGridProps<T> {
   onRowClick?: (row: T) => void;
   gridState: ReturnType<typeof useDataGrid<T>>;
   pageSize?: number;
+  getRowClass?: (row: T) => string | undefined;
+  /** Return an explicit CSS color string for sticky-column backgrounds (e.g. 'rgb(254,242,242)' for red). Avoids Tailwind cascade issues where bg-background overrides row color classes. */
+  getRowBgColor?: (row: T) => string | undefined;
+  /** When provided, DataGrid operates in server-side pagination mode: data is already the current page's rows, and page navigation calls onPageChange instead of slicing locally. */
+  serverPagination?: {
+    total: number;
+    page: number;
+    pageSize: number;
+    onPageChange: (page: number) => void;
+  };
+  /** Hide the built-in pagination footer entirely. Use when a parent component provides its own navigation (e.g. po-lifecycle mixed-channel pagination). */
+  hideFooter?: boolean;
 }
 
 export type RowDensity = 'compact' | 'normal' | 'comfortable';
@@ -55,6 +72,8 @@ interface ViewOptionsButtonProps {
   onToggleColumn: (columnId: string) => void;
   rowDensity: RowDensity;
   onDensityChange: (density: RowDensity) => void;
+  onSave?: () => void;
+  onReset?: () => void;
 }
 
 export function ViewOptionsButton({
@@ -63,9 +82,20 @@ export function ViewOptionsButton({
   onToggleColumn,
   rowDensity,
   onDensityChange,
+  onSave,
+  onReset,
 }: ViewOptionsButtonProps) {
+  const [open, setOpen] = React.useState(false);
+  const [saved, setSaved] = React.useState(false);
+
+  const handleSave = () => {
+    onSave?.();
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
   return (
-    <DropdownMenu>
+    <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
         <Button variant="outline" size="sm" className="h-9 gap-2">
           <Settings2 className="h-4 w-4" />
@@ -81,6 +111,7 @@ export function ViewOptionsButton({
               key={column.id}
               checked={visibleColumns.has(column.id)}
               onCheckedChange={() => onToggleColumn(column.id)}
+              onSelect={(e) => e.preventDefault()}
             >
               <div className="flex items-center gap-2">
                 {visibleColumns.has(column.id) ? (
@@ -95,50 +126,130 @@ export function ViewOptionsButton({
         </div>
         <DropdownMenuSeparator />
         <DropdownMenuLabel>Row Density</DropdownMenuLabel>
-        <DropdownMenuItem onClick={() => onDensityChange('compact')}>
+        <DropdownMenuItem onSelect={(e) => e.preventDefault()} onClick={() => onDensityChange('compact')}>
           <Checkbox checked={rowDensity === 'compact'} className="mr-2" />
           Compact
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onDensityChange('normal')}>
+        <DropdownMenuItem onSelect={(e) => e.preventDefault()} onClick={() => onDensityChange('normal')}>
           <Checkbox checked={rowDensity === 'normal'} className="mr-2" />
           Normal
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => onDensityChange('comfortable')}>
+        <DropdownMenuItem onSelect={(e) => e.preventDefault()} onClick={() => onDensityChange('comfortable')}>
           <Checkbox checked={rowDensity === 'comfortable'} className="mr-2" />
           Comfortable
         </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <div className="flex flex-col gap-1.5 px-2 py-2">
+          {onSave && (
+            <Button
+              size="sm"
+              variant="default"
+              className="w-full h-8 text-xs gap-1.5"
+              onClick={handleSave}
+            >
+              <BookmarkCheck className="h-3.5 w-3.5" />
+              {saved ? 'Saved!' : 'Save as Default'}
+            </Button>
+          )}
+          <div className="flex gap-1.5">
+            {onReset && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="flex-1 h-8 text-xs gap-1.5 text-gray-500"
+                onClick={onReset}
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Reset
+              </Button>
+            )}
+            <Button
+              size="sm"
+              variant="outline"
+              className="flex-1 h-8 text-xs"
+              onClick={() => setOpen(false)}
+            >
+              Done
+            </Button>
+          </div>
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   );
 }
 
-// Custom Hook to manage grid state
-export function useDataGrid<T>(initialColumns: GridColumn<T>[]) {
+// Custom Hook to manage grid state with optional localStorage view persistence
+export function useDataGrid<T>(initialColumns: GridColumn<T>[], viewId?: string) {
+  const storageKey = viewId ? `techgenia-grid-${viewId}` : null;
+
+  const loadSavedView = () => {
+    if (!storageKey || typeof window === 'undefined') return null;
+    try { return JSON.parse(localStorage.getItem(storageKey) || 'null'); } catch { return null; }
+  };
+
+  const saveView = React.useCallback((cols: Set<string>, density: RowDensity) => {
+    if (!storageKey || typeof window === 'undefined') return;
+    try {
+      localStorage.setItem(storageKey, JSON.stringify({ visibleColumns: Array.from(cols), rowDensity: density }));
+    } catch {}
+  }, [storageKey]);
+
   const [columns, setColumns] = React.useState(initialColumns);
   const [columnWidths, setColumnWidths] = React.useState<Record<string, number>>(() => {
     const widths: Record<string, number> = {};
-    initialColumns.forEach((col) => {
-      widths[col.id] = col.width || 150;
-    });
+    initialColumns.forEach((col) => { widths[col.id] = col.width || col.minWidth || 100; });
     return widths;
   });
-  const [visibleColumns, setVisibleColumns] = React.useState<Set<string>>(
-    new Set(initialColumns.map((col) => col.id))
-  );
+
+  const allColumnIds = React.useMemo(() => new Set(initialColumns.map((col) => col.id)), []);
+
+  const [visibleColumns, setVisibleColumns] = React.useState<Set<string>>(() => {
+    const saved = loadSavedView();
+    if (saved?.visibleColumns) {
+      // Only keep IDs that exist in current columns (handles schema changes)
+      return new Set((saved.visibleColumns as string[]).filter((id) => allColumnIds.has(id)));
+    }
+    return new Set(initialColumns.map((col) => col.id));
+  });
+
   const [sortColumn, setSortColumn] = React.useState<string | null>(null);
   const [sortDirection, setSortDirection] = React.useState<SortDirection>(null);
-  const [rowDensity, setRowDensity] = React.useState<RowDensity>('compact');
+
+  const [rowDensity, setRowDensityState] = React.useState<RowDensity>(() => {
+    const saved = loadSavedView();
+    return saved?.rowDensity || 'compact';
+  });
+
   const [draggedColumn, setDraggedColumn] = React.useState<string | null>(null);
 
   const toggleColumnVisibility = (columnId: string) => {
     const newVisible = new Set(visibleColumns);
-    if (newVisible.has(columnId)) {
-      newVisible.delete(columnId);
-    } else {
-      newVisible.add(columnId);
-    }
+    if (newVisible.has(columnId)) { newVisible.delete(columnId); } else { newVisible.add(columnId); }
     setVisibleColumns(newVisible);
   };
+
+  const setColumnVisible = (columnId: string, visible: boolean) => {
+    setVisibleColumns(prev => {
+      const next = new Set(prev);
+      if (visible) next.add(columnId); else next.delete(columnId);
+      return next;
+    });
+  };
+
+  const setRowDensity = (density: RowDensity) => {
+    setRowDensityState(density);
+  };
+
+  const saveCurrentView = React.useCallback(() => {
+    saveView(visibleColumns, rowDensity);
+  }, [saveView, visibleColumns, rowDensity]);
+
+  const resetView = React.useCallback(() => {
+    if (!storageKey || typeof window === 'undefined') return;
+    try { localStorage.removeItem(storageKey); } catch {}
+    setVisibleColumns(new Set(initialColumns.map((col) => col.id)));
+    setRowDensityState('compact');
+  }, [storageKey, initialColumns]);
 
   return {
     columns,
@@ -155,6 +266,9 @@ export function useDataGrid<T>(initialColumns: GridColumn<T>[]) {
     setRowDensity,
     draggedColumn,
     setDraggedColumn,
+    saveCurrentView,
+    resetView,
+    setColumnVisible,
   };
 }
 
@@ -166,6 +280,10 @@ export function DataGrid<T extends Record<string, any>>({
   onRowClick,
   gridState,
   pageSize: defaultPageSize = 25,
+  getRowClass,
+  getRowBgColor,
+  serverPagination,
+  hideFooter = false,
 }: DataGridProps<T>) {
   const {
     columns,
@@ -182,7 +300,7 @@ export function DataGrid<T extends Record<string, any>>({
     setDraggedColumn,
   } = gridState;
 
-  const [resizingColumn, setResizingColumn] = React.useState<string | null>(null);
+  const [hoveredRow, setHoveredRow] = React.useState<number | null>(null);
 
   // Sort data
   const sortedData = React.useMemo(() => {
@@ -209,20 +327,31 @@ export function DataGrid<T extends Record<string, any>>({
     });
   }, [data, sortColumn, sortDirection, columns]);
 
-  // Pagination state
+  // Client-side pagination state (unused when serverPagination prop is provided)
   const [currentPage, setCurrentPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(defaultPageSize);
-  const totalPages = Math.max(1, Math.ceil(sortedData.length / pageSize));
 
-  // Reset to page 1 when data or pageSize changes and current page is out of bounds
+  // Effective pagination values — server overrides client when prop is present
+  const effectivePage = serverPagination ? serverPagination.page : currentPage;
+  const effectivePageSize = serverPagination ? serverPagination.pageSize : pageSize;
+  const effectiveTotal = serverPagination ? serverPagination.total : sortedData.length;
+  const effectiveTotalPages = Math.max(1, Math.ceil(effectiveTotal / effectivePageSize));
+
+  // Reset client page when data shrinks below current page (client pagination only)
   React.useEffect(() => {
-    if (currentPage > totalPages) setCurrentPage(1);
-  }, [sortedData.length, pageSize, totalPages, currentPage]);
+    if (!serverPagination && currentPage > effectiveTotalPages) setCurrentPage(1);
+  }, [sortedData.length, pageSize, effectiveTotalPages, currentPage, serverPagination]);
 
   const paginatedData = React.useMemo(() => {
+    if (serverPagination) return sortedData; // backend already returned the right page
     const start = (currentPage - 1) * pageSize;
     return sortedData.slice(start, start + pageSize);
-  }, [sortedData, currentPage, pageSize]);
+  }, [serverPagination, sortedData, currentPage, pageSize]);
+
+  const handlePaginationChange = (newPage: number) => {
+    if (serverPagination) serverPagination.onPageChange(newPage);
+    else setCurrentPage(newPage);
+  };
 
   const handleSort = (columnId: string) => {
     const column = columns.find((col) => col.id === columnId);
@@ -270,7 +399,6 @@ export function DataGrid<T extends Record<string, any>>({
   const handleResizeStart = (e: React.MouseEvent, columnId: string) => {
     e.preventDefault();
     e.stopPropagation();
-    setResizingColumn(columnId);
     const startX = e.clientX;
     const startWidth = columnWidths[columnId];
 
@@ -281,7 +409,6 @@ export function DataGrid<T extends Record<string, any>>({
     };
 
     const handleMouseUp = () => {
-      setResizingColumn(null);
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
@@ -292,20 +419,69 @@ export function DataGrid<T extends Record<string, any>>({
 
   const visibleColumnsArray = columns.filter((col: GridColumn<T>) => visibleColumns.has(col.id));
 
+  // Sticky column offsets — S.No is always col 0 at left:0, width 48px
+  const SNO_WIDTH = 48;
+  const stickyOffsets: Record<string, number> = {};
+  let stickyAcc = SNO_WIDTH;
+  visibleColumnsArray.forEach((col) => {
+    if (col.sticky) {
+      stickyOffsets[col.id] = stickyAcc;
+      stickyAcc += columnWidths[col.id] || col.width || 150;
+    }
+  });
+  const hasStickyUserCols = visibleColumnsArray.some((c) => c.sticky);
+  // The last sticky user column (or S.No if none) gets the right-shadow separator
+  const lastStickyUserCol = [...visibleColumnsArray].reverse().find((c) => c.sticky);
+
+  // Total table width so the table never squeezes columns below their specified widths
+  const totalTableWidth = SNO_WIDTH + visibleColumnsArray.reduce(
+    (sum, col) => sum + (columnWidths[col.id] || col.width || 150), 0
+  );
+
   const densityClasses: Record<RowDensity, string> = {
     compact: 'py-2',
     normal: 'py-3',
     comfortable: 'py-4',
   };
 
+  // Shadow style for the right edge of the frozen pane
+  const frozenShadow = '2px 0 6px -2px rgba(0,0,0,0.14)';
+
   return (
     <div className={cn('relative', className)}>
       {/* Grid Table */}
       <div className="rounded-lg border bg-card overflow-auto scrollbar-hide">
-        <table className="w-full border-collapse">
+        <table
+          className="border-collapse"
+          style={{ tableLayout: 'fixed', width: `max(100%, ${totalTableWidth}px)` }}
+        >
+          {/* Column widths — table-layout:fixed makes these authoritative */}
+          <colgroup>
+            <col style={{ width: `${SNO_WIDTH}px` }} />
+            {visibleColumnsArray.map((col) => (
+              <col key={col.id} style={{ width: `${columnWidths[col.id] || col.width || 150}px` }} />
+            ))}
+          </colgroup>
           {/* Header */}
-          <thead className="bg-muted/50 sticky top-0 z-10">
+          <thead className="bg-muted/50">
             <tr>
+              {/* S.No — always first, always sticky (left + top) */}
+              <th
+                className="px-3 py-3 text-left text-sm font-semibold uppercase tracking-wide whitespace-nowrap"
+                style={{
+                  width: `${SNO_WIDTH}px`,
+                  minWidth: `${SNO_WIDTH}px`,
+                  overflow: 'hidden',
+                  position: 'sticky',
+                  left: 0,
+                  top: 0,
+                  zIndex: 21,
+                  background: 'var(--muted)',
+                  boxShadow: !hasStickyUserCols ? frozenShadow : undefined,
+                }}
+              >
+                #
+              </th>
               {visibleColumnsArray.map((column) => (
                 <th
                   key={column.id}
@@ -321,14 +497,25 @@ export function DataGrid<T extends Record<string, any>>({
                     column.align === 'right' && 'text-right'
                   )}
                   style={{
-                    width: `${columnWidths[column.id]}px`,
-                    minWidth: `${column.minWidth || 100}px`,
+                    position: 'sticky',
+                    top: 0,
+                    overflow: 'hidden',
+                    width: `${columnWidths[column.id] || column.width || 150}px`,
+                    maxWidth: `${columnWidths[column.id] || column.width || 150}px`,
+                    zIndex: column.sticky ? 20 : 10,
+                    background: 'var(--muted)',
+                    ...(column.sticky ? {
+                      left: `${stickyOffsets[column.id]}px`,
+                      boxShadow: column === lastStickyUserCol ? frozenShadow : undefined,
+                    } : {}),
                   }}
                   onClick={() => column.sortable && handleSort(column.id)}
                 >
                   <div className="flex items-center gap-2">
-                    <GripVertical className="h-4 w-4 text-muted-foreground/50 cursor-grab flex-shrink-0" />
-                    <span className="flex-1 whitespace-nowrap overflow-hidden text-ellipsis">{column.header}</span>
+                    {!column.sticky && (
+                      <GripVertical className="h-4 w-4 text-muted-foreground/50 cursor-grab flex-shrink-0" />
+                    )}
+                    <span className="flex-1 whitespace-nowrap">{column.header}</span>
                     {column.sortable && sortColumn === column.id && (
                       <div className="flex-shrink-0">
                         {sortDirection === 'asc' ? (
@@ -341,9 +528,11 @@ export function DataGrid<T extends Record<string, any>>({
                   </div>
                   {/* Resize Handle */}
                   <div
-                    className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/50 active:bg-primary"
+                    className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize group"
                     onMouseDown={(e) => handleResizeStart(e, column.id)}
-                  />
+                  >
+                    <div className="absolute right-0 top-2 bottom-2 w-0.5 bg-border group-hover:bg-primary/60 group-active:bg-primary transition-colors" />
+                  </div>
                 </th>
               ))}
             </tr>
@@ -351,15 +540,39 @@ export function DataGrid<T extends Record<string, any>>({
 
           {/* Body */}
           <tbody className="divide-y">
-            {paginatedData.map((row, rowIndex) => (
+            {paginatedData.map((row, rowIndex) => {
+              const baseBg = getRowBgColor?.(row) ?? 'var(--card)';
+              const isHovered = hoveredRow === rowIndex;
+              // On hover: blend a subtle overlay. For colored rows keep color, just darken slightly.
+              const cellBg = isHovered
+                ? (baseBg === 'var(--card)' ? 'var(--muted)' : baseBg)
+                : baseBg;
+              const w = (id: string, col: GridColumn<T>) => columnWidths[id] || col.width || 150;
+              return (
               <tr
                 key={rowIndex}
-                className={cn(
-                  'hover:bg-muted/50 transition-colors',
-                  onRowClick && 'cursor-pointer'
-                )}
+                className={cn('transition-colors', getRowClass?.(row), onRowClick && 'cursor-pointer')}
+                onMouseEnter={() => setHoveredRow(rowIndex)}
+                onMouseLeave={() => setHoveredRow(null)}
                 onClick={() => onRowClick?.(row)}
               >
+                {/* S.No cell — sticky */}
+                <td
+                  className={cn('px-3 text-sm text-muted-foreground font-medium tabular-nums', densityClasses[rowDensity])}
+                  style={{
+                    width: `${SNO_WIDTH}px`,
+                    minWidth: `${SNO_WIDTH}px`,
+                    maxWidth: `${SNO_WIDTH}px`,
+                    overflow: 'hidden',
+                    position: 'sticky',
+                    left: 0,
+                    zIndex: 3,
+                    backgroundColor: cellBg,
+                    boxShadow: !hasStickyUserCols ? frozenShadow : undefined,
+                  }}
+                >
+                  {(effectivePage - 1) * effectivePageSize + rowIndex + 1}
+                </td>
                 {visibleColumnsArray.map((column) => (
                   <td
                     key={column.id}
@@ -369,43 +582,63 @@ export function DataGrid<T extends Record<string, any>>({
                       column.align === 'center' && 'text-center',
                       column.align === 'right' && 'text-right'
                     )}
+                    title={
+                      column.accessorKey && typeof row[column.accessorKey] === 'string'
+                        ? (row[column.accessorKey] as string)
+                        : undefined
+                    }
                     style={{
-                      width: `${columnWidths[column.id]}px`,
-                      minWidth: `${column.minWidth || 100}px`,
+                      overflow: 'hidden',
+                      width: `${w(column.id, column)}px`,
+                      maxWidth: `${w(column.id, column)}px`,
+                      backgroundColor: cellBg,
+                      ...(column.sticky ? {
+                        position: 'sticky',
+                        left: `${stickyOffsets[column.id]}px`,
+                        zIndex: 3,
+                        boxShadow: column === lastStickyUserCol ? frozenShadow : undefined,
+                      } : {}),
                     }}
                   >
-                    {column.cell
-                      ? column.cell(row)
-                      : column.accessorKey
-                      ? (row[column.accessorKey] as React.ReactNode)
-                      : null}
+                    <div className={column.wrap ? 'overflow-hidden' : 'truncate'}>
+                      {column.cell
+                        ? column.cell(row)
+                        : column.accessorKey
+                        ? (row[column.accessorKey] as React.ReactNode)
+                        : null}
+                    </div>
                   </td>
                 ))}
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
 
       {/* Pagination Footer */}
-      {sortedData.length > 0 && (
+      {!hideFooter && effectiveTotal > 0 && (
         <div className="flex items-center justify-between mt-3 px-1">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <span>Rows:</span>
-            <div className="relative">
-              <select
-                value={pageSize}
-                onChange={(e) => setPageSize(Number(e.target.value))}
-                className="appearance-none bg-muted border border-muted rounded px-3 py-1 pr-7 text-sm text-foreground cursor-pointer focus:outline-none focus:ring-1 focus:ring-primary"
-              >
-                {PAGE_SIZE_OPTIONS.map((size) => (
-                  <option key={size} value={size}>{size}</option>
-                ))}
-              </select>
-              <ChevronsUpDown className="absolute right-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
-            </div>
-            <span className="ml-2">
-              {((currentPage - 1) * pageSize) + 1}–{Math.min(currentPage * pageSize, sortedData.length)} of {sortedData.length}
+            {!serverPagination && (
+              <>
+                <span>Rows:</span>
+                <div className="relative">
+                  <select
+                    value={pageSize}
+                    onChange={(e) => setPageSize(Number(e.target.value))}
+                    className="appearance-none bg-muted border border-muted rounded px-3 py-1 pr-7 text-sm text-foreground cursor-pointer focus:outline-none focus:ring-1 focus:ring-primary"
+                  >
+                    {PAGE_SIZE_OPTIONS.map((size) => (
+                      <option key={size} value={size}>{size}</option>
+                    ))}
+                  </select>
+                  <ChevronsUpDown className="absolute right-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+                </div>
+              </>
+            )}
+            <span className={serverPagination ? '' : 'ml-2'}>
+              {((effectivePage - 1) * effectivePageSize) + 1}–{Math.min(effectivePage * effectivePageSize, effectiveTotal)} of {effectiveTotal}
             </span>
           </div>
 
@@ -414,8 +647,8 @@ export function DataGrid<T extends Record<string, any>>({
               variant="ghost"
               size="sm"
               className="h-8 w-8 p-0"
-              disabled={currentPage === 1}
-              onClick={() => setCurrentPage(1)}
+              disabled={effectivePage === 1}
+              onClick={() => handlePaginationChange(1)}
             >
               <ChevronLeft className="h-4 w-4" />
               <ChevronLeft className="h-4 w-4 -ml-2" />
@@ -424,8 +657,8 @@ export function DataGrid<T extends Record<string, any>>({
               variant="ghost"
               size="sm"
               className="h-8 w-8 p-0"
-              disabled={currentPage === 1}
-              onClick={() => setCurrentPage((p) => p - 1)}
+              disabled={effectivePage === 1}
+              onClick={() => handlePaginationChange(effectivePage - 1)}
             >
               <ChevronLeft className="h-4 w-4" />
             </Button>
@@ -433,14 +666,14 @@ export function DataGrid<T extends Record<string, any>>({
             {/* Page number buttons */}
             {(() => {
               const pages: (number | '...')[] = [];
-              if (totalPages <= 7) {
-                for (let i = 1; i <= totalPages; i++) pages.push(i);
+              if (effectiveTotalPages <= 7) {
+                for (let i = 1; i <= effectiveTotalPages; i++) pages.push(i);
               } else {
                 pages.push(1);
-                if (currentPage > 3) pages.push('...');
-                for (let i = Math.max(2, currentPage - 1); i <= Math.min(totalPages - 1, currentPage + 1); i++) pages.push(i);
-                if (currentPage < totalPages - 2) pages.push('...');
-                pages.push(totalPages);
+                if (effectivePage > 3) pages.push('...');
+                for (let i = Math.max(2, effectivePage - 1); i <= Math.min(effectiveTotalPages - 1, effectivePage + 1); i++) pages.push(i);
+                if (effectivePage < effectiveTotalPages - 2) pages.push('...');
+                pages.push(effectiveTotalPages);
               }
               return pages.map((p, idx) =>
                 p === '...' ? (
@@ -448,10 +681,10 @@ export function DataGrid<T extends Record<string, any>>({
                 ) : (
                   <Button
                     key={p}
-                    variant={currentPage === p ? 'default' : 'ghost'}
+                    variant={effectivePage === p ? 'default' : 'ghost'}
                     size="sm"
                     className="h-8 w-8 p-0"
-                    onClick={() => setCurrentPage(p as number)}
+                    onClick={() => handlePaginationChange(p as number)}
                   >
                     {p}
                   </Button>
@@ -463,8 +696,8 @@ export function DataGrid<T extends Record<string, any>>({
               variant="ghost"
               size="sm"
               className="h-8 w-8 p-0"
-              disabled={currentPage === totalPages}
-              onClick={() => setCurrentPage((p) => p + 1)}
+              disabled={effectivePage === effectiveTotalPages}
+              onClick={() => handlePaginationChange(effectivePage + 1)}
             >
               <ChevronRight className="h-4 w-4" />
             </Button>
@@ -472,8 +705,8 @@ export function DataGrid<T extends Record<string, any>>({
               variant="ghost"
               size="sm"
               className="h-8 w-8 p-0"
-              disabled={currentPage === totalPages}
-              onClick={() => setCurrentPage(totalPages)}
+              disabled={effectivePage === effectiveTotalPages}
+              onClick={() => handlePaginationChange(effectiveTotalPages)}
             >
               <ChevronRight className="h-4 w-4" />
               <ChevronRight className="h-4 w-4 -ml-2" />

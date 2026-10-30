@@ -52,13 +52,8 @@ class WarehouseCreate(BaseModel):
     # Blinkit specific
     warehouseType: Optional[BlinkitWarehouseType] = None
 
-    # Optional fields
     address: Optional[str] = Field(None, max_length=500)
     pincode: Optional[str] = Field(None, max_length=20)
-    contactPerson: Optional[str] = Field(None, max_length=255)
-    contactPhone: Optional[str] = Field(None, max_length=20)
-    contactEmail: Optional[str] = Field(None, max_length=255)
-    capacity: Optional[int] = None
     isActive: bool = True
 
 
@@ -73,10 +68,6 @@ class WarehouseUpdate(BaseModel):
     warehouseType: Optional[BlinkitWarehouseType] = None
     address: Optional[str] = Field(None, max_length=500)
     pincode: Optional[str] = Field(None, max_length=20)
-    contactPerson: Optional[str] = Field(None, max_length=255)
-    contactPhone: Optional[str] = Field(None, max_length=20)
-    contactEmail: Optional[str] = Field(None, max_length=255)
-    capacity: Optional[int] = None
     isActive: Optional[bool] = None
 
 
@@ -94,10 +85,6 @@ class WarehouseResponse(BaseModel):
     warehouseType: Optional[str] = None
     address: Optional[str] = None
     pincode: Optional[str] = None
-    contactPerson: Optional[str] = None
-    contactPhone: Optional[str] = None
-    contactEmail: Optional[str] = None
-    capacity: Optional[int] = None
     isActive: bool
     createdAt: Optional[datetime] = None
 

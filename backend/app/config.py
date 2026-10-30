@@ -9,23 +9,20 @@ from typing import List
 class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
 
-    # Database Configuration
-    DB_SERVER: str
-    DB_PORT: int = 1433
-    DB_NAME: str
-    DB_USER: str
-    DB_PASSWORD: str
-    DB_DRIVER: str = "ODBC Driver 18 for SQL Server"
+    # Database (MySQL)
+    MYSQL_HOST: str
+    MYSQL_PORT: int = 3306
+    MYSQL_DB: str
+    MYSQL_USER: str
+    MYSQL_PASSWORD: str
 
     # JWT Configuration
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 480  # 8 hours — prevents logout during long upload sessions
 
-    # CORS Configuration
-    ALLOWED_ORIGINS: str = "http://localhost:3000"
-    CORS_ALLOW_CREDENTIALS: bool = True
+    # CORS
+    ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:3001"
 
     # Application Configuration
     APP_NAME: str = "ASG Mantra Analytics API"
@@ -34,50 +31,35 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 
-    # File Upload Configuration
-    MAX_FILE_SIZE_MB: int = 10
-    ALLOWED_FILE_EXTENSIONS: str = ".xlsx,.xls,.csv"
-    UPLOAD_DIR: str = "./uploads"
-
-    # Email Configuration (optional)
-    SMTP_HOST: str = "smtp.gmail.com"
-    SMTP_PORT: int = 587
-    SMTP_USER: str = ""
-    SMTP_PASSWORD: str = ""
-    EMAIL_FROM: str = "noreply@asgmantra.com"
-
     @property
     def database_url(self) -> str:
-        """Generate SQLAlchemy database URL"""
+        """Generate the SQLAlchemy MySQL database URL.
+
+        user and password are URL-quoted: an unescaped @, :, / or # would break
+        the URL.
+        """
         from urllib.parse import quote_plus
-        # Use Windows Authentication (Integrated Security) if no user/password provided
-        if not self.DB_USER or not self.DB_PASSWORD:
-            conn_str = f"DRIVER={{{self.DB_DRIVER}}};SERVER={self.DB_SERVER};DATABASE={self.DB_NAME};Trusted_Connection=yes;TrustServerCertificate=yes"
-            return f"mssql+pyodbc:///?odbc_connect={quote_plus(conn_str)}"
-        else:
-            return f"mssql+pyodbc://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_SERVER}:{self.DB_PORT}/{self.DB_NAME}?driver={self.DB_DRIVER.replace(' ', '+')}&TrustServerCertificate=yes"
+        user = quote_plus(self.MYSQL_USER)
+        password = quote_plus(self.MYSQL_PASSWORD)
+        return (
+            f"mysql+pymysql://{user}:{password}"
+            f"@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DB}?charset=utf8mb4"
+        )
 
     @property
     def allowed_origins_list(self) -> List[str]:
         """Parse CORS origins from comma-separated string"""
         return [origin.strip() for origin in self.ALLOWED_ORIGINS.split(",")]
 
-    @property
-    def allowed_extensions_list(self) -> List[str]:
-        """Parse allowed file extensions"""
-        return [ext.strip() for ext in self.ALLOWED_FILE_EXTENSIONS.split(",")]
-
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "ignore"
 
 
 @lru_cache()
 def get_settings() -> Settings:
-    """
-    Get cached settings instance
-    Using lru_cache to avoid reading .env file on every request
-    """
+    """Cached settings instance (the .env file is read once)."""
     return Settings()
 
 

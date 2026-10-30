@@ -25,6 +25,7 @@ import { Input } from '@/components/ui/input';
 import { Plus, Pencil, Trash2, Eye, EyeOff } from 'lucide-react';
 import { toast } from 'sonner';
 import api from '@/lib/api';
+import { fmtDate } from '@/lib/format';
 
 interface User {
   id: string;
@@ -72,11 +73,7 @@ export default function UserManagementPage() {
         email: user.email,
         role: user.role as User['role'],
         status: (user.is_active ? 'active' : 'inactive') as 'active' | 'inactive',
-        created: new Date(user.created_at).toLocaleDateString('en-US', {
-          month: 'numeric',
-          day: 'numeric',
-          year: 'numeric'
-        }),
+        created: fmtDate(user.created_at),
       }));
 
       setUsers(transformedUsers);
@@ -180,7 +177,7 @@ export default function UserManagementPage() {
   };
 
   const gridColumns: GridColumn<User>[] = [
-    { id: 'name', header: 'Name', accessorKey: 'name', sortable: true, width: 200, minWidth: 150, cell: (row) => <span className="font-medium">{row.name}</span> },
+    { id: 'name', header: 'Name', accessorKey: 'name', sortable: true, sticky: true, width: 200, minWidth: 150, cell: (row) => <span className="font-medium">{row.name}</span> },
     { id: 'email', header: 'Email', accessorKey: 'email', width: 250, minWidth: 200, cell: (row) => <span className="text-muted-foreground">{row.email}</span> },
     {
       id: 'role',
@@ -233,12 +230,12 @@ export default function UserManagementPage() {
     },
   ];
 
-  const gridState = useDataGrid(gridColumns);
+  const gridState = useDataGrid(gridColumns, 'user-management');
 
   // Filter users by search
   const filteredUsers = users.filter(user =>
-    user.name.toLowerCase().includes(search.toLowerCase()) ||
-    user.email.toLowerCase().includes(search.toLowerCase())
+    (user.name || '').toLowerCase().includes(search.toLowerCase()) ||
+    (user.email || '').toLowerCase().includes(search.toLowerCase())
   );
 
   if (isLoading) {
@@ -270,6 +267,8 @@ export default function UserManagementPage() {
               onToggleColumn={gridState.toggleColumnVisibility}
               rowDensity={gridState.rowDensity}
               onDensityChange={gridState.setRowDensity}
+              onSave={gridState.saveCurrentView}
+              onReset={gridState.resetView}
             />
             <Button onClick={() => setIsDialogOpen(true)}>
               <Plus className="h-4 w-4 mr-2" />

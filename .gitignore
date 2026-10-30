@@ -2,7 +2,6 @@
 # Excluded folders (per policy)
 # ===========================
 /Data/
-/database/
 /docs/
 
 # ===========================
@@ -17,6 +16,8 @@ backend/.env
 backend/*.egg-info/
 backend/dist/
 backend/.pytest_cache/
+backend/*.log
+backend/**/*.log
 
 # Uploaded files (runtime data, not source)
 backend/uploads/
@@ -30,7 +31,6 @@ frontend/out/
 frontend/build/
 frontend/.env
 frontend/.env.local
-frontend/.env.production
 frontend/coverage/
 frontend/.pnp
 frontend/.pnp.*
@@ -43,17 +43,15 @@ frontend/.yarn/*
 # ===========================
 # Root-level env files
 # ===========================
-.env
-.env.*
-
-# ===========================
-# ===========================
+/.env
+/.env.*
 
 # ===========================
 # OS / Editor
 # ===========================
 .DS_Store
 Thumbs.db
+*.bak
 *.pem
 .vercel
 *.tsbuildinfo
@@ -62,3 +60,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+
+# Generated review reports
+backend/scripts/*.csv

@@ -17,6 +17,8 @@ class Warehouse(Base):
     WarehouseName = Column(String(255), nullable=False)
     WarehouseCode = Column(String(50), unique=True, nullable=False, index=True)
     Location = Column(String(255), nullable=True)
+    Address = Column(String(500), nullable=True)
+    Pincode = Column(String(20), nullable=True)
     City = Column(String(100), nullable=True)
     State = Column(String(100), nullable=True)
     Region = Column(String(50), nullable=True)                     # North, South, East, West, Central
@@ -28,8 +30,8 @@ class Warehouse(Base):
     WarehouseType = Column(String(50), nullable=True)              # Frontend, Backend
 
     IsActive = Column(Boolean, default=True, index=True)
-    CreatedAt = Column(DateTime, default=func.getdate())
-    UpdatedAt = Column(DateTime, default=func.getdate(), onupdate=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
+    UpdatedAt = Column(DateTime, default=func.now(), onupdate=func.now())
 
     # Relationships
     sales = relationship("Sales", back_populates="warehouse")
@@ -42,6 +44,8 @@ class Warehouse(Base):
             "warehouseName": self.WarehouseName,
             "warehouseCode": self.WarehouseCode,
             "location": self.Location,
+            "address": self.Address,
+            "pincode": self.Pincode,
             "city": self.City,
             "state": self.State,
             "region": self.Region,

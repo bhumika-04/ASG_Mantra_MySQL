@@ -3,7 +3,7 @@
  * Handles all API requests with authentication
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 interface ApiOptions extends RequestInit {
   requireAuth?: boolean;
@@ -80,14 +80,7 @@ async function apiFetch<T>(
 export const api = {
   // Auth endpoints
   auth: {
-    login: (email: string, password: string) =>
-      apiFetch('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify({ email, password }),
-        requireAuth: false,
-      }),
-    logout: () => apiFetch('/api/auth/logout', { method: 'POST' }),
-    me: () => apiFetch('/api/auth/me'),
+    refresh: () => apiFetch('/api/auth/refresh', { method: 'POST' }),
   },
 
   // Dashboard endpoints
@@ -105,12 +98,10 @@ export const api = {
   },
 
   dashboard: {
-    getStats: () => apiFetch('/api/dashboard/stats'),
     getInventoryStats: () => apiFetch('/api/dashboard/inventory-stats'),
-    getCharts: () => apiFetch('/api/dashboard/charts'),
-    getProductOverview: (params?: { search?: string; page?: number; page_size?: number }) => {
-      const query = new URLSearchParams(params as any).toString();
-      return apiFetch(`/api/dashboard/product-overview${query ? `?${query}` : ''}`);
+    getCharts: (params?: { start_date?: string; end_date?: string }) => {
+      const q = params ? Object.entries(params).filter(([, v]) => v).map(([k, v]) => `${k}=${v}`).join('&') : '';
+      return apiFetch(`/api/dashboard/charts${q ? `?${q}` : ''}`);
     },
   },
 
@@ -124,7 +115,6 @@ export const api = {
       const query = new URLSearchParams(params as any).toString();
       return apiFetch(`/api/inventory/dispatch-overview${query ? `?${query}` : ''}`);
     },
-    getById: (id: number) => apiFetch(`/api/inventory/${id}`),
     getLowStock: (params?: { limit?: number; channel?: string }) => {
       const query = new URLSearchParams(params as any).toString();
       return apiFetch(`/api/inventory/low-stock${query ? `?${query}` : ''}`);
@@ -136,76 +126,143 @@ export const api = {
       }),
   },
 
-  // Sales endpoints
-  sales: {
-    getAll: (params?: any) => {
-      const query = new URLSearchParams(params).toString();
-      return apiFetch(`/api/sales${query ? `?${query}` : ''}`);
-    },
-    getAmazon: (params?: any) => {
-      const query = new URLSearchParams(params).toString();
-      return apiFetch(`/api/sales/amazon${query ? `?${query}` : ''}`);
-    },
-    getBlinkit: (params?: any) => {
-      const query = new URLSearchParams(params).toString();
-      return apiFetch(`/api/sales/blinkit${query ? `?${query}` : ''}`);
-    },
-    getAnalytics: (params?: any) => {
-      const query = new URLSearchParams(params).toString();
-      return apiFetch(`/api/sales/analytics${query ? `?${query}` : ''}`);
-    },
-  },
-
   // Amazon Sales Data analytics (queries AmazonSales table — VendorCSV / RK Excel uploads)
   amazonSalesData: {
-    getAnalytics: (params?: { days?: number }) => {
-      const query = new URLSearchParams(params as any).toString();
+    getAnalytics: (params?: { days?: number; start_date?: string; end_date?: string; asin?: string }) => {
+      const p = Object.fromEntries(Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== ''));
+      const query = new URLSearchParams(p as any).toString();
       return apiFetch(`/api/upload/amazon-data/analytics${query ? `?${query}` : ''}`);
+    },
+    getProducts: (params?: { search?: string; page?: number; page_size?: number; start_date?: string; end_date?: string }) => {
+      const p = Object.fromEntries(Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== ''));
+      const query = new URLSearchParams(p as any).toString();
+      return apiFetch(`/api/upload/amazon-data/products${query ? `?${query}` : ''}`);
     },
   },
 
   // Blinkit Sales Data analytics (queries BlinkitSales table — daily CSV uploads)
   blinkitSalesData: {
-    getAnalytics: (params?: { days?: number }) => {
-      const query = new URLSearchParams(params as any).toString();
+    getAnalytics: (params?: { days?: number; start_date?: string; end_date?: string; item_id?: string }) => {
+      const p = Object.fromEntries(Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== ''));
+      const query = new URLSearchParams(p as any).toString();
       return apiFetch(`/api/upload/blinkit-data/analytics${query ? `?${query}` : ''}`);
+    },
+    getProducts: (params?: { search?: string; page?: number; page_size?: number; start_date?: string; end_date?: string }) => {
+      const p = Object.fromEntries(Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== ''));
+      const query = new URLSearchParams(p as any).toString();
+      return apiFetch(`/api/upload/blinkit-data/products${query ? `?${query}` : ''}`);
     },
   },
 
   // Purchase Order endpoints
   purchaseOrders: {
-    getAll: (params?: any) => {
-      const query = new URLSearchParams(params).toString();
-      return apiFetch(`/api/purchase-orders${query ? `?${query}` : ''}`);
-    },
-    getById: (id: number) => apiFetch(`/api/purchase-orders/${id}`),
-    create: (data: any) =>
-      apiFetch('/api/purchase-orders', {
-        method: 'POST',
-        body: JSON.stringify(data),
+    updateAmazonItemAcceptedQty: (itemId: number, accepted_qty: number) =>
+      apiFetch(`/api/purchase-orders/amazon-item/${itemId}/accepted-qty`, {
+        method: 'PUT',
+        body: JSON.stringify({ accepted_qty }),
       }),
-    updateStatus: (id: number, data: any) =>
-      apiFetch(`/api/purchase-orders/${id}/status`, {
+    updateAmazonItemReceivedQty: (itemId: number, received_qty: number) =>
+      apiFetch(`/api/purchase-orders/amazon-item/${itemId}/received-qty`, {
+        method: 'PUT',
+        body: JSON.stringify({ received_qty }),
+      }),
+    updateBlinkitItemAcceptedQty: (itemId: number, accepted_qty: number) =>
+      apiFetch(`/api/purchase-orders/blinkit-item/${itemId}/accepted-qty`, {
+        method: 'PUT',
+        body: JSON.stringify({ accepted_qty }),
+      }),
+    updateBlinkitItemReceivedQty: (itemId: number, received_qty: number) =>
+      apiFetch(`/api/purchase-orders/blinkit-item/${itemId}/received-qty`, {
+        method: 'PUT',
+        body: JSON.stringify({ received_qty }),
+      }),
+    updateAmazonPOStatus: (poId: number, data: any) =>
+      apiFetch(`/api/purchase-orders/amazon-po/${poId}/po-status`, {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
-    updateAmazonItemStatus: (itemId: number, data: any) =>
-      apiFetch(`/api/purchase-orders/amazon-item/${itemId}/status`, {
+    updateBlinkitPOStatus: (poId: number, data: any) =>
+      apiFetch(`/api/purchase-orders/blinkit-po/${poId}/po-status`, {
         method: 'PUT',
         body: JSON.stringify(data),
       }),
-    updateBlinkitItemStatus: (itemId: number, data: any) =>
-      apiFetch(`/api/purchase-orders/blinkit-item/${itemId}/status`, {
-        method: 'PUT',
+    updateBlinkitPOHeader: (poId: number, data: Record<string, unknown>) =>
+      apiFetch(`/api/purchase-orders/blinkit-po/${poId}/update-header`, {
+        method: 'PATCH',
         body: JSON.stringify(data),
       }),
+    updateAmazonPOCourier: (poId: number, courier: string | null) =>
+      apiFetch(`/api/purchase-orders/amazon-po/${poId}/courier`, {
+        method: 'PATCH',
+        body: JSON.stringify({ courier }),
+      }),
+    updateBlinkitPOCourier: (poId: number, courier: string | null) =>
+      apiFetch(`/api/purchase-orders/blinkit-po/${poId}/courier`, {
+        method: 'PATCH',
+        body: JSON.stringify({ courier }),
+      }),
+    updateAmazonPODispatchDate: (poId: number, dispatch_date: string | null) =>
+      apiFetch(`/api/purchase-orders/amazon-po/${poId}/dispatch-date`, {
+        method: 'PATCH',
+        body: JSON.stringify({ dispatch_date }),
+      }),
+    updateBlinkitPODispatchDate: (poId: number, dispatch_date: string | null) =>
+      apiFetch(`/api/purchase-orders/blinkit-po/${poId}/dispatch-date`, {
+        method: 'PATCH',
+        body: JSON.stringify({ dispatch_date }),
+      }),
+    updateAmazonItemExpectedDate: (itemId: number, expected_date: string | null) =>
+      apiFetch(`/api/purchase-orders/amazon-item/${itemId}/expected-date`, {
+        method: 'PATCH',
+        body: JSON.stringify({ expected_date }),
+      }),
+    updateBlinkitPOExpectedDeliveryDate: (poId: number, expected_delivery_date: string | null) =>
+      apiFetch(`/api/purchase-orders/blinkit-po/${poId}/expected-delivery-date`, {
+        method: 'PATCH',
+        body: JSON.stringify({ expected_delivery_date }),
+      }),
+    updateBlinkitPOExpiryDate: (poId: number, expiry_date: string | null) =>
+      apiFetch(`/api/purchase-orders/blinkit-po/${poId}/expiry-date`, {
+        method: 'PATCH',
+        body: JSON.stringify({ expiry_date }),
+      }),
+    getCarriers: () => apiFetch('/api/purchase-orders/carriers'),
+    getAmazonStates: () => apiFetch('/api/purchase-orders/amazon/states'),
     getAmazon: (params?: any) => {
       const query = new URLSearchParams(params).toString();
       return apiFetch(`/api/purchase-orders/amazon${query ? `?${query}` : ''}`);
     },
+    getAmazonStats: (params?: any) => {
+      const query = params ? new URLSearchParams(params).toString() : '';
+      return apiFetch(`/api/purchase-orders/amazon/stats${query ? `?${query}` : ''}`);
+    },
+    getAmazonOverview: (params?: any) => {
+      const query = new URLSearchParams(params).toString();
+      return apiFetch(`/api/purchase-orders/amazon/overview${query ? `?${query}` : ''}`);
+    },
     getBlinkit: (params?: any) => {
       const query = new URLSearchParams(params).toString();
       return apiFetch(`/api/purchase-orders/blinkit${query ? `?${query}` : ''}`);
+    },
+    getBlinkitStats: (params?: any) => {
+      const query = params ? new URLSearchParams(params).toString() : '';
+      return apiFetch(`/api/purchase-orders/blinkit/stats${query ? `?${query}` : ''}`);
+    },
+    getBlinkitOverview: (params?: any) => {
+      const query = new URLSearchParams(params).toString();
+      return apiFetch(`/api/purchase-orders/blinkit/overview${query ? `?${query}` : ''}`);
+    },
+    getLifecycleOverview: (params?: any) => {
+      const query = new URLSearchParams(params).toString();
+      return apiFetch(`/api/purchase-orders/lifecycle/overview${query ? `?${query}` : ''}`);
+    },
+  },
+
+  // Amazon ASIN-level inventory
+  amazonInventory: {
+    getAll: (params?: { search?: string; report_date?: string; page?: number; page_size?: number }) => {
+      const query = new URLSearchParams(params as any).toString();
+      return apiFetch(`/api/upload/amazon-data/inventory${query ? `?${query}` : ''}`);
     },
   },
 
@@ -223,7 +280,8 @@ export const api = {
       const query = new URLSearchParams(params).toString();
       return apiFetch(`/api/products${query ? `?${query}` : ''}`);
     },
-    getById: (id: number) => apiFetch(`/api/products/${id}`),
+    /** Resolve an ASIN / Blinkit item id / ASG SKU to that product's per-channel identifiers. */
+    resolve: (q: string) => apiFetch(`/api/products/resolve?q=${encodeURIComponent(q)}`),
     create: (data: any) =>
       apiFetch('/api/products', {
         method: 'POST',
@@ -236,6 +294,16 @@ export const api = {
       }),
     delete: (id: number) =>
       apiFetch(`/api/products/${id}`, { method: 'DELETE' }),
+    linkBlinkit: (blinkitId: string, targetProductId: number) =>
+      apiFetch('/api/products/link-blinkit', {
+        method: 'POST',
+        body: JSON.stringify({ blinkit_id: blinkitId, target_product_id: targetProductId }),
+      }),
+    linkAmazon: (asin: string, targetProductId: number) =>
+      apiFetch('/api/products/link-amazon', {
+        method: 'POST',
+        body: JSON.stringify({ asin, target_product_id: targetProductId }),
+      }),
   },
 
   // Warehouse endpoints
@@ -282,12 +350,13 @@ export const api = {
       }),
     sync: () =>
       apiFetch('/api/alerts/sync', { method: 'POST' }),
+    getStats: () =>
+      apiFetch('/api/alerts/stats'),
   },
 
   // User endpoints
   users: {
     getAll: () => apiFetch('/api/users'),
-    getById: (id: string) => apiFetch(`/api/users/${id}`),
     create: (data: any) =>
       apiFetch('/api/users', {
         method: 'POST',
@@ -305,7 +374,6 @@ export const api = {
   // Role endpoints
   roles: {
     getAll: () => apiFetch('/api/roles'),
-    getById: (id: string) => apiFetch(`/api/roles/${id}`),
     create: (data: any) =>
       apiFetch('/api/roles', {
         method: 'POST',
@@ -446,20 +514,22 @@ export const api = {
         timeout: 300000, // 5 minutes
       });
     },
-    inventory: (file: File) => {
+    inventory: (file: File, inventoryDate?: string) => {
       const formData = new FormData();
       formData.append('file', file);
-      return apiFetch('/api/upload/inventory', {
+      const qs = inventoryDate ? `?inventory_date=${encodeURIComponent(inventoryDate)}` : '';
+      return apiFetch(`/api/upload/inventory${qs}`, {
         method: 'POST',
         body: formData,
         headers: {},
         timeout: 300000, // 5 minutes for ASG packed/unpacked uploads
       });
     },
-    inventoryPreview: (file: File) => {
+    inventoryPreview: (file: File, inventoryDate?: string) => {
       const formData = new FormData();
       formData.append('file', file);
-      return apiFetch('/api/upload/inventory/preview', {
+      const qs = inventoryDate ? `?inventory_date=${encodeURIComponent(inventoryDate)}` : '';
+      return apiFetch(`/api/upload/inventory/preview${qs}`, {
         method: 'POST',
         body: formData,
         headers: {},
@@ -526,18 +596,32 @@ export const api = {
 
   // Distributor Stock endpoints (weekly stock report from Eagle/RK)
   distributorStock: {
-    getAll: (params?: { search?: string; report_date?: string; distributor_id?: number; page?: number; page_size?: number }) => {
+    getAll: (params?: { search?: string; report_date?: string; date_from?: string; date_to?: string; region?: string; distributor_id?: number; page?: number; page_size?: number }) => {
       const query = new URLSearchParams(params as any).toString();
       return apiFetch(`/api/upload/blinkit-data/distributor-stock${query ? `?${query}` : ''}`);
     },
-    upload: (file: File, options: { distributorId?: number; channel?: string }) => {
+    preview: (file: File, options: { distributorId?: number; channel?: string; reportDate?: string }) => {
       const formData = new FormData();
       formData.append('file', file);
-      const qs = options.channel
-        ? `?channel=${encodeURIComponent(options.channel)}`
-        : options.distributorId
-        ? `?distributor_id=${options.distributorId}`
-        : '';
+      const params = new URLSearchParams();
+      if (options.channel) params.set('channel', options.channel);
+      else if (options.distributorId) params.set('distributor_id', String(options.distributorId));
+      if (options.reportDate) params.set('report_date', options.reportDate);
+      const qs = params.toString() ? `?${params.toString()}` : '';
+      return apiFetch(`/api/upload/blinkit-data/distributor-stock/preview${qs}`, {
+        method: 'POST',
+        body: formData,
+        headers: {},
+      });
+    },
+    upload: (file: File, options: { distributorId?: number; channel?: string; reportDate?: string }) => {
+      const formData = new FormData();
+      formData.append('file', file);
+      const params = new URLSearchParams();
+      if (options.channel) params.set('channel', options.channel);
+      else if (options.distributorId) params.set('distributor_id', String(options.distributorId));
+      if (options.reportDate) params.set('report_date', options.reportDate);
+      const qs = params.toString() ? `?${params.toString()}` : '';
       return apiFetch(`/api/upload/blinkit-data/distributor-stock${qs}`, {
         method: 'POST',
         body: formData,
@@ -550,8 +634,11 @@ export const api = {
   // Notifications endpoints
   notifications: {
     getAll: () => apiFetch('/api/notifications'),
+    getStats: () => apiFetch('/api/notifications/stats'),
     markAsRead: (id: number) =>
       apiFetch(`/api/notifications/${id}/read`, { method: 'PUT' }),
+    markAllRead: () =>
+      apiFetch('/api/notifications/mark-all-read', { method: 'PUT' }),
   },
 };
 

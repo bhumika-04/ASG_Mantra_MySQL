@@ -6,10 +6,11 @@ Wrapped in try/except so logging never breaks the main operation.
 """
 import json
 import logging
-from datetime import datetime
 from sqlalchemy.orm import Session
 from app.models.audit_log import AuditLog
 from app.models.upload_log import UploadLog
+from app.models.notification import Notification
+from app.utils.timeutil import now_ist
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ def log_audit(
             RecordId=str(record_id) if record_id else None,
             OldValues=json.dumps(old_values) if old_values else None,
             NewValues=json.dumps(new_values) if new_values else None,
+            CreatedAt=now_ist(),
         )
         db.add(entry)
     except Exception:
@@ -64,8 +66,37 @@ def log_upload(
             ErrorRows=error_rows,
             Errors=json.dumps(errors[:20]) if errors else None,
             Status=status,
-            ProcessedAt=datetime.utcnow(),
+            ProcessedAt=now_ist(),
         )
         db.add(entry)
     except Exception:
         logger.exception("Failed to write upload log")
+
+
+def notify(
+    db: Session,
+    user_id,
+    title: str,
+    message: str,
+    notif_type: str = "info",
+):
+    """Write a notification for a user. Never raises.
+    notif_type is mapped to DB-allowed values: info, success, warning, error.
+    Semantic aliases: upload→success, po_status→info, low_stock→warning.
+    """
+    _type_map = {"upload": "success", "po_status": "info", "low_stock": "warning"}
+    db_type = _type_map.get(notif_type, notif_type)
+    if db_type not in ("info", "success", "warning", "error"):
+        db_type = "info"
+    try:
+        entry = Notification(
+            UserId=user_id,
+            Title=title,
+            Message=message,
+            Type=db_type,
+            IsRead=False,
+            CreatedAt=now_ist(),
+        )
+        db.add(entry)
+    except Exception:
+        logger.exception("Failed to write notification")

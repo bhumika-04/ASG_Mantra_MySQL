@@ -4,16 +4,18 @@ FastAPI backend for multi-platform sales and inventory management
 """
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import time
 import logging
+import asyncio
+from datetime import timedelta
 
 from app.config import settings
+from app.utils.timeutil import now_ist
 from app.database import test_connection, init_db
-from app.routers import auth, dashboard, inventory, sales, purchase_orders, products, warehouses, users, uploads, notifications, alerts, roles
+from app.routers import auth, dashboard, inventory, purchase_orders, products, warehouses, users, uploads, notifications, alerts, roles
 from app.routers import amazon_data, blinkit_data, distributors, audit_logs, upload_logs
 
 # Configure logging
@@ -46,15 +48,11 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins_list,
+    allow_origin_regex=r"http://localhost:\d+",  # any localhost port — no hardcoding
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
-
-# Trusted Host Middleware (security)
-# app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"])
-
 
 # Request timing middleware
 @app.middleware("http")
@@ -72,12 +70,24 @@ async def add_process_time_header(request: Request, call_next):
 # ===================================
 
 
+def _cors_headers(request: Request) -> dict:
+    """Return CORS headers for error responses so browsers don't double-fault."""
+    origin = request.headers.get("origin", "")
+    if not origin:
+        return {}
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Credentials": "true",
+    }
+
+
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     """Handle HTTP exceptions"""
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail, "status": "error"},
+        headers=_cors_headers(request),
     )
 
 
@@ -87,6 +97,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(
         status_code=422,
         content={"detail": exc.errors(), "body": exc.body, "status": "error"},
+        headers=_cors_headers(request),
     )
 
 
@@ -96,13 +107,34 @@ async def general_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
     return JSONResponse(
         status_code=500,
-        content={"detail": "Internal server error", "status": "error"},
+        content={"detail": str(exc), "status": "error"},
+        headers=_cors_headers(request),
     )
 
 
 # ===================================
 # STARTUP/SHUTDOWN EVENTS
 # ===================================
+
+
+AUDIT_LOG_RETENTION_DAYS = 60
+
+async def _audit_log_cleanup_loop():
+    """Delete audit logs older than AUDIT_LOG_RETENTION_DAYS every 24 hours."""
+    from app.database import SessionLocal
+    from app.models.audit_log import AuditLog
+    while True:
+        try:
+            db = SessionLocal()
+            cutoff = now_ist() - timedelta(days=AUDIT_LOG_RETENTION_DAYS)
+            deleted = db.query(AuditLog).filter(AuditLog.CreatedAt < cutoff).delete()
+            db.commit()
+            db.close()
+            if deleted:
+                logger.info(f"Audit log cleanup: deleted {deleted} entries older than {AUDIT_LOG_RETENTION_DAYS} days")
+        except Exception as e:
+            logger.error(f"Audit log cleanup failed: {e}")
+        await asyncio.sleep(86400)  # run once every 24 hours
 
 
 @app.on_event("startup")
@@ -117,13 +149,15 @@ async def startup_event():
     else:
         logger.info("Database connection established successfully")
 
-    # Initialize database (create tables if needed)
-    # Note: Comment this out in production and use Alembic migrations instead
+    # In debug mode, create any missing tables (production uses database/schema.sql)
     if settings.DEBUG:
         try:
-            init_db()  # Auto-create tables in debug mode
+            init_db()
         except Exception as e:
             logger.error(f"Database initialization failed: {e}")
+
+    # Start background audit log cleanup (runs once at startup, then every 24 h)
+    asyncio.create_task(_audit_log_cleanup_loop())
 
 
 @app.on_event("shutdown")
@@ -171,9 +205,6 @@ app.include_router(dashboard.router, prefix="/api/dashboard", tags=["Dashboard"]
 
 # Inventory
 app.include_router(inventory.router, prefix="/api/inventory", tags=["Inventory"])
-
-# Sales
-app.include_router(sales.router, prefix="/api/sales", tags=["Sales"])
 
 # Purchase Orders
 app.include_router(

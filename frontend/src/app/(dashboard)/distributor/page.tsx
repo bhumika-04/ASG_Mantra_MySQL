@@ -1,42 +1,56 @@
-'use client';
+﻿'use client';
 
 import { useState, useEffect } from 'react';
+import { useFilter, computeDateRange } from '@/contexts/FilterContext';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { StatsCard, StatsGrid } from '@/components/ui/stats-card';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { DataGrid, useDataGrid, ViewOptionsButton } from '@/components/ui/data-grid';
+import { FilterBar } from '@/components/ui/filter-bar';
 import { FileUpload } from '@/components/ui/file-upload';
 import {
   Building2,
   Package,
-  TrendingDown,
-  Search,
   Upload,
   RefreshCw,
   CheckCircle2,
   AlertCircle,
   Loader2,
+  Calendar,
+  X,
+  Download,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
+import { fmtDate } from '@/lib/format';
 
 interface DistributorStockItem {
   id: number;
   reportDate: string;
   distributorId: number | null;
   itemName: string;
-  openingQty: number | null;
+  sku: string | null;
   closingQty: number | null;
-  saleQty: number | null;
+  dlQty: number | null;
+  mhQty: number | null;
+  ktQty: number | null;
+  wbQty: number | null;
+  hrQty: number | null;
 }
 
-interface DistributorStockStats {
-  totalOpeningQty: number;
-  totalClosingQty: number;
-  totalSaleQty: number;
+interface PreviewRow {
+  itemName: string;
+  sku: string | null;
+  closingQty: number | null;
+  dlQty: number | null;
+  mhQty: number | null;
+  ktQty: number | null;
+  wbQty: number | null;
+  hrQty: number | null;
+  reportDate: string;
 }
 
 interface UploadResult {
@@ -51,78 +65,125 @@ interface UploadResult {
 }
 
 export default function DistributorPage() {
+  const { filterMode, customStart, customEnd, globalSearch } = useFilter();
+  const [gridSearch, setGridSearch] = useState('');
   const [items, setItems] = useState<DistributorStockItem[]>([]);
-  const [stats, setStats] = useState<DistributorStockStats>({ totalOpeningQty: 0, totalClosingQty: 0, totalSaleQty: 0 });
+  const [stats, setStats] = useState({ totalClosingQty: 0, totalDlQty: 0, totalMhQty: 0, totalKtQty: 0, totalWbQty: 0, totalHrQty: 0, totalSkus: 0 });
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
-  const [search, setSearch] = useState('');
-  const [reportDate, setReportDate] = useState('');
-  const [reportDates, setReportDates] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [isUploading, setIsUploading] = useState(false);
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
+
+  // Preview state
+  const [isPreviewing, setIsPreviewing] = useState(false);
+  const [isConfirming, setIsConfirming] = useState(false);
+  const [previewRows, setPreviewRows] = useState<PreviewRow[] | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [reportDate, setReportDate] = useState('');
+  const [duplicateWarning, setDuplicateWarning] = useState<string | null>(null);
+  const [columnWarnings, setColumnWarnings] = useState<string[]>([]);
 
   const PAGE_SIZE = 50;
 
   const gridState = useDataGrid<DistributorStockItem>([
-    { id: 'itemName', header: 'Item Name', accessorKey: 'itemName', sortable: true, width: 360, minWidth: 200, cell: (row) => (
+    { id: 'sku', header: 'SKU', accessorKey: 'sku', sortable: true, sticky: true, width: 220, minWidth: 160, cell: (row) => (
+      <span className="text-xs font-mono text-gray-700 font-medium">{row.sku || '—'}</span>
+    ) },
+    { id: 'itemName', header: 'Item Name', accessorKey: 'itemName', sortable: true, width: 300, minWidth: 200, wrap: true, cell: (row) => (
       <span
-        className="font-medium text-sm leading-snug"
+        className="text-sm leading-snug"
         style={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}
-        title={row.itemName}
+        title={row.itemName ?? undefined}
       >
         {row.itemName || '—'}
       </span>
     ) },
-    { id: 'reportDate', header: 'Report Date', accessorKey: 'reportDate', sortable: true, width: 120 },
     {
-      id: 'openingQty',
-      header: 'Opening Qty',
-      accessorKey: 'openingQty',
+      id: 'reportDate',
+      header: 'Report Date',
+      accessorKey: 'reportDate',
       sortable: true,
       width: 120,
-      align: 'right',
-      cell: (row) => <span className="font-mono">{row.openingQty ?? '—'}</span>,
+      // The API returns ISO dates (2026-05-04); display day-month-year, sort on the ISO value.
+      cell: (row) => <span className="text-muted-foreground">{fmtDate(row.reportDate)}</span>,
     },
     {
       id: 'closingQty',
-      header: 'Closing Qty',
+      header: 'Total Stock',
       accessorKey: 'closingQty',
       sortable: true,
-      width: 120,
+      width: 110,
       align: 'right',
       cell: (row) => <span className="font-mono font-semibold">{row.closingQty ?? '—'}</span>,
     },
     {
-      id: 'saleQty',
-      header: 'Dispatched Qty',
-      accessorKey: 'saleQty',
+      id: 'dlQty',
+      header: 'DL',
+      accessorKey: 'dlQty',
       sortable: true,
-      width: 130,
+      width: 80,
       align: 'right',
-      cell: (row) => (
-        <span className={`font-mono ${(row.saleQty ?? 0) > 0 ? 'text-green-600 font-semibold' : 'text-gray-400'}`}>
-          {row.saleQty ?? '—'}
-        </span>
-      ),
+      cell: (row) => <span className="font-mono text-sm">{row.dlQty ?? '—'}</span>,
     },
-  ]);
+    {
+      id: 'mhQty',
+      header: 'MH',
+      accessorKey: 'mhQty',
+      sortable: true,
+      width: 80,
+      align: 'right',
+      cell: (row) => <span className="font-mono text-sm">{row.mhQty ?? '—'}</span>,
+    },
+    {
+      id: 'ktQty',
+      header: 'KT',
+      accessorKey: 'ktQty',
+      sortable: true,
+      width: 80,
+      align: 'right',
+      cell: (row) => <span className="font-mono text-sm">{row.ktQty ?? '—'}</span>,
+    },
+    {
+      id: 'wbQty',
+      header: 'WB',
+      accessorKey: 'wbQty',
+      sortable: true,
+      width: 80,
+      align: 'right',
+      cell: (row) => <span className="font-mono text-sm">{row.wbQty ?? '—'}</span>,
+    },
+    {
+      id: 'hrQty',
+      header: 'HR',
+      accessorKey: 'hrQty',
+      sortable: true,
+      width: 80,
+      align: 'right',
+      cell: (row) => <span className="font-mono text-sm">{row.hrQty ?? '—'}</span>,
+    },
+  ], 'distributor-stock');
 
-  const fetchStock = async (p = 1, s = '', rd = '') => {
+  const displayItems = gridSearch.trim()
+    ? items.filter(i => {
+        const q = gridSearch.toLowerCase();
+        return (i.itemName || '').toLowerCase().includes(q) ||
+               (i.sku || '').toLowerCase().includes(q);
+      })
+    : items;
+
+  const fetchStock = async (p = 1, s = '') => {
     setIsLoading(true);
     try {
-      const params: any = { page: p, page_size: PAGE_SIZE };
-      if (s) params.search = s;
-      if (rd) params.report_date = rd;
-      const data: any = await api.distributorStock.getAll({ ...params, distributor_id: 2 });
+      const { start_date, end_date } = computeDateRange(filterMode, customStart, customEnd);
+      const params: any = { page: p, page_size: PAGE_SIZE, distributor_id: 2 };
+      if (s.trim()) params.search = s.trim();
+      if (start_date) params.date_from = start_date;
+      if (end_date) params.date_to = end_date;
+      const data: any = await api.distributorStock.getAll(params);
       setItems(data.items || []);
       setTotal(data.total || 0);
-      setTotalPages(data.total_pages || 1);
-      setStats(data.stats || { totalOpeningQty: 0, totalClosingQty: 0, totalSaleQty: 0 });
-      if (data.filters?.report_dates?.length) {
-        setReportDates(data.filters.report_dates);
-      }
+      setStats(data.stats || { totalClosingQty: 0, totalDlQty: 0, totalMhQty: 0, totalKtQty: 0, totalWbQty: 0, totalHrQty: 0, totalSkus: 0 });
     } catch (error: any) {
       toast.error(error.message || 'Failed to load Eagle stock');
     } finally {
@@ -131,72 +192,103 @@ export default function DistributorPage() {
   };
 
   useEffect(() => {
-    fetchStock(page, search, reportDate);
-  }, [page, reportDate]);
+    if (filterMode === 'custom' && !customStart) return;
+    fetchStock(page, globalSearch);
+  }, [page, filterMode, customStart, customEnd, globalSearch]);
 
-  const handleSearch = () => {
-    setPage(1);
-    fetchStock(1, search, reportDate);
+  const handleDownloadTemplate = () => {
+    const headers = ['SKU', 'ITEM', 'Total Stock', 'DL', 'MH', 'KT', 'WB', 'HR'];
+    const sample = [
+      ['ASG-OM-EPSOM-SALT-1KG', 'ORGANIX MANTRA EPSOM SALT', '3040', '60', '640', '1530', '810', ''],
+      ['ASG-OM-ROSEMARY-ESSENTIAL-OIL-15ML', 'ORGANIX MANTRA ROSEMARY ESSENTIAL OIL FOR HAIR', '642', '322', '', '320', '', '200'],
+    ];
+    const rows = [headers, ...sample].map(r => r.join(',')).join('\n');
+    const blob = new Blob([rows], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'Eagle_Stock_Template.csv';
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
-  const handleUpload = async (files: File[]) => {
+  const handleFileSelected = async (files: File[]) => {
     if (!files.length) return;
-    setIsUploading(true);
+    const file = files[0];
+    setSelectedFile(file);
+    setIsPreviewing(true);
+    setPreviewRows(null);
     setUploadResult(null);
     try {
-      const result: any = await api.distributorStock.upload(files[0], { distributorId: 2 });
+      const result: any = await api.distributorStock.preview(file, { channel: 'Blinkit' });
+      setPreviewRows(result.rows || []);
+      setDuplicateWarning(result.duplicateWarning || null);
+      setColumnWarnings(result.columnWarnings || []);
+      // Pre-fill date picker with detected date from file
+      if (result.detectedDate) {
+        setReportDate(result.detectedDate);
+      }
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to parse file');
+      setPreviewRows(null);
+      setSelectedFile(null);
+    } finally {
+      setIsPreviewing(false);
+    }
+  };
+
+  const handleConfirmUpload = async () => {
+    if (!selectedFile) return;
+    setIsConfirming(true);
+    setUploadResult(null);
+    try {
+      const result: any = await api.distributorStock.upload(selectedFile, {
+        channel: 'Blinkit',
+        reportDate: reportDate || undefined,
+      });
       setUploadResult(result);
       if (result.success) {
-        toast.success(`Eagle stock uploaded: ${result.data.rows_processed} records`);
+        if (result.data.rows_processed === 0) {
+          toast.warning('Upload completed but 0 rows saved. Check column names match: SKU, ITEM, Total Stock, DL, MH, KT, WB');
+        } else {
+          toast.success(`Eagle stock uploaded: ${result.data.rows_processed} records`);
+        }
+        setPreviewRows(null);
+        setSelectedFile(null);
+        setReportDate('');
         setPage(1);
-        fetchStock(1, search, reportDate);
+        fetchStock(1, globalSearch);
       }
     } catch (error: any) {
       toast.error(error.message || 'Upload failed');
       setUploadResult({ success: false, message: error.message || 'Upload failed', data: { rows_processed: 0, rows_skipped: 0, total_rows: 0 } });
     } finally {
-      setIsUploading(false);
+      setIsConfirming(false);
     }
+  };
+
+  const handleCancelPreview = () => {
+    setPreviewRows(null);
+    setSelectedFile(null);
+    setReportDate('');
+    setUploadResult(null);
+    setDuplicateWarning(null);
+    setColumnWarnings([]);
+    setUploadOpen(false);
   };
 
   return (
     <ProtectedRoute>
       <div className="p-6 space-y-6">
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <Building2 className="h-6 w-6 text-yellow-500" />
-            <div>
-              <p className="text-sm text-gray-500">Eagle Network weekly stock report (Blinkit distributor)</p>
-            </div>
-          </div>
-          <Badge variant="outline" className="text-xs">
-            ASG → Eagle → Blinkit
-          </Badge>
-        </div>
-
         {/* KPI Cards */}
-        <StatsGrid columns={3}>
-          <StatsCard
-            title="Opening Stock"
-            value={stats.totalOpeningQty.toLocaleString()}
-            icon={Package}
-            description="Start of week"
-          />
-          <StatsCard
-            title="Closing Stock"
-            value={stats.totalClosingQty.toLocaleString()}
-            icon={Package}
-            description="Current at Eagle"
-            variant="blue"
-          />
-          <StatsCard
-            title="Dispatched to Blinkit"
-            value={stats.totalSaleQty.toLocaleString()}
-            icon={TrendingDown}
-            description="Units sent this week"
-            variant="yellow"
-          />
+        <StatsGrid columns={7}>
+          <StatsCard title="Total SKUs" value={stats.totalSkus.toLocaleString('en-IN')} icon={Package} description="Distinct products" variant="blue" />
+          <StatsCard title="Total Stock" value={stats.totalClosingQty.toLocaleString('en-IN')} icon={Package} description="Closing qty across all regions" variant="green" />
+          <StatsCard title="DL" value={stats.totalDlQty.toLocaleString('en-IN')} icon={Building2} description="Delhi stock" variant="orange" />
+          <StatsCard title="MH" value={stats.totalMhQty.toLocaleString('en-IN')} icon={Building2} description="Maharashtra stock" variant="purple" />
+          <StatsCard title="KT" value={stats.totalKtQty.toLocaleString('en-IN')} icon={Building2} description="Karnataka stock" variant="red" />
+          <StatsCard title="WB" value={stats.totalWbQty.toLocaleString('en-IN')} icon={Building2} description="West Bengal stock" variant="yellow" />
+          <StatsCard title="HR" value={stats.totalHrQty.toLocaleString('en-IN')} icon={Building2} description="Haryana stock" variant="blue" />
         </StatsGrid>
 
         {/* Upload Result */}
@@ -226,75 +318,179 @@ export default function DistributorPage() {
 
         {/* Upload + Filter + Data */}
         <Card>
-          <CardHeader className="pb-2">
-            <div className="flex items-center justify-between flex-wrap gap-3">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
               <CardTitle className="text-base font-medium flex items-center gap-2">
                 <Building2 className="h-4 w-4 text-yellow-500" />
                 Eagle Network Weekly Stock
               </CardTitle>
-              <div className="flex items-center gap-2 flex-wrap">
-                {/* Date filter */}
-                <select
-                  value={reportDate}
-                  onChange={(e) => { setReportDate(e.target.value); setPage(1); }}
-                  className="text-sm border border-gray-200 rounded-md px-3 py-1.5 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="">Latest Report</option>
-                  {reportDates.map((d) => (
-                    <option key={d} value={d}>{d}</option>
-                  ))}
-                </select>
-
-                {/* Search */}
-                <div className="flex gap-1">
-                  <Input
-                    placeholder="Search items..."
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                    className="h-9 w-48 text-sm"
-                  />
-                  <Button variant="outline" size="sm" onClick={handleSearch}>
-                    <Search className="h-4 w-4" />
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs gap-1.5"
+                onClick={() => setUploadOpen(o => !o)}
+              >
+                <Upload className="h-3.5 w-3.5" />
+                Upload Report
+                {uploadOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Collapsible Upload Section — upload dropzone hidden when collapsed; preview always visible once file selected */}
+            {(uploadOpen || previewRows !== null) && (previewRows === null ? (
+              <div className="border border-dashed border-gray-200 rounded-lg p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <Upload className="h-4 w-4 text-gray-400" />
+                    <p className="text-sm font-medium text-gray-700">Upload Weekly Report (Excel/CSV)</p>
+                    {isPreviewing && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
+                  </div>
+                  <Button variant="outline" size="sm" onClick={handleDownloadTemplate} className="h-7 text-xs gap-1">
+                    <Download className="h-3.5 w-3.5" />
+                    Download Template
                   </Button>
                 </div>
+                <FileUpload
+                  accept=".xlsx,.xls,.csv"
+                  maxSize={10}
+                  onUpload={handleFileSelected}
+                  description={isPreviewing ? 'Parsing file...' : 'Drop Eagle weekly stock file here'}
+                />
+                <p className="text-xs text-gray-400 mt-2">
+                  Columns: SKU, ITEM (item name), Total Stock, DL / MH / KT / WB / HR (regional stock)
+                </p>
+              </div>
+            ) : (
+              /* Preview Panel */
+              <div className="border border-blue-200 rounded-lg bg-blue-50/40">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-blue-200">
+                  <div className="flex items-center gap-3">
+                    <CheckCircle2 className="h-4 w-4 text-blue-600" />
+                    <span className="text-sm font-medium text-blue-900">
+                      Preview — {previewRows.length} rows parsed from <span className="font-semibold">{selectedFile?.name}</span>
+                    </span>
+                  </div>
+                  <button onClick={handleCancelPreview} className="p-1 rounded hover:bg-blue-100 text-blue-400 hover:text-blue-600 transition-colors">
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
 
+                {/* Column warnings */}
+                {columnWarnings.length > 0 && (
+                  <div className="px-4 py-2.5 bg-orange-50 border-b border-orange-200">
+                    <div className="flex items-start gap-2">
+                      <AlertCircle className="h-4 w-4 text-orange-500 mt-0.5 flex-shrink-0" />
+                      <div>
+                        <p className="text-xs font-medium text-orange-800 mb-1">Column warnings:</p>
+                        {columnWarnings.map((w, i) => (
+                          <p key={i} className="text-xs text-orange-700">{w}</p>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Duplicate warning */}
+                {duplicateWarning && (
+                  <div className="px-4 py-2.5 flex items-start gap-2 bg-amber-50 border-b border-amber-200">
+                    <AlertCircle className="h-4 w-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                    <p className="text-xs text-amber-800">{duplicateWarning}</p>
+                  </div>
+                )}
+
+                {/* Date picker */}
+                <div className="px-4 py-3 flex items-center gap-3 border-b border-blue-100">
+                  <Calendar className="h-4 w-4 text-blue-500 flex-shrink-0" />
+                  <label className="text-sm font-medium text-gray-700">Report Date</label>
+                  <input
+                    type="date"
+                    value={reportDate}
+                    onChange={(e) => setReportDate(e.target.value)}
+                    className="h-9 text-sm border border-border rounded-md px-2 bg-white text-foreground focus:outline-none focus:ring-2 focus:ring-blue-500 w-40"
+                  />
+                  <span className="text-xs text-muted-foreground">
+                    {reportDate ? 'All rows will be saved with this date' : 'Using date from file (if present), else today'}
+                  </span>
+                </div>
+
+                {/* Preview table */}
+                <div className="overflow-x-auto max-h-64">
+                  <table className="w-full text-xs">
+                    <thead className="bg-blue-100 sticky top-0">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium text-blue-800">Item Name</th>
+                        <th className="px-3 py-2 text-left font-medium text-blue-800">SKU</th>
+                        <th className="px-3 py-2 text-right font-medium text-blue-800">Total</th>
+                        <th className="px-3 py-2 text-right font-medium text-blue-800">DL</th>
+                        <th className="px-3 py-2 text-right font-medium text-blue-800">MH</th>
+                        <th className="px-3 py-2 text-right font-medium text-blue-800">KT</th>
+                        <th className="px-3 py-2 text-right font-medium text-blue-800">WB</th>
+                        <th className="px-3 py-2 text-right font-medium text-blue-800">HR</th>
+                        <th className="px-3 py-2 text-right font-medium text-blue-800">Date</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-blue-100">
+                      {previewRows.slice(0, 100).map((r, i) => (
+                        <tr key={i} className="hover:bg-blue-50/60">
+                          <td className="px-3 py-1.5 max-w-[200px] truncate" title={r.itemName}>{r.itemName}</td>
+                          <td className="px-3 py-1.5 font-mono text-gray-500">{r.sku || '—'}</td>
+                          <td className="px-3 py-1.5 text-right font-semibold">{r.closingQty ?? '—'}</td>
+                          <td className="px-3 py-1.5 text-right text-gray-600">{r.dlQty ?? '—'}</td>
+                          <td className="px-3 py-1.5 text-right text-gray-600">{r.mhQty ?? '—'}</td>
+                          <td className="px-3 py-1.5 text-right text-gray-600">{r.ktQty ?? '—'}</td>
+                          <td className="px-3 py-1.5 text-right text-gray-600">{r.wbQty ?? '—'}</td>
+                          <td className="px-3 py-1.5 text-right text-gray-600">{r.hrQty ?? '—'}</td>
+                          <td className="px-3 py-1.5 text-right text-gray-400">{fmtDate(reportDate || r.reportDate)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {previewRows.length > 100 && (
+                    <p className="text-xs text-center text-muted-foreground py-2">
+                      Showing first 100 of {previewRows.length} rows
+                    </p>
+                  )}
+                </div>
+
+                {/* Confirm / Cancel */}
+                <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-blue-200">
+                  <Button variant="outline" size="sm" onClick={handleCancelPreview} disabled={isConfirming}>
+                    Cancel
+                  </Button>
+                  <Button size="sm" onClick={handleConfirmUpload} disabled={isConfirming}>
+                    {isConfirming ? <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Saving...</> : `Confirm Upload (${previewRows.length} rows)`}
+                  </Button>
+                </div>
+              </div>
+            ) )}
+
+            {/* Filter bar — search + view options */}
+            <FilterBar
+              searchPlaceholder="Search items..."
+              searchValue={gridSearch}
+              onSearchChange={setGridSearch}
+            >
+              <div className="flex items-center gap-2 ml-auto">
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => { setPage(1); fetchStock(1, search, reportDate); }}
+                  className="h-9"
+                  onClick={() => { setPage(1); fetchStock(1, globalSearch); }}
                 >
                   <RefreshCw className="h-4 w-4" />
                 </Button>
-
                 <ViewOptionsButton
                   columns={gridState.columns}
                   visibleColumns={gridState.visibleColumns}
                   onToggleColumn={gridState.toggleColumnVisibility}
                   rowDensity={gridState.rowDensity}
                   onDensityChange={gridState.setRowDensity}
+                  onSave={gridState.saveCurrentView}
+                  onReset={gridState.resetView}
                 />
               </div>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {/* File Upload */}
-            <div className="border border-dashed border-gray-200 rounded-lg p-4">
-              <div className="flex items-center gap-2 mb-2">
-                <Upload className="h-4 w-4 text-gray-400" />
-                <p className="text-sm font-medium text-gray-700">Upload Weekly Report (Excel/CSV)</p>
-                {isUploading && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
-              </div>
-              <FileUpload
-                accept=".xlsx,.xls,.csv"
-                maxSize={10}
-                onUpload={handleUpload}
-                description={isUploading ? 'Uploading...' : 'Drop Eagle weekly stock file here'}
-              />
-              <p className="text-xs text-gray-400 mt-2">
-                Expected columns: report_date, item_name, opening_qty, closing_qty, sale_qty
-              </p>
-            </div>
+            </FilterBar>
 
             {/* Data Grid */}
             {isLoading ? (
@@ -311,37 +507,11 @@ export default function DistributorPage() {
             ) : (
               <>
                 <DataGrid
-                  data={items}
+                  data={displayItems}
                   gridState={gridState}
-                  pageSize={PAGE_SIZE}
+                  serverPagination={gridSearch.trim() ? undefined : { total, page, pageSize: PAGE_SIZE, onPageChange: setPage }}
                 />
-                {/* Pagination */}
-                <div className="flex items-center justify-between pt-2">
-                  <p className="text-sm text-gray-500">
-                    {total.toLocaleString()} items
-                  </p>
-                  <div className="flex items-center gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setPage((p) => Math.max(1, p - 1))}
-                      disabled={page === 1}
-                    >
-                      Previous
-                    </Button>
-                    <span className="text-sm text-gray-500">
-                      Page {page} of {totalPages}
-                    </span>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                      disabled={page === totalPages}
-                    >
-                      Next
-                    </Button>
-                  </div>
-                </div>
+                <p className="text-sm text-gray-500 pt-2">{total.toLocaleString('en-IN')} items</p>
               </>
             )}
           </CardContent>

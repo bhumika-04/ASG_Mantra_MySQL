@@ -1,23 +1,7 @@
-"""
-DistributorStock Model - SQLAlchemy ORM
-Replaces the Eagle-specific EagleStock table.
+"""DistributorStock model: weekly stock reports sent by the distributors.
 
-Both distributors send weekly stock reports:
-  Eagle (Id=2) → Blinkit channel  — dispatched to Blinkit DCs
-  RK    (Id=1) → Amazon channel   — dispatched to Amazon FCs
-
-Table: DistributorStock
-SQL (run once):
-    CREATE TABLE DistributorStock (
-        Id            INT IDENTITY(1,1) PRIMARY KEY,
-        ReportDate    DATE NOT NULL,
-        DistributorId INT NULL REFERENCES Distributors(Id),
-        ItemName      NVARCHAR(300) NOT NULL,
-        OpeningQty    INT NULL,
-        ClosingQty    INT NULL,
-        SaleQty       INT NULL,
-        CreatedAt     DATETIME DEFAULT GETDATE()
-    );
+  Eagle (Id=2) -> Blinkit channel, dispatched to Blinkit DCs
+  RK    (Id=1) -> Amazon channel, dispatched to Amazon FCs
 """
 from sqlalchemy import Column, Integer, String, Date, DateTime, ForeignKey
 from sqlalchemy.sql import func
@@ -34,14 +18,22 @@ class DistributorStockData(Base):
 
     # Product
     ItemName = Column(String(300), nullable=False)
+    SKU = Column(String(100), nullable=True)
 
     # Weekly stock movement
     OpeningQty = Column(Integer, nullable=True)   # Stock at start of week
     ClosingQty = Column(Integer, nullable=True)    # Current stock at distributor warehouse
     SaleQty = Column(Integer, nullable=True)       # Units dispatched to platform this week
 
+    # Region-wise stock
+    DL_Qty = Column(Integer, nullable=True)
+    MH_Qty = Column(Integer, nullable=True)
+    KT_Qty = Column(Integer, nullable=True)
+    WB_Qty = Column(Integer, nullable=True)
+    HR_Qty = Column(Integer, nullable=True)
+
     # Metadata
-    CreatedAt = Column(DateTime, default=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
 
     def to_dict(self):
         return {
@@ -49,8 +41,14 @@ class DistributorStockData(Base):
             "reportDate": self.ReportDate.isoformat() if self.ReportDate else None,
             "distributorId": self.DistributorId,
             "itemName": self.ItemName,
+            "sku": self.SKU,
             "openingQty": self.OpeningQty,
             "closingQty": self.ClosingQty,
             "saleQty": self.SaleQty,
+            "dlQty": self.DL_Qty,
+            "mhQty": self.MH_Qty,
+            "ktQty": self.KT_Qty,
+            "wbQty": self.WB_Qty,
+            "hrQty": self.HR_Qty,
             "createdAt": self.CreatedAt.isoformat() if self.CreatedAt else None,
         }

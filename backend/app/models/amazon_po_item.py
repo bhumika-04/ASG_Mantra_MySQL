@@ -43,11 +43,14 @@ class AmazonPOItemData(Base):
     UnitCost = Column(DECIMAL(15, 2), nullable=True)
     TotalCost = Column(DECIMAL(15, 2), nullable=True)
 
+    # Per-item status (independent of PO header — allows different status per line)
+    ItemStatus = Column(String(50), nullable=True)
+
     # Product link (resolved from ASIN at upload time)
     ProductId = Column(Integer, ForeignKey("Products.Id"), nullable=True, index=True)
 
     # Metadata
-    CreatedAt = Column(DateTime, default=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
 
     # Relationships
     po = relationship("AmazonPOData", back_populates="items")

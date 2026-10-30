@@ -11,6 +11,7 @@ from app.database import get_db
 from app.models.user import User
 from app.models.upload_log import UploadLog
 from app.utils.dependencies import get_current_user
+from app.utils.timeutil import now_ist
 
 router = APIRouter()
 
@@ -82,7 +83,7 @@ async def get_upload_stats(
     """
     Get upload statistics for the last N days.
     """
-    start_date = datetime.now() - timedelta(days=days)
+    start_date = now_ist() - timedelta(days=days)
 
     from sqlalchemy import func
 
@@ -161,6 +162,30 @@ async def get_upload_log_details(
     return log.to_dict()
 
 
+@router.delete("/cleanup")
+async def cleanup_old_upload_logs(
+    days: int = Query(180, ge=30, description="Delete logs older than N days"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Delete upload logs older than specified days.
+    Admin only.
+    """
+    if current_user.Role != "Admin":
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+    cutoff_date = now_ist() - timedelta(days=days)
+    deleted_count = db.query(UploadLog).filter(UploadLog.UploadDate < cutoff_date).delete()
+    db.commit()
+
+    return {
+        "success": True,
+        "message": f"Deleted {deleted_count} upload logs older than {days} days",
+        "deletedCount": deleted_count
+    }
+
+
 @router.delete("/{log_id}")
 async def delete_upload_log(
     log_id: int,
@@ -182,27 +207,3 @@ async def delete_upload_log(
     db.commit()
 
     return {"success": True, "message": f"Upload log {log_id} deleted"}
-
-
-@router.delete("/cleanup")
-async def cleanup_old_upload_logs(
-    days: int = Query(180, ge=30, description="Delete logs older than N days"),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Delete upload logs older than specified days.
-    Admin only.
-    """
-    if current_user.Role != "Admin":
-        raise HTTPException(status_code=403, detail="Admin role required")
-
-    cutoff_date = datetime.now() - timedelta(days=days)
-    deleted_count = db.query(UploadLog).filter(UploadLog.UploadDate < cutoff_date).delete()
-    db.commit()
-
-    return {
-        "success": True,
-        "message": f"Deleted {deleted_count} upload logs older than {days} days",
-        "deletedCount": deleted_count
-    }

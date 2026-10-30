@@ -3,7 +3,7 @@ AmazonInventory Model - SQLAlchemy ORM
 Source: Vendor Central CSV (38 data columns)
 Table managed via SQL script: database/amazon_tables.sql
 """
-from sqlalchemy import Column, Integer, String, Date, DateTime, DECIMAL, ForeignKey
+from sqlalchemy import Column, Integer, String, Date, DateTime, DECIMAL
 from sqlalchemy.sql import func
 from ..database import Base
 
@@ -14,7 +14,7 @@ class AmazonInventoryData(Base):
 
     Id = Column(Integer, primary_key=True, autoincrement=True)
     ReportDate = Column(Date, nullable=False)
-    # DistributorId = Column(Integer, ForeignKey('Distributors.Id'), nullable=True)  # TODO: Add this column to DB table first
+
 
     # Product Identification
     ASIN = Column(String(20), nullable=False)
@@ -69,7 +69,7 @@ class AmazonInventoryData(Base):
     UnsellableInTransitUnits = Column(Integer, nullable=True)
 
     # Metadata
-    CreatedAt = Column(DateTime, default=func.getdate())
+    CreatedAt = Column(DateTime, default=func.now())
 
     def to_dict(self):
         return {
@@ -81,6 +81,7 @@ class AmazonInventoryData(Base):
             "modelNumber": self.ModelNumber,
             "sellableOnHandUnits": self.SellableOnHandUnits,
             "unsellableOnHandUnits": self.UnsellableOnHandUnits,
+            "inTransitQuantity": self.InTransitQuantity,
             "openPurchaseOrderQuantity": self.OpenPurchaseOrderQuantity,
             "netShippedGMS": float(self.NetShippedGMS) if self.NetShippedGMS else None,
             "createdAt": self.CreatedAt.isoformat() if self.CreatedAt else None,

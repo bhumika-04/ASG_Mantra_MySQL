@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
+import { fmtDate, fmtCurrency, fmtN, toTitleCase } from '@/lib/format';
 
 interface UploadResult {
   success: boolean;
@@ -43,6 +44,8 @@ interface PdfExtractData {
   warnings: string[];
   page_count: number;
   item_count: number;
+  duplicate_warning?: string;
+  existing_po_id?: number;
 }
 
 interface PackingAlert {
@@ -113,6 +116,9 @@ interface SemanticPreview {
   detectedDate?: string | null;
   previewRows?: PreviewRow[];
   duplicateDataWarning?: string | null;
+  mandatoryDataWarning?: string | null; // Core metric column is blank for every row — likely the wrong file
+  columnWarnings?: string[];
+  duplicatePos?: { poNumber: string; uploadedOn: string }[];
 }
 
 export default function BlinkitUploadPage() {
@@ -124,8 +130,10 @@ export default function BlinkitUploadPage() {
   const [pdfExtractData, setPdfExtractData] = useState<PdfExtractData | null>(null);
   const [isExtracting, setIsExtracting] = useState(false);
   const [isConfirming, setIsConfirming] = useState(false);
+  const [isUpdatingHeader, setIsUpdatingHeader] = useState(false);
   const [reportDate, setReportDate] = useState('');
   const [packingAlerts, setPackingAlerts] = useState<PackingAlert[]>([]);
+  const [inventoryWarnings, setInventoryWarnings] = useState<{ item_code: string; item_name: string; ordered_qty: number; packed_qty: number; shortfall: number }[]>([]);
 
   const salesFileInputRef = useRef<HTMLInputElement>(null);
   const inventoryFileInputRef = useRef<HTMLInputElement>(null);
@@ -151,6 +159,9 @@ export default function BlinkitUploadPage() {
         detectedDate: result.detectedDate,
         previewRows: result.previewRows ?? [],
         duplicateDataWarning: result.duplicateDataWarning,
+        mandatoryDataWarning: result.mandatoryDataWarning ?? null,
+        columnWarnings: result.columnWarnings ?? [],
+        duplicatePos: result.duplicatePos ?? [],
       });
       // Set report date from preview
       setReportDate(result.detectedDate || '');
@@ -167,6 +178,7 @@ export default function BlinkitUploadPage() {
     if (!semanticPreview) return;
     setIsUploading(true);
     setPackingAlerts([]);
+    setInventoryWarnings([]);
     try {
       let result: any;
 
@@ -179,6 +191,9 @@ export default function BlinkitUploadPage() {
         if (result.data?.packing_alerts?.length > 0) {
           setPackingAlerts(result.data.packing_alerts);
         }
+        if (result.data?.inventory_warnings?.length > 0) {
+          setInventoryWarnings(result.data.inventory_warnings);
+        }
       }
 
       setUploadResult(result);
@@ -186,6 +201,21 @@ export default function BlinkitUploadPage() {
       const processed = result.data?.rows_processed || result.data?.rows_created || 0;
       const updated = result.data?.rows_updated || 0;
       toast.success(`Upload complete: ${processed + updated} records processed`);
+
+      // A PO that already exists is skipped rather than re-imported, because its line
+      // items would otherwise be appended a second time and every quantity would double.
+      // Say so explicitly — otherwise a file of already-uploaded POs reports
+      // "0 records processed" with no indication of why nothing happened.
+      const skipped: string[] = result.data?.duplicate_pos_skipped || [];
+      if (skipped.length > 0) {
+        const shown = skipped.slice(0, 5).join(', ');
+        const more = skipped.length > 5 ? ` and ${skipped.length - 5} more` : '';
+        toast.warning(
+          `${skipped.length} PO(s) already uploaded and were skipped: ${shown}${more}. ` +
+          `Re-uploading does not update an existing PO — edit it on the Blinkit PO page instead.`,
+          { duration: 10000 },
+        );
+      }
 
       // Notify about auto-created products and warehouses
       if (result.data?.products_created?.length > 0) {
@@ -241,6 +271,7 @@ export default function BlinkitUploadPage() {
           warnings: result.warnings || [],
           page_count: result.page_count,
           item_count: result.item_count,
+          duplicate_warning: result.duplicate_warning,
         });
         if (result.warnings?.length > 0) {
           toast.warning(`Extracted with ${result.warnings.length} warning(s). Please review.`);
@@ -261,6 +292,7 @@ export default function BlinkitUploadPage() {
     if (!pdfExtractData) return;
     setIsConfirming(true);
     setPackingAlerts([]);
+    setInventoryWarnings([]);
     try {
       const result = await api.upload.blinkitPOConfirmPdf({
         header: pdfExtractData.header,
@@ -269,6 +301,9 @@ export default function BlinkitUploadPage() {
       }) as any;
       if (result.data?.packing_alerts?.length > 0) {
         setPackingAlerts(result.data.packing_alerts);
+      }
+      if (result.data?.inventory_warnings?.length > 0) {
+        setInventoryWarnings(result.data.inventory_warnings);
       }
       setUploadResult({
         success: true,
@@ -293,6 +328,24 @@ export default function BlinkitUploadPage() {
   };
 
   const handleCancelPdfPreview = () => setPdfExtractData(null);
+
+  const updatePdfHeader = (field: string, value: string) => {
+    setPdfExtractData(prev => prev ? { ...prev, header: { ...prev.header, [field]: value || null } } : prev);
+  };
+
+  const handleUpdatePOHeader = async () => {
+    if (!pdfExtractData?.existing_po_id || !pdfExtractData.header) return;
+    setIsUpdatingHeader(true);
+    try {
+      await api.purchaseOrders.updateBlinkitPOHeader(pdfExtractData.existing_po_id, pdfExtractData.header);
+      toast.success('PO header updated successfully');
+      setPdfExtractData(null);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to update PO header');
+    } finally {
+      setIsUpdatingHeader(false);
+    }
+  };
 
   const handleDownloadTemplate = (type: string) => {
     let headers: string[];
@@ -379,6 +432,38 @@ export default function BlinkitUploadPage() {
                 </div>
               )}
 
+              {/* Mandatory Data Warning — a core metric column is blank for every row,
+                  usually meaning the wrong file was picked for this section. Shown ahead
+                  of the other warnings since it's the most likely to mean "stop and check". */}
+              {semanticPreview.mandatoryDataWarning && (
+                <div className="p-3 bg-red-50 border border-red-300 rounded-lg">
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="h-4 w-4 text-red-600 flex-shrink-0" />
+                    <span className="text-sm font-semibold text-red-800">
+                      Wrong file for this section?
+                    </span>
+                  </div>
+                  <p className="text-sm text-red-700 mt-2 ml-6">
+                    {semanticPreview.mandatoryDataWarning}
+                  </p>
+                </div>
+              )}
+
+              {/* Column Warnings */}
+              {(semanticPreview.columnWarnings?.length ?? 0) > 0 && (
+                <div className="p-3 bg-orange-50 border border-orange-200 rounded-lg">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="h-4 w-4 text-orange-500 flex-shrink-0 mt-0.5" />
+                    <div>
+                      <span className="text-sm font-semibold text-orange-800">Column warnings</span>
+                      {semanticPreview.columnWarnings!.map((w, i) => (
+                        <p key={i} className="text-xs text-orange-700 mt-1">{w}</p>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Duplicate Warning */}
               {semanticPreview.duplicateDataWarning && (
                 <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
@@ -438,8 +523,8 @@ export default function BlinkitUploadPage() {
                                 <td className="p-2 text-xs">{row.manufacturerName || '—'}</td>
                                 <td className="p-2 text-xs">{row.cityName || '—'}</td>
                                 <td className="p-2 text-xs">{row.category || '—'}</td>
-                                <td className="p-2 text-xs text-right">{row.qtySold?.toFixed(2) || '—'}</td>
-                                <td className="p-2 text-xs text-right font-semibold">₹{row.mrp?.toFixed(2) || '—'}</td>
+                                <td className="p-2 text-xs text-right">{row.qtySold != null ? fmtN(Math.round(row.qtySold)) : '—'}</td>
+                                <td className="p-2 text-xs text-right font-semibold">{row.mrp != null ? fmtCurrency(row.mrp, 2) : '—'}</td>
                               </>
                             )}
                             {semanticPreview.uploadType === 'blinkit/inventory' && (
@@ -491,7 +576,7 @@ export default function BlinkitUploadPage() {
                   <div className="flex items-center gap-2 mb-2">
                     <Building2 className="h-4 w-4 text-orange-600" />
                     <p className="font-medium text-orange-800 text-sm">
-                      {semanticPreview.newFacilities.length} new Blinkit facility/facilities will be created in Distributor Facilities
+                      {semanticPreview.newFacilities.length} new {semanticPreview.uploadType === 'blinkit/inventory' ? 'Blinkit BE Warehouse(s) will be created' : 'Distributor Facility/Facilities will be created for Eagle Network'}
                     </p>
                   </div>
                   <div className="space-y-1 max-h-40 overflow-y-auto">
@@ -510,6 +595,18 @@ export default function BlinkitUploadPage() {
                   All facilities already in master — no new facilities will be created.
                 </div>
               ) : null}
+
+              {/* Duplicate PO warning */}
+              {semanticPreview.duplicatePos && semanticPreview.duplicatePos.length > 0 && (
+                <div className="flex items-start gap-2 p-3 bg-red-50 border border-red-300 rounded-lg">
+                  <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                  <div className="text-sm text-red-800">
+                    <span className="font-semibold">Duplicate POs detected:</span>{' '}
+                    {semanticPreview.duplicatePos.map(d => `PO ${d.poNumber} (uploaded ${d.uploadedOn})`).join(', ')}.
+                    {' '}These POs already exist in the database and will be skipped on confirm.
+                  </div>
+                </div>
+              )}
 
               {/* PO Summary */}
               {semanticPreview.poSummary && semanticPreview.poSummary.length > 0 && (
@@ -534,9 +631,9 @@ export default function BlinkitUploadPage() {
                           <tr key={i} className="border-t hover:bg-muted/20">
                             <td className="p-2 font-mono font-semibold">{po.poNumber}</td>
                             <td className="p-2 max-w-[180px] truncate text-muted-foreground">{po.shipToName || '—'}</td>
-                            <td className="p-2 text-muted-foreground">{po.poDate || '—'}</td>
+                            <td className="p-2 text-muted-foreground">{fmtDate(po.poDate)}</td>
                             <td className="p-2 text-muted-foreground">{po.paymentTerms || '—'}</td>
-                            <td className="p-2 text-muted-foreground">{po.expectedDelivery || '—'}</td>
+                            <td className="p-2 text-muted-foreground">{fmtDate(po.expectedDelivery)}</td>
                             <td className="p-2">
                               <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
                                 po.status === 'Delivered' ? 'bg-purple-100 text-purple-700' :
@@ -598,19 +695,19 @@ export default function BlinkitUploadPage() {
                             <td className="p-2 max-w-[180px] truncate" title={item.itemName ?? ''}>{item.itemName || '—'}</td>
                             <td className="p-2 font-mono">{item.hsnCode || '—'}</td>
                             <td className="p-2">{item.size || '—'}</td>
-                            <td className="p-2 text-right">₹{item.mrp?.toFixed(2) ?? '—'}</td>
+                            <td className="p-2 text-right">{item.mrp != null ? fmtCurrency(item.mrp, 2) : '—'}</td>
                             <td className="p-2 text-right font-semibold text-blue-700">{item.qty ?? '—'}</td>
                             <td className="p-2">{item.uom || '—'}</td>
-                            <td className="p-2 text-right">₹{item.unitBaseCost?.toFixed(2) ?? '—'}</td>
-                            <td className="p-2 text-right">{item.discount != null ? `₹${item.discount.toFixed(2)}` : '—'}</td>
-                            <td className="p-2 text-right font-semibold">{item.taxableValue != null ? `₹${item.taxableValue.toFixed(2)}` : '—'}</td>
+                            <td className="p-2 text-right">{item.unitBaseCost != null ? fmtCurrency(item.unitBaseCost, 2) : '—'}</td>
+                            <td className="p-2 text-right">{item.discount != null ? fmtCurrency(item.discount, 2) : '—'}</td>
+                            <td className="p-2 text-right font-semibold">{item.taxableValue != null ? fmtCurrency(item.taxableValue, 2) : '—'}</td>
                             <td className="p-2 text-right">{item.cgstRate != null ? `${item.cgstRate}%` : '—'}</td>
-                            <td className="p-2 text-right">{item.cgstAmt != null ? `₹${item.cgstAmt.toFixed(2)}` : '—'}</td>
+                            <td className="p-2 text-right">{item.cgstAmt != null ? fmtCurrency(item.cgstAmt, 2) : '—'}</td>
                             <td className="p-2 text-right">{item.sgstRate != null ? `${item.sgstRate}%` : '—'}</td>
-                            <td className="p-2 text-right">{item.sgstAmt != null ? `₹${item.sgstAmt.toFixed(2)}` : '—'}</td>
+                            <td className="p-2 text-right">{item.sgstAmt != null ? fmtCurrency(item.sgstAmt, 2) : '—'}</td>
                             <td className="p-2 text-right">{item.igstRate != null ? `${item.igstRate}%` : '—'}</td>
-                            <td className="p-2 text-right">{item.igstAmt != null ? `₹${item.igstAmt.toFixed(2)}` : '—'}</td>
-                            <td className="p-2 text-right font-semibold text-green-700">{item.totalAmount != null ? `₹${item.totalAmount.toFixed(2)}` : '—'}</td>
+                            <td className="p-2 text-right">{item.igstAmt != null ? fmtCurrency(item.igstAmt, 2) : '—'}</td>
+                            <td className="p-2 text-right font-semibold text-green-700">{item.totalAmount != null ? fmtCurrency(item.totalAmount, 2) : '—'}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -621,11 +718,21 @@ export default function BlinkitUploadPage() {
 
               <div className="flex items-center justify-between pt-2 border-t">
                 <p className="text-sm text-muted-foreground">
-                  {semanticPreview.validRows} row(s) • {semanticPreview.newProducts.length} new product(s) • {semanticPreview.newFacilities.length} new facility/facilities
+                  {semanticPreview.validRows} row(s) • {semanticPreview.newProducts.length} new product(s) • {semanticPreview.newFacilities.length} {semanticPreview.uploadType === 'blinkit/inventory' ? 'new BE warehouse(s)' : 'new distributor facility/facilities'}
                 </p>
                 <div className="flex gap-2">
                   <Button variant="outline" onClick={handleCancelSemanticPreview} disabled={isUploading}>Cancel</Button>
-                  <Button onClick={handleConfirmSemanticUpload} disabled={isUploading}>
+                  <Button
+                    onClick={handleConfirmSemanticUpload}
+                    disabled={isUploading || !!semanticPreview.duplicateDataWarning || !!semanticPreview.mandatoryDataWarning}
+                    title={
+                      semanticPreview.mandatoryDataWarning
+                        ? 'Blocked: core data is blank for every row — this looks like the wrong file for this section.'
+                        : semanticPreview.duplicateDataWarning
+                        ? 'Blocked: this data already exists — re-uploading would be skipped anyway.'
+                        : undefined
+                    }
+                  >
                     {isUploading ? (
                       <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Uploading...</>
                     ) : (
@@ -668,7 +775,7 @@ export default function BlinkitUploadPage() {
           </Card>
         )}
 
-        <Card>
+        {!semanticPreview && <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -685,12 +792,13 @@ export default function BlinkitUploadPage() {
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <Tabs defaultValue="sales" className="w-full" onValueChange={(v) => {
+            <Tabs value={activeTab} className="w-full" onValueChange={(v) => {
               setActiveTab(v);
               setUploadResult(null);
               setPdfExtractData(null);
               setSemanticPreview(null);
               setPackingAlerts([]);
+              setInventoryWarnings([]);
             }}>
               <TabsList className="grid w-full grid-cols-3">
                 <TabsTrigger value="sales" className="flex items-center gap-2"><Zap className="h-4 w-4" />Sales Data</TabsTrigger>
@@ -727,17 +835,31 @@ export default function BlinkitUploadPage() {
               {/* PO Tab */}
               <TabsContent value="po" className="space-y-4 mt-6">
                 {pdfExtractData ? (
-                  <Card className="border-blue-200">
-                    <CardHeader>
+                  <Card className="border-green-200">
+                    <CardHeader className="bg-green-50/50 rounded-t-lg border-b border-green-100">
                       <CardTitle className="flex items-center gap-2">
-                        <FileText className="h-5 w-5 text-blue-600" />
+                        <FileText className="h-5 w-5 text-green-600" />
                         Extracted PO: {pdfExtractData.header?.po_number || '(PO Number not found)'}
                       </CardTitle>
                       <CardDescription>
                         {pdfExtractData.page_count} page(s), {pdfExtractData.item_count} line item(s). Review and confirm to save.
                       </CardDescription>
                     </CardHeader>
-                    <CardContent className="space-y-6">
+                    <CardContent className="space-y-6 pt-5">
+                      {pdfExtractData.duplicate_warning && (
+                        <div className="p-3 bg-red-50 border border-red-400 rounded-lg flex items-start gap-3">
+                          <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <p className="font-semibold text-red-800 text-sm">Duplicate PO — Cannot Save</p>
+                            <p className="text-sm text-red-700 mt-0.5">{pdfExtractData.duplicate_warning}</p>
+                            {pdfExtractData.existing_po_id && (
+                              <p className="text-xs text-red-600 mt-1.5">
+                                You can update the header fields (Ship To, Bill To, GSTIN, etc.) of the existing PO using the button below.
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      )}
                       {pdfExtractData.warnings.length > 0 && (
                         <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
                           <div className="flex items-center gap-2 mb-1">
@@ -749,61 +871,162 @@ export default function BlinkitUploadPage() {
                           </ul>
                         </div>
                       )}
-                      <div>
-                        <h4 className="font-medium text-sm mb-3">PO Header</h4>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-                          {([
-                            ['PO Number', pdfExtractData.header?.po_number],
-                            ['PO Date', pdfExtractData.header?.po_date],
-                            ['Expected Delivery', pdfExtractData.header?.expected_delivery_date],
-                            ['Payment Terms', pdfExtractData.header?.payment_terms],
-                            ['Vendor Name', pdfExtractData.header?.vendor_name],
-                            ['Vendor GSTIN', pdfExtractData.header?.vendor_gstin],
-                            ['Ship To', pdfExtractData.header?.ship_to_name],
-                            ['Grand Total', formatINR(pdfExtractData.header?.grand_total)],
-                          ] as [string, any][]).map(([label, value], idx) => (
-                            <div key={idx} className="bg-gray-50 rounded px-3 py-2">
-                              <span className="text-muted-foreground text-xs">{label}</span>
-                              <p className="font-medium truncate">{value || '-'}</p>
-                            </div>
-                          ))}
+
+                      {/* Summary stats bar */}
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                        <div className="p-3 bg-blue-50 rounded-lg border border-blue-100">
+                          <span className="text-blue-600 block text-xs font-medium">PO Number</span>
+                          <span className="font-semibold text-blue-900">{pdfExtractData.header?.po_number || '—'}</span>
+                        </div>
+                        <div className="p-3 bg-green-50 rounded-lg border border-green-100">
+                          <span className="text-green-600 block text-xs font-medium">Grand Total</span>
+                          <span className="font-semibold text-green-900">{formatINR(pdfExtractData.header?.grand_total)}</span>
+                        </div>
+                        <div className="p-3 bg-purple-50 rounded-lg border border-purple-100">
+                          <span className="text-purple-600 block text-xs font-medium">Items</span>
+                          <span className="font-semibold text-purple-900">{pdfExtractData.item_count} line item(s)</span>
+                        </div>
+                        <div className="p-3 bg-orange-50 rounded-lg border border-orange-100">
+                          <span className={`block text-xs font-medium ${!pdfExtractData.header?.expected_delivery_date ? 'text-orange-500' : 'text-orange-600'}`}>
+                            Expected Delivery{!pdfExtractData.header?.expected_delivery_date ? ' — enter date' : ''}
+                          </span>
+                          {pdfExtractData.header?.expected_delivery_date && (
+                            <span className="block text-sm font-semibold text-orange-900">
+                              {fmtDate(pdfExtractData.header.expected_delivery_date)}
+                            </span>
+                          )}
+                          <input
+                            type="date"
+                            value={pdfExtractData.header?.expected_delivery_date?.slice(0, 10) || ''}
+                            onChange={e => updatePdfHeader('expected_delivery_date', e.target.value)}
+                            className={`w-full bg-transparent text-xs border-0 border-b focus:outline-none py-0.5 ${
+                              pdfExtractData.header?.expected_delivery_date ? 'text-orange-400' : 'text-orange-900'
+                            } ${!pdfExtractData.header?.expected_delivery_date ? 'border-orange-400' : 'border-orange-200'}`}
+                          />
                         </div>
                       </div>
+
+                      {/* PO Header details */}
                       <div>
-                        <h4 className="font-medium text-sm mb-3">Line Items ({pdfExtractData.items.length})</h4>
-                        <div className="overflow-x-auto bg-white rounded-lg border max-h-80 overflow-y-auto">
+                        <h4 className="font-medium text-sm mb-3 text-gray-700">PO Header</h4>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                          {/* PO Info — blue */}
+                          {([
+                            ['PO Date', fmtDate(pdfExtractData.header?.po_date)],
+                            ['Payment Terms', pdfExtractData.header?.payment_terms],
+                          ] as [string, any][]).map(([label, value]) => (
+                            <div key={label} className="bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
+                              <span className="text-blue-500 text-xs">{label}</span>
+                              <p className="font-medium truncate text-blue-900">{value || '—'}</p>
+                            </div>
+                          ))}
+                          {/* Vendor Info — purple */}
+                          {([
+                            ['Vendor Name', pdfExtractData.header?.vendor_name],
+                            ['Vendor GSTIN', pdfExtractData.header?.vendor_gstin],
+                          ] as [string, any][]).map(([label, value]) => (
+                            <div key={label} className="bg-purple-50 border border-purple-100 rounded-lg px-3 py-2">
+                              <span className="text-purple-500 text-xs">{label}</span>
+                              <p className="font-medium truncate text-purple-900">{value || '—'}</p>
+                            </div>
+                          ))}
+                          {/* Ship To — green/teal (editable) */}
+                          <div className="bg-teal-50 border border-teal-100 rounded-lg px-3 py-2">
+                            <span className={`text-xs ${!pdfExtractData.header?.ship_to_name ? 'text-orange-500 font-medium' : 'text-teal-500'}`}>
+                              Ship To (Name){!pdfExtractData.header?.ship_to_name ? ' — needs input' : ''}
+                            </span>
+                            <input
+                              type="text"
+                              value={pdfExtractData.header?.ship_to_name || ''}
+                              onChange={e => updatePdfHeader('ship_to_name', e.target.value)}
+                              placeholder="Enter ship-to name..."
+                              className={`w-full bg-transparent text-sm font-medium border-0 border-b focus:outline-none py-0.5 text-teal-900 placeholder-teal-300 ${
+                                !pdfExtractData.header?.ship_to_name ? 'border-orange-400 focus:border-orange-500' : 'border-teal-200 focus:border-teal-500'
+                              }`}
+                            />
+                          </div>
+                          <div className="bg-teal-50 border border-teal-100 rounded-lg px-3 py-2 md:col-span-2">
+                            <span className={`text-xs ${!pdfExtractData.header?.ship_to_address ? 'text-orange-500 font-medium' : 'text-teal-500'}`}>
+                              Ship To (Address){!pdfExtractData.header?.ship_to_address ? ' — needs input' : ''}
+                            </span>
+                            <textarea
+                              value={pdfExtractData.header?.ship_to_address || ''}
+                              onChange={e => updatePdfHeader('ship_to_address', e.target.value)}
+                              placeholder="Enter full address..."
+                              rows={2}
+                              className={`w-full bg-transparent text-xs font-medium border-0 border-b focus:outline-none py-0.5 resize-none text-teal-900 placeholder-teal-300 ${
+                                !pdfExtractData.header?.ship_to_address ? 'border-orange-400 focus:border-orange-500' : 'border-teal-200 focus:border-teal-500'
+                              }`}
+                            />
+                          </div>
+                          <div className="bg-teal-50 border border-teal-100 rounded-lg px-3 py-2">
+                            <span className={`text-xs ${!pdfExtractData.header?.ship_to_gstin ? 'text-orange-500 font-medium' : 'text-teal-500'}`}>
+                              Ship To GSTIN{!pdfExtractData.header?.ship_to_gstin ? ' — needs input' : ''}
+                            </span>
+                            <input
+                              type="text"
+                              value={pdfExtractData.header?.ship_to_gstin || ''}
+                              onChange={e => updatePdfHeader('ship_to_gstin', e.target.value)}
+                              placeholder="e.g. 27AABCU9603R1ZX"
+                              className={`w-full bg-transparent text-sm font-medium border-0 border-b focus:outline-none py-0.5 text-teal-900 placeholder-teal-300 ${
+                                !pdfExtractData.header?.ship_to_gstin ? 'border-orange-400 focus:border-orange-500' : 'border-teal-200 focus:border-teal-500'
+                              }`}
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Line Items */}
+                      <div>
+                        <h4 className="font-medium text-sm mb-3 text-gray-700">Line Items ({pdfExtractData.items.length})</h4>
+                        <div className="overflow-x-auto bg-white rounded-lg border border-green-100 max-h-80 overflow-y-auto">
                           <table className="w-full text-xs">
-                            <thead className="bg-gray-50 border-b sticky top-0">
+                            <thead className="bg-green-50 border-b border-green-100 sticky top-0">
                               <tr>
                                 {['S.No', 'Item Code', 'Item Name', 'MRP', 'Qty', 'Unit Cost', 'Taxable Value', 'Total'].map(h => (
-                                  <th key={h} className="px-3 py-2 text-left font-medium text-gray-700 whitespace-nowrap">{h}</th>
+                                  <th key={h} className="px-3 py-2 text-left font-medium text-green-800 whitespace-nowrap">{h}</th>
                                 ))}
                               </tr>
                             </thead>
                             <tbody>
                               {pdfExtractData.items.map((item, idx) => (
-                                <tr key={idx} className="border-b hover:bg-gray-50">
-                                  <td className="px-3 py-2">{item.sno ?? '-'}</td>
-                                  <td className="px-3 py-2 font-mono">{item.item_code ?? '-'}</td>
-                                  <td className="px-3 py-2 max-w-[200px] truncate" title={item.item_name}>{item.item_name ?? '-'}</td>
-                                  <td className="px-3 py-2">{item.mrp ?? '-'}</td>
-                                  <td className="px-3 py-2 font-semibold">{item.qty ?? '-'}</td>
-                                  <td className="px-3 py-2">{item.unit_base_cost ?? '-'}</td>
-                                  <td className="px-3 py-2">{item.taxable_value?.toLocaleString('en-IN') ?? '-'}</td>
-                                  <td className="px-3 py-2 font-semibold">{item.total_amount?.toLocaleString('en-IN') ?? '-'}</td>
+                                <tr key={idx} className={`border-b ${idx % 2 === 0 ? 'bg-white' : 'bg-green-50/30'} hover:bg-green-50`}>
+                                  <td className="px-3 py-2 text-gray-500">{item.sno ?? '-'}</td>
+                                  <td className="px-3 py-2 font-mono text-blue-700">{item.item_code ?? '-'}</td>
+                                  <td className="px-3 py-2 max-w-[200px] truncate" title={toTitleCase(item.item_name)}>{toTitleCase(item.item_name) ?? '-'}</td>
+                                  <td className="px-3 py-2">{item.mrp != null ? fmtCurrency(item.mrp, 2) : '-'}</td>
+                                  <td className="px-3 py-2 font-semibold text-green-700">{item.qty != null ? fmtN(item.qty) : '-'}</td>
+                                  <td className="px-3 py-2">{item.unit_base_cost != null ? fmtCurrency(item.unit_base_cost, 2) : '-'}</td>
+                                  <td className="px-3 py-2">{item.taxable_value != null ? fmtCurrency(item.taxable_value, 2) : '-'}</td>
+                                  <td className="px-3 py-2 font-semibold text-green-800">{item.total_amount != null ? fmtCurrency(item.total_amount, 2) : '-'}</td>
                                 </tr>
                               ))}
                             </tbody>
                           </table>
                         </div>
                       </div>
-                      <div className="flex items-center justify-between pt-2 border-t">
-                        <p className="text-sm text-muted-foreground">{pdfExtractData.item_count} item(s) will be saved</p>
+
+                      <div className="flex items-center justify-between pt-2 border-t border-green-100">
+                        <p className="text-sm text-muted-foreground">
+                          {pdfExtractData.duplicate_warning ? 'This PO already exists — saving blocked.' : `${pdfExtractData.item_count} item(s) will be saved`}
+                        </p>
                         <div className="flex gap-2">
-                          <Button variant="outline" onClick={handleCancelPdfPreview} disabled={isConfirming}>Cancel</Button>
-                          <Button onClick={handleConfirmPdfUpload} disabled={isConfirming}>
-                            {isConfirming ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving...</> : <><CheckCircle2 className="h-4 w-4 mr-2" />Confirm &amp; Save to Database</>}
-                          </Button>
+                          <Button variant="outline" onClick={handleCancelPdfPreview} disabled={isConfirming || isUpdatingHeader}>Cancel</Button>
+                          {pdfExtractData.duplicate_warning && pdfExtractData.existing_po_id ? (
+                            <Button
+                              className="bg-blue-600 hover:bg-blue-700"
+                              onClick={handleUpdatePOHeader}
+                              disabled={isUpdatingHeader}
+                            >
+                              {isUpdatingHeader
+                                ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Updating...</>
+                                : <><CheckCircle2 className="h-4 w-4 mr-2" />Update PO Header</>}
+                            </Button>
+                          ) : (
+                            <Button className="bg-green-600 hover:bg-green-700" onClick={handleConfirmPdfUpload} disabled={isConfirming}>
+                              {isConfirming ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Saving...</> : <><CheckCircle2 className="h-4 w-4 mr-2" />Confirm &amp; Save to Database</>}
+                            </Button>
+                          )}
                         </div>
                       </div>
                     </CardContent>
@@ -869,6 +1092,43 @@ export default function BlinkitUploadPage() {
                     <p className="text-xs text-amber-700">Go to <span className="font-medium">Stock Upload</span> page to update packed quantities.</p>
                   </div>
                 )}
+
+                {/* Inventory Deduction Warnings */}
+                {inventoryWarnings.length > 0 && activeTab === 'po' && (
+                  <div className="rounded-lg border border-red-200 bg-red-50 p-4 space-y-3">
+                    <div className="flex items-center gap-2 text-red-800">
+                      <AlertTriangle className="h-4 w-4 shrink-0" />
+                      <p className="font-medium text-sm">
+                        Insufficient packed inventory for {inventoryWarnings.length} item{inventoryWarnings.length > 1 ? 's' : ''} — deducted what was available
+                      </p>
+                    </div>
+                    <div className="overflow-x-auto rounded border border-red-200">
+                      <table className="w-full text-xs">
+                        <thead className="bg-red-100">
+                          <tr>
+                            <th className="text-left p-2 font-medium">Item Code</th>
+                            <th className="text-left p-2 font-medium">Item Name</th>
+                            <th className="text-right p-2 font-medium">Ordered</th>
+                            <th className="text-right p-2 font-medium">Was Packed</th>
+                            <th className="text-right p-2 font-medium text-red-700">Shortfall</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {inventoryWarnings.map((w, i) => (
+                            <tr key={i} className="border-t border-red-200 bg-white">
+                              <td className="p-2 font-mono">{w.item_code}</td>
+                              <td className="p-2 max-w-[200px] truncate" title={w.item_name}>{w.item_name}</td>
+                              <td className="p-2 text-right">{w.ordered_qty}</td>
+                              <td className="p-2 text-right text-emerald-700">{w.packed_qty}</td>
+                              <td className="p-2 text-right font-semibold text-red-700">{w.shortfall}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="text-xs text-red-700">Packed inventory was automatically deducted. Please replenish stock for the shortfall quantities.</p>
+                  </div>
+                )}
               </TabsContent>
 
 
@@ -899,7 +1159,7 @@ export default function BlinkitUploadPage() {
               </TabsContent>
             </Tabs>
           </CardContent>
-        </Card>
+        </Card>}
       </div>
     </ProtectedRoute>
   );

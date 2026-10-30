@@ -3,10 +3,10 @@ Inventory Router - Inventory Management
 Handles inventory queries, updates, and low stock alerts
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, or_
 from typing import Optional, List
-from datetime import datetime, date as date_type
+from datetime import datetime
 
 from app.database import get_db
 from app.models.user import User
@@ -14,11 +14,17 @@ from app.models.inventory import Inventory
 from app.models.product import Product
 from app.models.amazon_inventory import AmazonInventoryData
 from app.models.blinkit_inventory import BlinkitInventoryData
-from app.schemas.inventory import InventoryResponse, InventoryUpdate
+from app.schemas.inventory import InventoryUpdate
 from app.schemas.common import PaginatedResponse
 from app.utils.dependencies import get_current_user
+from app.utils.stock import (
+    LOW_STOCK_THRESHOLD, latest_snapshot_dates, latest_stock_subquery, needs_verification,
+)
+from sqlalchemy import and_
+from app.utils.timeutil import now_ist
 
 router = APIRouter()
+
 
 
 @router.get("", response_model=PaginatedResponse, include_in_schema=False)
@@ -37,8 +43,12 @@ async def get_inventory(
     Get inventory list with search, filtering, and pagination.
     Defaults to latest inventory date (date-wise snapshots).
     """
-    # Base query with product join
-    query = db.query(Inventory).join(Product, Inventory.ProductId == Product.Id)
+    # Base query with product join — eager-load relationships to avoid N+1
+    query = (
+        db.query(Inventory)
+        .join(Product, Inventory.ProductId == Product.Id)
+        .options(joinedload(Inventory.product), joinedload(Inventory.asg_warehouse))
+    )
 
     # Date filtering — default to latest date
     if inventory_date:
@@ -48,9 +58,13 @@ async def get_inventory(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid inventory_date format. Use YYYY-MM-DD.")
     else:
-        latest_date = db.query(func.max(Inventory.InventoryDate)).scalar()
-        if latest_date:
-            query = query.filter(Inventory.InventoryDate == latest_date)
+        # No date chosen: show each product's last available stock with its own date, so a
+        # product missing from the newest sheet is not shown as zero.
+        latest = latest_snapshot_dates(db)
+        query = (
+            query.join(latest, and_(Inventory.ProductId == latest.c.pid, Inventory.InventoryDate == latest.c.d))
+            .filter(Product.IsActive == True)
+        )
 
     # Apply search filter
     if search:
@@ -63,21 +77,27 @@ async def get_inventory(
             )
         )
 
-    # Apply low stock filter
+    # Apply low stock filter (items at or below threshold, including out-of-stock)
     if low_stock_only:
-        query = query.filter(Inventory.CurrentStock == 0)
+        query = query.filter((Inventory.PackedQty + Inventory.UnpackedQty) <= LOW_STOCK_THRESHOLD)
 
-    # Get total count
-    total = query.count()
-
-    # Apply pagination
+    # Count + fetch in a single round-trip using window function
     offset = (page - 1) * page_size
-    inventory_items = query.order_by(Inventory.LastUpdated.desc()).offset(offset).limit(page_size).all()
+    rows_with_count = (
+        query
+        .add_columns(func.count().over().label('_total'))
+        .order_by(Inventory.LastUpdated.desc(), Inventory.Id)
+        .offset(offset).limit(page_size).all()
+    )
+    # COUNT(*) OVER() only rides along on returned rows, so paging past the end reported
+    # a total of 0 and broke the pagination controls. Fall back to an explicit count.
+    total = rows_with_count[0][-1] if rows_with_count else query.count()
+    inventory_items = [r[0] for r in rows_with_count]
 
     # Available dates for the date picker
     available_dates = db.query(Inventory.InventoryDate).distinct().order_by(
         Inventory.InventoryDate.desc()
-    ).limit(60).all()
+    ).all()
 
     # Format response with product details
     items = []
@@ -97,7 +117,9 @@ async def get_inventory(
             "unpacked_qty": item.UnpackedQty,
             "inventory_date": item.InventoryDate.isoformat() if item.InventoryDate else None,
             "last_updated": item.LastUpdated.isoformat() if item.LastUpdated else None,
-            "is_low_stock": item.CurrentStock == 0,
+            "total_stock": (item.PackedQty or 0) + (item.UnpackedQty or 0),
+            "is_low_stock": ((item.PackedQty or 0) + (item.UnpackedQty or 0)) <= LOW_STOCK_THRESHOLD,
+            "needs_verification": needs_verification(item.InventoryDate),
         })
 
     return {
@@ -112,64 +134,56 @@ async def get_inventory(
 
 @router.get("/low-stock", response_model=dict)
 async def get_low_stock_dashboard(
-    limit: int = Query(5, ge=1, le=50, description="Number of items to return"),
-    channel: Optional[str] = Query(None, description="Filter by channel"),
+    limit: int = Query(10, ge=1, le=50, description="Number of items to return"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
-    Get low stock items for dashboard display
-    Returns items that have pending 'To Pack' quantities in Purchase Orders
-    (Ordered quantity > Packed quantity), indicating need for more inventory
+    High-level low stock alerts for the dashboard.
+
+    Low stock = total ASG stock (Packed + Unpacked) at or below LOW_STOCK_THRESHOLD, using each
+    product's last available stock. Severity: 'critical' = total 0 or no stock record,
+    'low' = total 1..LOW_STOCK_THRESHOLD. Each item carries the date of the figure and a
+    needsVerification flag when it is more than 15 days old.
     """
-    from sqlalchemy import func, case
-    from app.models.purchase_order import PurchaseOrder
-
-    # Query to find products with pending "To Pack" quantities
-    # Group PO quantities by product (across all channels)
-    subquery = db.query(
-        PurchaseOrder.ProductId,
-        func.sum(
-            case(
-                (PurchaseOrder.Quantity > PurchaseOrder.ReceivedQuantity,
-                 PurchaseOrder.Quantity - PurchaseOrder.ReceivedQuantity),
-                else_=0
-            )
-        ).label('to_pack_qty')
-    ).filter(
-        PurchaseOrder.Status.in_(['Created', 'Packed', 'Dispatched', 'In Transit', 'Delayed'])
-    ).group_by(PurchaseOrder.ProductId).subquery()
-
-    # Join with Inventory (ASG stock) and Product
-    query = db.query(
-        Inventory,
-        Product,
-        subquery.c.to_pack_qty
-    ).join(
-        Product, Inventory.ProductId == Product.Id
-    ).join(
-        subquery,
-        Inventory.ProductId == subquery.c.ProductId
-    ).filter(
-        subquery.c.to_pack_qty > 0
+    inv_sq = latest_stock_subquery(db)
+    rows = (
+        db.query(Product, inv_sq.c.stock_date, inv_sq.c.packed_qty, inv_sq.c.unpacked_qty)
+        .outerjoin(inv_sq, Product.Id == inv_sq.c.product_id)
+        .filter(Product.IsActive == True)
+        # Exclude auto-created unlinked products (no proper ASG SKU)
+        .filter(~Product.AsgSku.like('UNLINKED-%'))
+        .all()
     )
 
-    # Order by highest to_pack_qty first (most urgent)
-    query = query.order_by(subquery.c.to_pack_qty.desc()).limit(limit)
-
-    results = query.all()
-
-    items = []
-    for inv, prod, to_pack_qty in results:
-        items.append({
-            "id": inv.Id,
+    alerts = []
+    for prod, stock_date, packed, unpacked in rows:
+        has_record = stock_date is not None
+        packed = int(packed or 0)
+        unpacked = int(unpacked or 0)
+        total = packed + unpacked
+        if has_record and total > LOW_STOCK_THRESHOLD:
+            continue
+        alerts.append({
+            "id": prod.Id,
             "productName": prod.ProductName,
             "asgSku": prod.AsgSku,
-            "currentStock": inv.CurrentStock,
-            "toPackQty": int(to_pack_qty or 0),
+            "packedQty": packed,
+            "unpackedQty": unpacked,
+            "totalQty": total,
+            "severity": "critical" if total == 0 else "low",
+            "inventoryDate": stock_date.isoformat() if stock_date else None,
+            "needsVerification": needs_verification(stock_date),
         })
 
-    return {"items": items, "total": len(items)}
+    alerts.sort(key=lambda x: (0 if x["severity"] == "critical" else 1, x["totalQty"]))
+
+    return {
+        "items": alerts[:limit],
+        "total": len(alerts),
+        "critical_count": sum(1 for a in alerts if a["severity"] == "critical"),
+        "low_count": sum(1 for a in alerts if a["severity"] == "low"),
+    }
 
 
 @router.get("/alerts/low-stock", response_model=List[dict])
@@ -250,9 +264,15 @@ async def get_dispatch_overview(
     - Amazon stock            : AmazonInventory.SellableOnHandUnits (latest ReportDate)
     - Blinkit stock           : BlinkitInventory.BackendInvQty       (latest ReportDate)
     """
-    # ── Latest report dates for each platform ────────────────────────────
-    latest_amazon = db.query(func.max(AmazonInventoryData.ReportDate)).scalar()
-    latest_blinkit = db.query(func.max(BlinkitInventoryData.ReportDate)).scalar()
+    # ── Latest report dates for each platform — single round-trip ────────
+    from sqlalchemy import text as _text
+    _dates = db.execute(_text("""
+        SELECT
+            (SELECT MAX(ReportDate)  FROM AmazonInventory)  AS amz_date,
+            (SELECT MAX(ReportDate)  FROM BlinkitInventory) AS blk_date
+    """)).fetchone()
+    latest_amazon  = _dates.amz_date  if _dates else None
+    latest_blinkit = _dates.blk_date if _dates else None
 
     # ── Amazon stock subquery ─────────────────────────────────────────────
     amz_q = db.query(
@@ -265,10 +285,11 @@ async def get_dispatch_overview(
         amz_q = amz_q.filter(False)
     amazon_sq = amz_q.group_by(AmazonInventoryData.ASIN).subquery()
 
-    # ── Blinkit stock subquery ────────────────────────────────────────────
+    # ── Blinkit stock subquery (BE = hub, FE = dark store) ───────────────
     blk_q = db.query(
         BlinkitInventoryData.ItemId.label('item_id'),
-        func.sum(BlinkitInventoryData.BackendInvQty).label('blinkit_stock'),
+        func.sum(BlinkitInventoryData.BackendInvQty).label('blinkit_be_stock'),
+        func.sum(BlinkitInventoryData.FrontendInvQty).label('blinkit_fe_stock'),
     )
     if latest_blinkit:
         blk_q = blk_q.filter(BlinkitInventoryData.ReportDate == latest_blinkit)
@@ -277,11 +298,12 @@ async def get_dispatch_overview(
     blinkit_sq = blk_q.group_by(BlinkitInventoryData.ItemId).subquery()
 
     # ── ASG warehouse packed/unpacked subquery (latest or selected date) ──
-    # Available dates for picker
-    available_inv_dates = db.query(Inventory.InventoryDate).distinct().order_by(
+    # Fetch available dates and latest date in one round-trip
+    inv_date_rows = db.query(Inventory.InventoryDate).distinct().order_by(
         Inventory.InventoryDate.desc()
-    ).limit(60).all()
-    available_inv_dates = [d[0].isoformat() for d in available_inv_dates if d[0]]
+    ).all()
+    available_inv_dates = [d[0].isoformat() for d in inv_date_rows if d[0]]
+    latest_inv_date = inv_date_rows[0][0] if inv_date_rows else None
 
     if inventory_date:
         try:
@@ -289,16 +311,20 @@ async def get_dispatch_overview(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid inventory_date format. Use YYYY-MM-DD.")
     else:
-        selected_inv_date = db.query(func.max(Inventory.InventoryDate)).scalar()
+        selected_inv_date = latest_inv_date
 
-    wh_q = db.query(
-        Inventory.ProductId.label('product_id'),
-        func.sum(Inventory.PackedQty).label('packed_qty'),
-        func.sum(Inventory.UnpackedQty).label('unpacked_qty'),
-    )
-    if selected_inv_date:
-        wh_q = wh_q.filter(Inventory.InventoryDate == selected_inv_date)
-    wh_sq = wh_q.group_by(Inventory.ProductId).subquery()
+    if inventory_date:
+        # A date was chosen: show that day's sheet exactly.
+        wh_q = db.query(
+            Inventory.ProductId.label('product_id'),
+            func.max(Inventory.InventoryDate).label('stock_date'),
+            func.sum(Inventory.PackedQty).label('packed_qty'),
+            func.sum(Inventory.UnpackedQty).label('unpacked_qty'),
+        ).filter(Inventory.InventoryDate == selected_inv_date)
+        wh_sq = wh_q.group_by(Inventory.ProductId).subquery()
+    else:
+        # No date chosen: each product's last available stock with its own date.
+        wh_sq = latest_stock_subquery(db)
 
     # ── Main query ────────────────────────────────────────────────────────
     query = (
@@ -309,10 +335,12 @@ async def get_dispatch_overview(
             Product.AmazonId.label('amazon_id'),
             Product.BlinkitId.label('blinkit_id'),
             Product.Gs1.label('gs1'),
+            wh_sq.c.stock_date.label('stock_date'),
             func.coalesce(wh_sq.c.packed_qty, 0).label('packed_qty'),
             func.coalesce(wh_sq.c.unpacked_qty, 0).label('unpacked_qty'),
             func.coalesce(amazon_sq.c.amazon_stock, 0).label('amazon_stock'),
-            func.coalesce(blinkit_sq.c.blinkit_stock, 0).label('blinkit_stock'),
+            func.coalesce(blinkit_sq.c.blinkit_be_stock, 0).label('blinkit_be_stock'),
+            func.coalesce(blinkit_sq.c.blinkit_fe_stock, 0).label('blinkit_fe_stock'),
         )
         .filter(Product.IsActive == True)
         .outerjoin(wh_sq, wh_sq.c.product_id == Product.Id)
@@ -340,11 +368,14 @@ async def get_dispatch_overview(
         packed = int(row.packed_qty or 0)
         unpacked = int(row.unpacked_qty or 0)
         amazon = int(row.amazon_stock or 0)
-        blinkit = int(row.blinkit_stock or 0)
+        blinkit_be = int(row.blinkit_be_stock or 0)
+        blinkit_fe = int(row.blinkit_fe_stock or 0)
+        blinkit = blinkit_be + blinkit_fe
         total_stock = amazon + blinkit
 
-        # Simplified status (ReorderLevel removed)
-        if total_stock == 0:
+        # Status based on ASG warehouse stock (packed + unpacked)
+        asg_stock = packed + unpacked
+        if asg_stock == 0:
             status = 'Out of Stock'
         else:
             status = 'Healthy'
@@ -359,9 +390,13 @@ async def get_dispatch_overview(
             'packedQty': packed,
             'unpackedQty': unpacked,
             'amazonStock': amazon,
+            'blinkitBeStock': blinkit_be,
+            'blinkitFeStock': blinkit_fe,
             'blinkitStock': blinkit,
             'totalStock': total_stock,
             'status': status,
+            'stockDate': row.stock_date.isoformat() if row.stock_date else None,
+            'needsVerification': needs_verification(row.stock_date),
         })
 
     return {
@@ -411,7 +446,8 @@ async def get_inventory_by_id(
         "unpacked_qty": inventory.UnpackedQty,
         "last_inventory_date": inventory.LastInventoryDate.isoformat() if inventory.LastInventoryDate else None,
         "last_updated": inventory.LastUpdated.isoformat() if inventory.LastUpdated else None,
-        "is_low_stock": inventory.CurrentStock == 0,  # Simplified: out of stock only
+        "needs_verification": needs_verification(inventory.InventoryDate),
+        "is_low_stock": ((inventory.PackedQty or 0) + (inventory.UnpackedQty or 0)) <= LOW_STOCK_THRESHOLD,
     }
 
 
@@ -448,7 +484,7 @@ async def update_inventory(
 
     # Note: minStockLevel and maxStockLevel removed (ReorderLevel/MaxStockLevel columns deleted)
 
-    inventory.LastUpdated = datetime.utcnow()
+    inventory.LastUpdated = now_ist()
 
     try:
         db.commit()

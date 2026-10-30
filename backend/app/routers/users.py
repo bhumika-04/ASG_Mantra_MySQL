@@ -4,13 +4,12 @@ Handles user CRUD operations (Admin only)
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import List
-from datetime import datetime
 
 from app.database import get_db
 from app.models.user import User
-from app.schemas.user import UserCreate, UserUpdate, UserResponse
+from app.schemas.user import UserCreate, UserUpdate
 from app.utils.security import hash_password
+from app.utils.timeutil import now_ist
 from app.utils.dependencies import get_current_user
 
 router = APIRouter()
@@ -104,7 +103,7 @@ async def create_user(
         PasswordHash=hashed_password,
         Role=user_data.role,
         IsActive=True,
-        CreatedAt=datetime.utcnow(),
+        CreatedAt=now_ist(),
     )
 
     try:

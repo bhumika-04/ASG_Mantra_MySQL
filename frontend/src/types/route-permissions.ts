@@ -23,9 +23,7 @@ export const ROUTE_PERMISSIONS: Record<string, UserRole[]> = {
   '/sales-overview': ['Admin', 'Manager', 'Blinkit Distributor', 'Amazon Distributor'],
   '/amazon-sales': ['Admin', 'Manager', 'Amazon Distributor'],
   '/blinkit-sales': ['Admin', 'Manager', 'Blinkit Distributor'],
-  '/analytics': ['Admin', 'Manager'],
-
-  // Blinkit Facility Inventory
+  '/amazon-inventory': ['Admin', 'Manager', 'Amazon Distributor'],
   '/blinkit-inventory': ['Admin', 'Manager', 'Blinkit Distributor'],
 
   // Distributor pages
@@ -55,9 +53,6 @@ export const ROUTE_PERMISSIONS: Record<string, UserRole[]> = {
   '/profile': ['Admin', 'Manager', 'Blinkit Distributor', 'Amazon Distributor'],
   '/notifications': ['Admin', 'Manager', 'Blinkit Distributor', 'Amazon Distributor'],
 
-  // Other Pages
-  '/orders': ['Admin', 'Manager', 'Blinkit Distributor', 'Amazon Distributor'],
-  '/products': ['Admin', 'Manager'],
 };
 
 /**
@@ -77,20 +72,4 @@ export function hasRouteAccess(route: string, userRole: UserRole): boolean {
   }
 
   return allowedRoles.includes(userRole);
-}
-
-/**
- * Get all routes accessible by a specific role
- */
-export function getAccessibleRoutes(userRole: UserRole): string[] {
-  return Object.entries(ROUTE_PERMISSIONS)
-    .filter(([_, roles]) => roles.includes(userRole))
-    .map(([route]) => route);
-}
-
-/**
- * Get allowed roles for a specific route
- */
-export function getAllowedRoles(route: string): UserRole[] {
-  return ROUTE_PERMISSIONS[route] || [];
 }

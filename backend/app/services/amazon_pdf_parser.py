@@ -16,7 +16,7 @@ import pdfplumber
 import re
 import io
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional
 from dataclasses import dataclass, field, asdict
 
 
@@ -46,9 +46,11 @@ class AmazonPOHeaderExtracted:
     po_number: Optional[str] = None
     po_status: Optional[str] = None
     vendor_code: Optional[str] = None
+    vendor_address: Optional[str] = None
     ship_to_location_code: Optional[str] = None
     ship_to_city: Optional[str] = None
     ship_to_state: Optional[str] = None
+    ship_to_address: Optional[str] = None
     ordered_on_date: Optional[str] = None
     ship_window_start_date: Optional[str] = None
     ship_window_end_date: Optional[str] = None
@@ -128,13 +130,34 @@ def _parse_date(text: str) -> Optional[str]:
     if not text or not text.strip():
         return None
     text = text.strip()
-    for fmt in ('%m/%d/%Y', '%d/%m/%Y', '%m/%d/%y', '%d/%m/%y',
-                '%Y-%m-%d', '%d-%m-%Y'):
+    for fmt in ('%d/%m/%Y', '%d/%m/%y', '%d-%m-%Y', '%d-%m-%y',
+                '%Y-%m-%d', '%m/%d/%Y', '%m/%d/%y'):
         try:
             return datetime.strptime(text.split()[0], fmt).date().isoformat()
         except ValueError:
             continue
     return None
+
+
+def _parse_date_mdy(text: str) -> Optional[str]:
+    """Parse a month-first date (9/11/2026 is 11 Sep), return ISO string.
+
+    Amazon's PDF is not consistent about date order: the ship window is day-first
+    (see _extract_header) but "Ordered on" and the line "Expected date" are
+    month-first. Reading those two day-first swapped day and month for every date
+    with a day of 12 or less, which put the PO in the wrong month (often a future
+    one). A value whose first part is over 12 cannot be a month, so it fails the
+    month-first formats and falls through to day-first.
+    """
+    if not text or not text.strip():
+        return None
+    first = text.strip().split()[0]
+    for fmt in ('%m/%d/%Y', '%m/%d/%y', '%m-%d-%Y', '%m-%d-%y'):
+        try:
+            return datetime.strptime(first, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return _parse_date(text)
 
 
 def _cell(cell) -> str:
@@ -187,7 +210,7 @@ def _extract_header(tables: list, full_text: str) -> AmazonPOHeaderExtracted:
                 field_name = _HEADER_MAP.get(label)
                 if field_name:
                     if field_name == 'ordered_on_date':
-                        setattr(header, field_name, _parse_date(value))
+                        setattr(header, field_name, _parse_date_mdy(value))
                     else:
                         setattr(header, field_name, value)
 
@@ -207,6 +230,23 @@ def _extract_header(tables: list, full_text: str) -> AmazonPOHeaderExtracted:
                     if len(dates) >= 2:
                         header.ship_window_start_date = _parse_date(dates[0].strip())
                         header.ship_window_end_date = _parse_date(dates[1].strip())
+
+    # Build ship_to_address from the parsed city/state
+    if not header.ship_to_address and (header.ship_to_city or header.ship_to_state):
+        parts = [p for p in [header.ship_to_location_code, header.ship_to_city, header.ship_to_state] if p]
+        header.ship_to_address = '\n'.join(parts)
+
+    # Vendor address — lines immediately following the vendor code row in the text
+    if not header.vendor_address and header.vendor_code:
+        m = re.search(
+            r'Vendor[:\s]+' + re.escape(header.vendor_code) + r'[^\n]*\n'
+            r'((?:(?!\b(?:Status|Ordered|Ship|Freight|Payment|Purchasing)\b)[^\n]{3,}\n){1,6})',
+            full_text, re.I
+        )
+        if m:
+            lines = [ln.strip() for ln in m.group(1).split('\n') if ln.strip()]
+            if lines:
+                header.vendor_address = '\n'.join(lines)
 
     # Regex fallback for payment terms if still not found
     # Matches: "Payment terms NET DUE IN 45 DAYS" or "Payment Terms: NET DUE IN 45 DAYS"
@@ -321,7 +361,7 @@ def _parse_item_row(row: list, col_map: dict) -> Optional[AmazonPOItemExtracted]
     item.hsn = _get('hsn') or None
     item.title = _get('title') or None
     item.window_type = _get('window_type') or None
-    item.expected_date = _parse_date(_get('expected_date'))
+    item.expected_date = _parse_date_mdy(_get('expected_date'))
     item.quantity_requested = _clean_int(_get('quantity_requested'))
     item.accepted_quantity = _clean_int(_get('accepted_quantity'))
     item.quantity_received = _clean_int(_get('quantity_received'))
@@ -414,21 +454,29 @@ def extract_amazon_po_from_pdf(pdf_bytes: bytes) -> AmazonPOExtractResult:
     header = _extract_header(all_tables, full_text)
     result.header = header
 
-    # Extract items
+    # Extract items — carry col_map forward so page-2 continuation tables are covered
+    last_col_map = None
     for table in all_tables:
         if _is_items_table(table):
-            # Find header row and build column map
             col_map = None
             for row in table:
                 if _is_header_row(row):
                     col_map = _build_col_map(row)
+                    last_col_map = col_map
                     continue
                 if col_map:
                     item = _parse_item_row(row, col_map)
                     if item:
                         result.items.append(item)
+        elif last_col_map:
+            # Continuation of the items table on a subsequent page (no header row)
+            for row in table:
+                if row and not _is_header_row(row):
+                    item = _parse_item_row(row, last_col_map)
+                    if item:
+                        result.items.append(item)
 
-    # Fallback: if no items found via table detection, try all tables
+    # Fallback: if still no items found, scan all tables for any row with an ASIN header
     if not result.items:
         result.warnings.append("Could not identify PO items table by headers; trying all tables.")
         for table in all_tables:

@@ -1,8 +1,10 @@
 """
 Uploads Router - File Upload Processing
-Handles Excel/CSV file uploads for sales, purchase orders, and stock data
+Handles ASG inventory uploads (Packed/Unpacked quantities).
+Amazon and Blinkit data uploads are handled by amazon_data.py and blinkit_data.py.
 """
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from typing import Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
 from datetime import datetime
@@ -12,14 +14,12 @@ import re
 
 from app.database import get_db
 from app.models.user import User
-from app.models.sales import Sales
-from app.models.purchase_order import PurchaseOrder
-from app.models.inventory import Inventory
 from app.models.product import Product
 from app.models.warehouse import Warehouse
 from app.models.asg_warehouse import AsgWarehouse
 from app.utils.dependencies import get_current_user
-from app.utils.audit import log_audit, log_upload
+from app.utils.audit import log_audit, log_upload, notify
+from app.utils.timeutil import today_ist
 
 router = APIRouter()
 
@@ -43,6 +43,33 @@ def _normalize(val: str) -> str:
     s = re.sub(r'\s*&\s*', ' and ', s)      # '&' → 'and'
     s = re.sub(r'\s+', ' ', s).strip()      # collapse multiple spaces
     return s
+
+
+def check_column_warnings(
+    file_columns: list,
+    col_map: dict,
+    required_targets: list,
+    optional_targets: list = [],
+) -> list:
+    """Return warning strings for extra or missing columns in an uploaded file.
+
+    file_columns:     original column names from the file
+    col_map:          {original_col: mapped_target} built during column detection
+    required_targets: target field names that must be mapped (triggers a warning if absent)
+    optional_targets: target fields that are expected but not strictly required
+    """
+    warnings = []
+    unmapped = [str(c) for c in file_columns if c not in col_map]
+    if unmapped:
+        warnings.append(f"Unknown columns (not used): {', '.join(unmapped)}")
+    mapped_targets = set(col_map.values())
+    missing_required = [t for t in required_targets if t not in mapped_targets]
+    if missing_required:
+        warnings.append(f"Required columns not found: {', '.join(missing_required)}")
+    missing_optional = [t for t in optional_targets if t not in mapped_targets]
+    if missing_optional:
+        warnings.append(f"Optional columns not found (data will be empty): {', '.join(missing_optional)}")
+    return warnings
 
 
 def clean_numeric(val) -> float:
@@ -99,6 +126,20 @@ def find_or_create_product(db, asin: str = None, model_number: str = None,
                     product = p
                     break
 
+    def _is_placeholder_name(name):
+        if not name:
+            return True
+        if re.match(r'^B0[A-Z0-9]{6,}$', name.strip()):
+            return True
+        if name.startswith('Product '):
+            return True
+        return False
+
+    def _is_placeholder_sku(sku):
+        if not sku:
+            return True
+        return sku.startswith('UNLINKED-AMZN-') or sku.startswith('AMZ-') or sku.startswith('BLK-')
+
     if not product:
         # Auto-create
         sku = model_number if (model_number and model_number != 'nan') else (
@@ -116,13 +157,27 @@ def find_or_create_product(db, asin: str = None, model_number: str = None,
         db.add(product)
         db.flush()
     else:
-        # Update missing fields
+        # Update missing or placeholder fields with better data when available
         if asin and asin != 'nan' and not product.AmazonId:
+            # Clear AmazonId from any placeholder that had it to avoid duplicates
+            db.query(Product).filter(
+                Product.AmazonId == asin, Product.Id != product.Id
+            ).update({"AmazonId": None}, synchronize_session=False)
             product.AmazonId = asin[:50]
         if blinkit_id and blinkit_id != 'nan' and not product.BlinkitId:
+            # Clear BlinkitId from any placeholder that had it to avoid duplicates
+            db.query(Product).filter(
+                Product.BlinkitId == blinkit_id, Product.Id != product.Id
+            ).update({"BlinkitId": None}, synchronize_session=False)
             product.BlinkitId = blinkit_id[:50]
         if brand and brand != 'nan' and not product.Brand:
             product.Brand = brand[:100]
+        # Update ProductName if current name is a placeholder/ASIN and we have a real title
+        if product_title and product_title != 'nan' and _is_placeholder_name(product.ProductName):
+            product.ProductName = product_title[:255]
+        # Update AsgSku if current SKU is a placeholder and we have a real model number
+        if model_number and model_number != 'nan' and _is_placeholder_sku(product.AsgSku):
+            product.AsgSku = model_number[:50]
 
     return product
 
@@ -237,673 +292,10 @@ def find_or_create_asg_warehouse(db, name: str, city: str = None, state: str = N
     db.flush()
     return wh.Id, True
 
-
-@router.post("/amazon/sales")
-async def upload_amazon_sales(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Upload Amazon Vendor Central Sales report (CSV/Excel).
-    Handles real Amazon format:
-    - Row 1: Metadata filter row (skipped)
-    - Row 2: Headers (ASIN, Product Title, Model Number, Ordered Units, Ordered Revenue, ...)
-    - Currency values like ₹1,02,243.13 are cleaned automatically
-    - Products auto-created if not found
-    Admin and Manager only.
-    """
-    if current_user.Role not in ["Admin", "Manager"]:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    try:
-        contents = await file.read()
-        # Amazon Vendor Central CSVs have a metadata row first
-        df = read_file(contents, file.filename, skiprows=1)
-
-        # Normalize column names
-        col_map = {}
-        for col in df.columns:
-            cl = str(col).strip().lower()
-            if cl == 'asin':
-                col_map[col] = 'asin'
-            elif 'product title' in cl or cl == 'product name':
-                col_map[col] = 'product_title'
-            elif cl == 'brand':
-                col_map[col] = 'brand'
-            elif 'model number' in cl:
-                col_map[col] = 'model_number'
-            elif cl == 'ordered units':
-                col_map[col] = 'ordered_units'
-            elif cl == 'ordered revenue':
-                col_map[col] = 'ordered_revenue'
-            elif cl == 'shipped units':
-                col_map[col] = 'shipped_units'
-            elif cl == 'shipped revenue':
-                col_map[col] = 'shipped_revenue'
-            elif 'customer returns' in cl:
-                col_map[col] = 'customer_returns'
-        df = df.rename(columns=col_map)
-        df = df.loc[:, ~df.columns.duplicated()]
-
-        today = datetime.utcnow().date()
-        rows_processed = 0
-        rows_skipped = 0
-        products_created = 0
-        errors = []
-
-        for idx, row in df.iterrows():
-            try:
-                asin = str(row.get('asin', '')).strip()
-                model_number = str(row.get('model_number', '')).strip()
-                product_title = str(row.get('product_title', '')).strip()
-                brand = str(row.get('brand', '')).strip()
-
-                if not asin or asin == 'nan':
-                    rows_skipped += 1
-                    continue
-
-                ordered_units = int(clean_numeric(row.get('ordered_units', 0)))
-                if ordered_units == 0:
-                    rows_skipped += 1
-                    continue
-
-                ordered_revenue = clean_numeric(row.get('ordered_revenue', 0))
-                unit_price = round(ordered_revenue / ordered_units, 2) if ordered_units > 0 else 0.0
-                # CHK_Sales_Amounts: TotalAmount must equal Quantity * UnitPrice exactly
-                total_amount = round(unit_price * ordered_units, 2)
-
-                product = find_or_create_product(
-                    db, asin=asin, model_number=model_number,
-                    product_title=product_title, brand=brand
-                )
-                if product.Id is None:
-                    db.flush()
-                    products_created += 1
-
-                db.execute(text("""
-                    INSERT INTO Sales
-                    (OrderId, Channel, ProductId, WarehouseId, Quantity, UnitPrice,
-                     TotalAmount, OrderDate, Status, CreatedAt)
-                    VALUES (NULL, 'Amazon', :pid, NULL, :qty, :unit_price,
-                            :total, :order_date, 'Delivered', GETDATE())
-                """), {
-                    "pid": product.Id,
-                    "qty": ordered_units,
-                    "unit_price": unit_price,
-                    "total": total_amount,
-                    "order_date": today,
-                })
-                rows_processed += 1
-
-            except Exception as e:
-                errors.append(f"Row {idx + 3}: {str(e)}")
-                rows_skipped += 1
-                continue
-
-        log_upload(db, "AmazonSales", "Amazon", file.filename, len(contents), current_user.Id,
-                   total_rows=len(df), success_rows=rows_processed, error_rows=rows_skipped, status="Success")
-        log_audit(db, current_user.Id, "UPLOAD", "Sales", None,
-                  new_values={"type": "AmazonSales", "file": file.filename, "rows": rows_processed})
-        db.commit()
-
-        return {
-            "success": True,
-            "message": "Amazon sales data uploaded successfully",
-            "data": {
-                "rows_processed": rows_processed,
-                "rows_skipped": rows_skipped,
-                "products_created": products_created,
-                "total_rows": len(df),
-                "errors": errors[:10]
-            }
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
-
-
-@router.post("/amazon/purchase-orders")
-async def upload_amazon_purchase_orders(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Upload Amazon purchase orders from Excel/CSV file
-    Admin and Manager only
-    """
-    # Check permissions
-    if current_user.Role not in ["Admin", "Manager"]:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    try:
-        contents = await file.read()
-
-        if file.filename.endswith('.xlsx') or file.filename.endswith('.xls'):
-            df = pd.read_excel(io.BytesIO(contents))
-        elif file.filename.endswith('.csv'):
-            df = pd.read_csv(io.BytesIO(contents))
-        else:
-            raise HTTPException(status_code=400, detail="File must be Excel or CSV")
-
-        rows_processed = 0
-        rows_skipped = 0
-
-        for _, row in df.iterrows():
-            try:
-                # Find product
-                product = db.query(Product).filter(
-                    (Product.AmazonId == str(row.get('AmazonId', ''))) |
-                    (Product.AsgSku == str(row.get('SKU', '')))
-                ).first()
-
-                if not product:
-                    rows_skipped += 1
-                    continue
-
-                # Create PO record
-                po = PurchaseOrder(
-                    PoNumber=str(row.get('PONumber', '')),
-                    ProductId=product.Id,
-                    Channel="Amazon",
-                    OrderDate=pd.to_datetime(row.get('OrderDate', datetime.utcnow())),
-                    ExpectedDeliveryDate=pd.to_datetime(row.get('ExpectedDeliveryDate', None)) if row.get('ExpectedDeliveryDate') else None,
-                    Quantity=int(row.get('Quantity', 0)),
-                    ReceivedQuantity=int(row.get('ReceivedQuantity', 0)),
-                    UnitPrice=float(row.get('UnitPrice', product.UnitPrice)),
-                    TotalAmount=float(row.get('TotalAmount', 0)),
-                    Status=str(row.get('Status', 'Created')),
-                    WarehouseId=row.get('WarehouseId', None),
-                )
-
-                db.add(po)
-                rows_processed += 1
-
-            except Exception as e:
-                rows_skipped += 1
-                continue
-
-        log_upload(db, "AmazonPO", "Amazon", file.filename, len(contents), current_user.Id,
-                   total_rows=len(df), success_rows=rows_processed, error_rows=rows_skipped, status="Success")
-        log_audit(db, current_user.Id, "UPLOAD", "PurchaseOrders", None,
-                  new_values={"type": "AmazonPO", "file": file.filename, "rows": rows_processed})
-        db.commit()
-
-        return {
-            "success": True,
-            "message": "Amazon purchase orders uploaded successfully",
-            "data": {
-                "rows_processed": rows_processed,
-                "rows_skipped": rows_skipped,
-                "total_rows": len(df)
-            }
-        }
-
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
-
-
-@router.post("/amazon/inventory")
-async def upload_amazon_inventory(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Upload Amazon Vendor Central inventory report CSV.
-    Handles the real Amazon format with:
-    - Row 1: Metadata/filter row (skipped)
-    - Row 2: Actual column headers (ASIN, Product Title, Brand, Model Number, etc.)
-    - Data rows with currency symbols and comma-separated numbers
-
-    Key columns mapped:
-    - ASIN -> Product.AmazonId
-    - Product Title -> Product.ProductName
-    - Model Number -> Product.AsgSku
-    - Sellable On Hand Units -> PackedQty (ready-to-sell)
-    - Unsellable On-Hand Units -> UnpackedQty
-    - Open Purchase Order Quantity -> tracked for reference
-    - Brand -> Product.Brand
-
-    Auto-creates products if ASIN/Model Number not found in DB.
-    Admin and Manager only.
-    """
-    if current_user.Role not in ["Admin", "Manager"]:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    try:
-        contents = await file.read()
-        df = read_file(contents, file.filename, skiprows=1)
-
-        # Normalize columns - skip cost/monetary columns to avoid duplicates
-        col_map = {}
-        for col in df.columns:
-            cl = str(col).strip().lower()
-            if 'cost' in cl or 'price' in cl:
-                continue
-            if cl == 'asin':
-                col_map[col] = 'asin'
-            elif 'product title' in cl or cl == 'product name':
-                col_map[col] = 'product_title'
-            elif cl == 'brand':
-                col_map[col] = 'brand'
-            elif 'model number' in cl:
-                col_map[col] = 'model_number'
-            elif ('sellable on' in cl or cl == 'sellable units') and 'unsellable' not in cl:
-                col_map[col] = 'sellable_units'
-            elif 'unsellable on' in cl or 'unsellable units' in cl:
-                col_map[col] = 'unsellable_units'
-        df = df.rename(columns=col_map)
-        df = df.loc[:, ~df.columns.duplicated()]
-
-        rows_created = 0
-        rows_updated = 0
-        rows_skipped = 0
-        products_created = 0
-        errors = []
-        today = datetime.utcnow().date()
-
-        for idx, row in df.iterrows():
-            try:
-                asin = str(row.get('asin', '')).strip()
-                model_number = str(row.get('model_number', '')).strip()
-                product_title = str(row.get('product_title', '')).strip()
-                brand = str(row.get('brand', '')).strip()
-
-                if not asin or asin == 'nan':
-                    rows_skipped += 1
-                    continue
-
-                sellable_units = int(clean_numeric(row.get('sellable_units', 0)))
-                unsellable_units = int(clean_numeric(row.get('unsellable_units', 0)))
-                total_stock = sellable_units + unsellable_units
-
-                product = find_or_create_product(
-                    db, asin=asin, model_number=model_number,
-                    product_title=product_title, brand=brand
-                )
-                if product.Id is None:
-                    db.flush()
-                    products_created += 1
-
-                # Amazon inventory lives in AmazonInventory table (via amazon_data.py).
-                # No longer write to generic Inventory table — that's for ASG stock only.
-                rows_created += 1
-
-            except Exception as e:
-                errors.append(f"Row {idx + 3}: {str(e)}")
-                rows_skipped += 1
-                continue
-
-        log_upload(db, "AmazonInventory", "Amazon", file.filename, len(contents), current_user.Id,
-                   total_rows=len(df), success_rows=rows_created + rows_updated, error_rows=rows_skipped, status="Success")
-        log_audit(db, current_user.Id, "UPLOAD", "Inventory", None,
-                  new_values={"type": "AmazonInventory", "file": file.filename, "created": rows_created, "updated": rows_updated})
-        db.commit()
-
-        return {
-            "success": True,
-            "message": "Amazon inventory data uploaded successfully",
-            "data": {
-                "rows_created": rows_created,
-                "rows_updated": rows_updated,
-                "rows_skipped": rows_skipped,
-                "products_created": products_created,
-                "total_rows": len(df),
-                "errors": errors[:10]
-            }
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
-
-
-@router.post("/blinkit/sales")
-async def upload_blinkit_sales(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Upload Blinkit sales report CSV.
-    Real Blinkit format columns:
-    - item_id, item_name, manufacturer_id, manufacturer_name,
-      city_id, city_name, category, date, qty_sold, mrp
-    - item_id maps to Product.BlinkitId
-    - mrp is the TOTAL for that row (qty_sold * unit_price)
-    - Each row is per city per date - stored with CustomerCity
-    Products auto-created if not found.
-    Admin and Manager only.
-    """
-    if current_user.Role not in ["Admin", "Manager"]:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    try:
-        contents = await file.read()
-        df = read_file(contents, file.filename)
-
-        # Normalize columns
-        col_map = {}
-        for col in df.columns:
-            cl = str(col).strip().lower().replace(' ', '_')
-            if cl in ('item_id', 'itemid'):
-                col_map[col] = 'item_id'
-            elif cl in ('item_name', 'itemname'):
-                col_map[col] = 'item_name'
-            elif cl in ('city_name', 'cityname', 'city'):
-                col_map[col] = 'city_name'
-            elif cl == 'date':
-                col_map[col] = 'date'
-            elif cl in ('qty_sold', 'qtysold', 'quantity'):
-                col_map[col] = 'qty_sold'
-            elif cl == 'mrp':
-                col_map[col] = 'mrp'
-            elif cl in ('category',):
-                col_map[col] = 'category'
-        df = df.rename(columns=col_map)
-
-        rows_processed = 0
-        rows_skipped = 0
-        products_created = 0
-        errors = []
-
-        for idx, row in df.iterrows():
-            try:
-                item_id = str(row.get('item_id', '')).strip()
-                item_name = str(row.get('item_name', '')).strip()
-                city_name = str(row.get('city_name', '')).strip()
-
-                if not item_id or item_id == 'nan':
-                    rows_skipped += 1
-                    continue
-
-                qty_sold = int(clean_numeric(row.get('qty_sold', 0)))
-                if qty_sold == 0:
-                    rows_skipped += 1
-                    continue
-
-                mrp_total = clean_numeric(row.get('mrp', 0))
-                unit_price = round(mrp_total / qty_sold, 2) if qty_sold > 0 else 0.0
-                # CHK_Sales_Amounts: TotalAmount must equal Quantity * UnitPrice exactly
-                total_amount = round(unit_price * qty_sold, 2)
-
-                # Parse date
-                try:
-                    order_date = pd.to_datetime(row.get('date', datetime.utcnow())).date()
-                except Exception:
-                    order_date = datetime.utcnow().date()
-
-                product = find_or_create_product(
-                    db, blinkit_id=item_id,
-                    product_title=item_name if item_name != 'nan' else None
-                )
-                if product.Id is None:
-                    db.flush()
-                    products_created += 1
-
-                db.execute(text("""
-                    INSERT INTO Sales
-                    (OrderId, Channel, ProductId, WarehouseId, Quantity, UnitPrice,
-                     TotalAmount, OrderDate, CustomerCity, Status, CreatedAt)
-                    VALUES (NULL, 'Blinkit', :pid, NULL, :qty, :unit_price,
-                            :total, :order_date, :city, 'Delivered', GETDATE())
-                """), {
-                    "pid": product.Id,
-                    "qty": qty_sold,
-                    "unit_price": unit_price,
-                    "total": total_amount,
-                    "order_date": order_date,
-                    "city": city_name if city_name != 'nan' else None,
-                })
-                rows_processed += 1
-
-            except Exception as e:
-                errors.append(f"Row {idx + 2}: {str(e)}")
-                rows_skipped += 1
-                continue
-
-        log_upload(db, "BlinkitSales", "Blinkit", file.filename, len(contents), current_user.Id,
-                   total_rows=len(df), success_rows=rows_processed, error_rows=rows_skipped, status="Success")
-        log_audit(db, current_user.Id, "UPLOAD", "Sales", None,
-                  new_values={"type": "BlinkitSales", "file": file.filename, "rows": rows_processed})
-        db.commit()
-
-        return {
-            "success": True,
-            "message": "Blinkit sales data uploaded successfully",
-            "data": {
-                "rows_processed": rows_processed,
-                "rows_skipped": rows_skipped,
-                "products_created": products_created,
-                "total_rows": len(df),
-                "errors": errors[:10]
-            }
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
-
-
-@router.post("/blinkit/purchase-orders")
-async def upload_blinkit_purchase_orders(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Upload Blinkit purchase orders from Excel/CSV file
-    Admin and Manager only
-    """
-    if current_user.Role not in ["Admin", "Manager"]:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    try:
-        contents = await file.read()
-
-        if file.filename.endswith('.xlsx') or file.filename.endswith('.xls'):
-            df = pd.read_excel(io.BytesIO(contents))
-        elif file.filename.endswith('.csv'):
-            df = pd.read_csv(io.BytesIO(contents))
-        else:
-            raise HTTPException(status_code=400, detail="File must be Excel or CSV")
-
-        rows_processed = 0
-        rows_skipped = 0
-
-        for _, row in df.iterrows():
-            try:
-                # Find product by Blinkit ID or SKU
-                product = db.query(Product).filter(
-                    (Product.BlinkitId == str(row.get('BlinkitId', ''))) |
-                    (Product.AsgSku == str(row.get('SKU', '')))
-                ).first()
-
-                if not product:
-                    rows_skipped += 1
-                    continue
-
-                # Create PO record
-                po = PurchaseOrder(
-                    PoNumber=str(row.get('PONumber', '')),
-                    ProductId=product.Id,
-                    Channel="Blinkit",
-                    OrderDate=pd.to_datetime(row.get('OrderDate', datetime.utcnow())),
-                    ExpectedDeliveryDate=pd.to_datetime(row.get('ExpectedDeliveryDate', None)) if row.get('ExpectedDeliveryDate') else None,
-                    Quantity=int(row.get('Quantity', 0)),
-                    ReceivedQuantity=int(row.get('ReceivedQuantity', 0)),
-                    UnitPrice=float(row.get('UnitPrice', product.UnitPrice)),
-                    TotalAmount=float(row.get('TotalAmount', 0)),
-                    Status=str(row.get('Status', 'Created')),
-                    WarehouseId=row.get('WarehouseId', None),
-                )
-
-                db.add(po)
-                rows_processed += 1
-
-            except Exception as e:
-                rows_skipped += 1
-                continue
-
-        log_upload(db, "BlinkitPO", "Blinkit", file.filename, len(contents), current_user.Id,
-                   total_rows=len(df), success_rows=rows_processed, error_rows=rows_skipped, status="Success")
-        log_audit(db, current_user.Id, "UPLOAD", "PurchaseOrders", None,
-                  new_values={"type": "BlinkitPO", "file": file.filename, "rows": rows_processed})
-        db.commit()
-
-        return {
-            "success": True,
-            "message": "Blinkit purchase orders uploaded successfully",
-            "data": {
-                "rows_processed": rows_processed,
-                "rows_skipped": rows_skipped,
-                "total_rows": len(df)
-            }
-        }
-
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
-
-
-@router.post("/blinkit/inventory")
-async def upload_blinkit_inventory(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Upload Blinkit Inventory Report CSV.
-    Real Blinkit format columns:
-    - created_at, backend_facility_name, backend_facility_id,
-      item_id, item_name, backend_inv_qty, frontend_inv_qty
-    - Multiple rows per item (one per warehouse/facility)
-    - Aggregates backend_inv_qty across all facilities per item
-    - item_id maps to Product.BlinkitId
-    Products auto-created if not found.
-    Admin and Manager only.
-    """
-    if current_user.Role not in ["Admin", "Manager"]:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    try:
-        contents = await file.read()
-        df = read_file(contents, file.filename)
-
-        # Normalize columns
-        col_map = {}
-        for col in df.columns:
-            cl = str(col).strip().lower().replace(' ', '_')
-            if cl in ('item_id', 'itemid'):
-                col_map[col] = 'item_id'
-            elif cl in ('item_name', 'itemname'):
-                col_map[col] = 'item_name'
-            elif cl in ('backend_inv_qty', 'backendinvqty', 'backend_qty'):
-                col_map[col] = 'backend_inv_qty'
-            elif cl in ('frontend_inv_qty', 'frontendinvqty', 'frontend_qty'):
-                col_map[col] = 'frontend_inv_qty'
-            elif 'facility_name' in cl or 'backend_facility' in cl:
-                col_map[col] = 'facility_name'
-        df = df.rename(columns=col_map)
-
-        # Auto-create Blinkit warehouses from facility names before aggregation
-        warehouses_created = []
-        if 'facility_name' in df.columns:
-            unique_facilities = df['facility_name'].dropna().unique()
-            for fac_name in unique_facilities:
-                fac_name_str = str(fac_name).strip()
-                if fac_name_str and fac_name_str != 'nan':
-                    wh_id, wh_created = find_or_create_warehouse(
-                        db, fac_name_str, channel="Blinkit",
-                        warehouse_type="Backend"
-                    )
-                    if wh_created:
-                        warehouses_created.append({"name": fac_name_str, "id": wh_id})
-
-        # Aggregate by item_id: sum backend_inv_qty across facilities
-        agg_df = df.groupby('item_id').agg({
-            'item_name': 'first',
-            'backend_inv_qty': 'sum',
-            'frontend_inv_qty': 'sum',
-        }).reset_index()
-
-        today = datetime.utcnow().date()
-        rows_created = 0
-        rows_updated = 0
-        rows_skipped = 0
-        products_created = 0
-        errors = []
-
-        for idx, row in agg_df.iterrows():
-            try:
-                item_id = str(row.get('item_id', '')).strip()
-                item_name = str(row.get('item_name', '')).strip()
-
-                if not item_id or item_id == 'nan':
-                    rows_skipped += 1
-                    continue
-
-                backend_qty = int(clean_numeric(row.get('backend_inv_qty', 0)))
-                # backend_inv_qty is total stock across all Blinkit warehouses
-                total_stock = backend_qty
-
-                product = find_or_create_product(
-                    db, blinkit_id=item_id,
-                    product_title=item_name if item_name != 'nan' else None
-                )
-                if product.Id is None:
-                    db.flush()
-                    products_created += 1
-
-                # Blinkit inventory lives in BlinkitInventory table (via blinkit_data.py).
-                # No longer write to generic Inventory table — that's for ASG stock only.
-                rows_created += 1
-
-            except Exception as e:
-                errors.append(f"Row {idx + 2}: {str(e)}")
-                rows_skipped += 1
-                continue
-
-        log_upload(db, "BlinkitInventory", "Blinkit", file.filename, len(contents), current_user.Id,
-                   total_rows=len(df), success_rows=rows_created + rows_updated, error_rows=rows_skipped, status="Success")
-        log_audit(db, current_user.Id, "UPLOAD", "BlinkitInventory", None,
-                  new_values={"type": "BlinkitInventory", "file": file.filename, "created": rows_created, "updated": rows_updated})
-        db.commit()
-
-        return {
-            "success": True,
-            "message": "Blinkit inventory data uploaded successfully",
-            "data": {
-                "rows_created": rows_created,
-                "rows_updated": rows_updated,
-                "rows_skipped": rows_skipped,
-                "products_created": products_created,
-                "warehouses_created": warehouses_created,
-                "total_rows": len(agg_df),
-                "errors": errors[:10]
-            }
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
-
-
 @router.post("/inventory/preview")
 async def preview_inventory_data(
     file: UploadFile = File(...),
+    inventory_date: Optional[str] = Query(None, description="Inventory date YYYY-MM-DD (defaults to today)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -942,6 +334,11 @@ async def preview_inventory_data(
                 column_mapping[col] = 'warehouse'
             elif col_lower == 'channel':
                 column_mapping[col] = 'channel'
+        column_warnings = check_column_warnings(
+            list(df.columns), column_mapping,
+            required_targets=['asg_sku', 'packed_qty'],
+            optional_targets=['unpacked_qty', 'warehouse'],
+        )
         df = df.rename(columns=column_mapping)
 
         if 'asg_sku' not in df.columns:
@@ -949,6 +346,15 @@ async def preview_inventory_data(
                 status_code=400,
                 detail="Missing required column: ASG SKU ID. Please ensure your file has a column for SKU identifiers."
             )
+
+        # Resolve inventory date (same logic as upload endpoint)
+        if inventory_date:
+            try:
+                today = datetime.strptime(inventory_date, '%Y-%m-%d').date()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid inventory_date. Use YYYY-MM-DD and upload again.")
+        else:
+            today = today_ist()
 
         rows = []
         valid_count = 0
@@ -994,6 +400,20 @@ async def preview_inventory_data(
                     else:
                         warehouse_status = 'new'
 
+            # Existing quantities for this product on the upload date (shown as what will be
+            # overwritten; None for a new date).
+            current_packed = None
+            current_unpacked = None
+            if product:
+                cur_row = db.execute(text(
+                    "SELECT PackedQty, UnpackedQty FROM Inventory "
+                    "WHERE ProductId = :pid AND InventoryDate = :inv_date "
+                    "ORDER BY LastUpdated DESC LIMIT 1"
+                ), {"pid": product.Id, "inv_date": today}).fetchone()
+                if cur_row:
+                    current_packed = int(cur_row[0] or 0)
+                    current_unpacked = int(cur_row[1] or 0)
+
             if not product:
                 status = 'sku_not_found'
                 reason = f"SKU '{asg_sku}' not found in product master — row will be skipped"
@@ -1014,6 +434,8 @@ async def preview_inventory_data(
                 'productName': product.ProductName if product else None,
                 'packedQty': packed_qty,
                 'unpackedQty': unpacked_qty,
+                'currentPackedQty': current_packed,
+                'currentUnpackedQty': current_unpacked,
                 'warehouse': warehouse_display,
                 'warehouseFound': warehouse_status != 'new',
                 'channel': channel_val or 'Both',
@@ -1025,6 +447,7 @@ async def preview_inventory_data(
             'valid': valid_count,
             'skuNotFound': sku_not_found_count,
             'rows': rows,
+            'columnWarnings': column_warnings,
         }
 
     except HTTPException:
@@ -1036,6 +459,7 @@ async def preview_inventory_data(
 @router.post("/inventory")
 async def upload_inventory_data(
     file: UploadFile = File(...),
+    inventory_date: Optional[str] = Query(None, description="Inventory date YYYY-MM-DD (defaults to today)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -1097,7 +521,14 @@ async def upload_inventory_data(
         rows_skipped = 0
         rows_updated = 0
         errors = []
-        today = datetime.utcnow().date()
+        # Use provided inventory_date or fall back to today
+        if inventory_date:
+            try:
+                today = datetime.strptime(inventory_date, '%Y-%m-%d').date()
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid inventory_date. Use YYYY-MM-DD and upload again.")
+        else:
+            today = today_ist()
         asg_warehouses_created = []
 
         for idx, row in df.iterrows():
@@ -1131,22 +562,28 @@ async def upload_inventory_data(
                     if asg_wh_created:
                         asg_warehouses_created.append({"name": wh_name, "id": asg_wh_id})
 
-                # Inventory table = ASG internal stock only.
-                # Upsert by ProductId + AsgWarehouseId + InventoryDate (date-wise snapshot)
+                # Inventory holds one snapshot row per product, warehouse and date: the same date is
+                # overwritten, any other date inserts a new row (history is kept).
                 if asg_wh_id is not None:
                     existing = db.execute(text(
-                        "SELECT Id FROM Inventory WHERE ProductId = :pid AND AsgWarehouseId = :wid AND InventoryDate = :today"
-                    ), {"pid": product.Id, "wid": asg_wh_id, "today": str(today)}).fetchone()
+                        "SELECT Id FROM Inventory "
+                        "WHERE ProductId = :pid AND AsgWarehouseId = :wid AND InventoryDate = :today"
+                    ), {"pid": product.Id, "wid": asg_wh_id, "today": today}).fetchone()
                 else:
                     existing = db.execute(text(
-                        "SELECT Id FROM Inventory WHERE ProductId = :pid AND AsgWarehouseId IS NULL AND InventoryDate = :today"
-                    ), {"pid": product.Id, "today": str(today)}).fetchone()
+                        "SELECT Id FROM Inventory "
+                        "WHERE ProductId = :pid AND AsgWarehouseId IS NULL AND InventoryDate = :today"
+                    ), {"pid": product.Id, "today": today}).fetchone()
 
                 if existing:
+                    # Same date already uploaded — overwrite quantities
                     db.execute(text(
-                        "UPDATE Inventory SET PackedQty = :packed, UnpackedQty = :unpacked, "
-                        "CurrentStock = :stock, AsgWarehouseId = :wid, "
-                        "LastInventoryDate = :today, LastUpdated = GETDATE() "
+                        "UPDATE Inventory SET "
+                        "PackedQty = :packed, "
+                        "UnpackedQty = :unpacked, "
+                        "CurrentStock = :stock, "
+                        "AsgWarehouseId = :wid, "
+                        "LastInventoryDate = :today, LastUpdated = NOW() "
                         "WHERE Id = :inv_id"
                     ), {
                         "packed": packed_qty,
@@ -1158,20 +595,66 @@ async def upload_inventory_data(
                     })
                     rows_updated += 1
                 else:
+                    # New date (today, past, or future) — insert a new date-wise row
                     db.execute(text(
                         "INSERT INTO Inventory "
                         "(ProductId, AsgWarehouseId, CurrentStock, PackedQty, UnpackedQty, "
                         "InventoryDate, LastInventoryDate, LastUpdated) "
-                        "VALUES (:pid, :wid, :stock, :packed, :unpacked, :today, :today, GETDATE())"
+                        "VALUES (:pid, :wid, :stock, :packed, :unpacked, :today, :today, NOW())"
                     ), {
                         "pid": product.Id,
                         "wid": asg_wh_id,
                         "stock": current_stock,
                         "packed": packed_qty,
                         "unpacked": unpacked_qty,
-                        "today": str(today),
+                        "today": today,
                     })
                     rows_processed += 1
+
+                # Upsert into InventoryHistory: one row per product+warehouse+date.
+                # Re-uploading the same date overwrites that date's row (last upload wins).
+                try:
+                    if asg_wh_id is not None:
+                        hist_row = db.execute(text(
+                            "SELECT Id FROM InventoryHistory "
+                            "WHERE ProductId = :pid AND AsgWarehouseId = :wid AND InventoryDate = :today"
+                        ), {"pid": product.Id, "wid": asg_wh_id, "today": today}).fetchone()
+                    else:
+                        hist_row = db.execute(text(
+                            "SELECT Id FROM InventoryHistory "
+                            "WHERE ProductId = :pid AND AsgWarehouseId IS NULL AND InventoryDate = :today"
+                        ), {"pid": product.Id, "today": today}).fetchone()
+
+                    if hist_row:
+                        db.execute(text(
+                            "UPDATE InventoryHistory SET "
+                            "PackedQty = :packed, UnpackedQty = :unpacked, CurrentStock = :stock, "
+                            "UploadedBy = :uid, CreatedAt = NOW() "
+                            "WHERE Id = :hid"
+                        ), {
+                            "packed": packed_qty,
+                            "unpacked": unpacked_qty,
+                            "stock": current_stock,
+                            "uid": current_user.Id,
+                            "hid": hist_row[0],
+                        })
+                    else:
+                        db.execute(text(
+                            "INSERT INTO InventoryHistory "
+                            "(ProductId, AsgWarehouseId, InventoryDate, PackedQty, UnpackedQty, "
+                            "CurrentStock, UploadedBy, CreatedAt) "
+                            "VALUES (:pid, :wid, :today, :packed, :unpacked, :stock, :uid, NOW())"
+                        ), {
+                            "pid": product.Id,
+                            "wid": asg_wh_id,
+                            "today": today,
+                            "packed": packed_qty,
+                            "unpacked": unpacked_qty,
+                            "stock": current_stock,
+                            "uid": current_user.Id,
+                        })
+                except Exception:
+                    pass  # History write failure should never block the main upload
 
             except ValueError as ve:
                 errors.append(f"Row {idx + 2}: Invalid numeric value - {str(ve)}")
@@ -1186,6 +669,9 @@ async def upload_inventory_data(
                    total_rows=len(df), success_rows=rows_processed + rows_updated, error_rows=rows_skipped, status="Success")
         log_audit(db, current_user.Id, "UPLOAD", "Inventory", None,
                   new_values={"type": "ASGInventory", "file": file.filename, "created": rows_processed, "updated": rows_updated})
+        notify(db, current_user.Id, "ASG Stock Uploaded",
+               f"{rows_processed} rows created, {rows_updated} updated from {file.filename}" + (f", {rows_skipped} skipped" if rows_skipped else ""),
+               "upload")
         db.commit()
 
         return {
@@ -1208,90 +694,3 @@ async def upload_inventory_data(
         raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
 
 
-@router.post("/stock")
-async def upload_stock_data(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Legacy endpoint - Use /inventory instead for Packed/Unpacked support.
-    Upload stock/inventory data from Excel/CSV file
-    Admin and Manager only
-    """
-    # Check permissions
-    if current_user.Role not in ["Admin", "Manager"]:
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    try:
-        contents = await file.read()
-
-        if file.filename.endswith('.xlsx') or file.filename.endswith('.xls'):
-            df = pd.read_excel(io.BytesIO(contents))
-        elif file.filename.endswith('.csv'):
-            df = pd.read_csv(io.BytesIO(contents))
-        else:
-            raise HTTPException(status_code=400, detail="File must be Excel or CSV")
-
-        rows_processed = 0
-        rows_skipped = 0
-        rows_updated = 0
-
-        for _, row in df.iterrows():
-            try:
-                # Find product
-                product = db.query(Product).filter(
-                    Product.AsgSku == str(row.get('SKU', ''))
-                ).first()
-
-                if not product:
-                    rows_skipped += 1
-                    continue
-
-                # Check if inventory record exists (ASG stock only)
-                inventory = db.query(Inventory).filter(
-                    Inventory.ProductId == product.Id,
-                ).first()
-
-                if inventory:
-                    # Update existing
-                    inventory.CurrentStock = int(row.get('CurrentStock', 0))
-                    inventory.LastUpdated = datetime.utcnow()
-                    rows_updated += 1
-                else:
-                    # Create new inventory record
-                    inventory = Inventory(
-                        ProductId=product.Id,
-                        WarehouseId=row.get('WarehouseId', None),
-                        CurrentStock=int(row.get('CurrentStock', 0)),
-                        PackedQty=0,
-                        UnpackedQty=0,
-                        LastUpdated=datetime.utcnow(),
-                    )
-                    db.add(inventory)
-                    rows_processed += 1
-
-            except Exception as e:
-                rows_skipped += 1
-                continue
-
-        log_upload(db, "Stock", None, file.filename, len(contents), current_user.Id,
-                   total_rows=len(df), success_rows=rows_processed + rows_updated, error_rows=rows_skipped, status="Success")
-        log_audit(db, current_user.Id, "UPLOAD", "Inventory", None,
-                  new_values={"type": "Stock", "file": file.filename, "created": rows_processed, "updated": rows_updated})
-        db.commit()
-
-        return {
-            "success": True,
-            "message": "Stock data uploaded successfully",
-            "data": {
-                "rows_created": rows_processed,
-                "rows_updated": rows_updated,
-                "rows_skipped": rows_skipped,
-                "total_rows": len(df)
-            }
-        }
-
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}")
